@@ -20,6 +20,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/exchange"
 	"github.com/Quantix/quantix/internal/indicator"
 	"github.com/Quantix/quantix/internal/position"
@@ -173,12 +174,19 @@ type AIStrategy struct {
 	shortPos *posState
 	syncer   *position.Syncer // Redis-backed, set at warmup from ctx.Extra
 	rdb      *redis.Client    // for signal caching
+	store    *data.Store       // for trade event logging
+	userID   int
+	engineID string
 
 	dayStart       time.Time
 	dayStartEquity float64
 	consecLoss     int
 	dayHalted      bool
 	cooldownUntil  int // bar index — no new entries until barCount >= this
+	stopBar        int // bar index when last stop-loss fired — skip opening same bar
+	lastMTFScore    int     // multi-timeframe score from latest signal check
+	mtfLongScale    float64 // position size multiplier for LONG (0.7-1.0)
+	mtfShortScale   float64 // position size multiplier for SHORT (0.7-1.0)
 }
 
 func New(cfg Config, log *zap.Logger) *AIStrategy {
@@ -229,6 +237,15 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				if rc, ok := v.(*redis.Client); ok {
 					s.rdb = rc
 				}
+			}
+			if v, ok := ctx.Extra["data_store"]; ok {
+				if st, ok := v.(*data.Store); ok { s.store = st }
+			}
+			if v, ok := ctx.Extra["user_id"]; ok {
+				if uid, ok := v.(int); ok { s.userID = uid }
+			}
+			if v, ok := ctx.Extra["engine_id"]; ok {
+				if eid, ok := v.(string); ok { s.engineID = eid }
 			}
 			s.recoverFromSyncer(bar.Close)
 			s.log.Info("AI warmed up",
@@ -285,10 +302,12 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
 	if s.shortPos != nil { s.managePos(ctx, bar, s.shortPos, &s.shortPos) }
 
-	// Skip GPT if we already have pending (unfilled) positions — save API cost
-	if (s.longPos != nil && !s.longPos.filled) || (s.shortPos != nil && !s.shortPos.filled) {
-		return
-	}
+	// Track if we have pending orders (for post-GPT cancel logic)
+	hasPendingLong := s.longPos != nil && !s.longPos.filled
+	hasPendingShort := s.shortPos != nil && !s.shortPos.filled
+
+	// Don't open new positions on the same bar as a stop-loss
+	if s.stopBar == s.barCount { return }
 
 	// GPT signal check (every N primary bars)
 	interval := s.cfg.CallIntervalBars
@@ -367,95 +386,152 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	)
 	if longConf >= s.cfg.ConfidenceThreshold { s.log.Info("  BUY reason: "+longReason) }
 	if shortConf >= s.cfg.ConfidenceThreshold { s.log.Info("  SELL reason: "+shortReason) }
+	s.logEvent("signal", action, "", price, 0, 0, math.Max(longConf, shortConf), 0,
+		fmt.Sprintf(`{"L":%.2f,"S":%.2f,"L_entry":%.2f,"S_entry":%.2f}`, longConf, shortConf, longEntry, shortEntry))
 
 	isRange := s.isRangeRegime(price)
-	maxDev := price * 0.005
-
-	// Rule-based boost: if price is near swing low/high, override GPT confidence
-	swLow := s.findSwingLow(10)
-	swHigh := s.findSwingHigh(10)
-	if price > 0 && swLow > 0 && (price-swLow)/price < 0.0015 && longConf < 0.82 {
-		s.log.Info("AI: boost long — price near swing low",
-			zap.Float64("price", price), zap.Float64("swing_low", swLow))
-		longConf = 0.82
-		if longEntry <= 0 { longEntry = swLow }
-	}
-	if price > 0 && swHigh > 0 && (swHigh-price)/price < 0.0015 && shortConf < 0.82 {
-		s.log.Info("AI: boost short — price near swing high",
-			zap.Float64("price", price), zap.Float64("swing_high", swHigh))
-		shortConf = 0.82
-		if shortEntry <= 0 { shortEntry = swHigh }
-	}
-
-	// Minimum entry offset: ensure limit orders get a better fill than market
-	minOffset := price * 0.0015 // 0.15% minimum from current price
 
 	// Minimum spread between long and short to avoid self-hedging
 	// Only open opposite direction if entries are at least 0.5% apart
 	minSpread := price * 0.0035 // ~$7 at ETH $2000
 
-	// Single-direction mode: only open the strongest signal, not both
-	if !s.cfg.HedgeMode {
-		if longConf >= s.cfg.ConfidenceThreshold && shortConf >= s.cfg.ConfidenceThreshold {
-			// Both qualify — pick the stronger one
-			if longConf >= shortConf {
-				shortConf = 0 // suppress short
-			} else {
-				longConf = 0 // suppress long
-			}
-		}
-		// Also don't open opposite direction if already have a position
-		if s.longPos != nil && shortConf >= s.cfg.ConfidenceThreshold {
-			shortConf = 0 // already long, don't open short
-		}
-		if s.shortPos != nil && longConf >= s.cfg.ConfidenceThreshold {
-			longConf = 0 // already short, don't open long
-		}
-	}
+	// ── Multi-timeframe scoring (must run before single-direction check and boost) (replaces hard block) ──
+	// Score: positive = bullish, negative = bearish. Range -4 to +4.
+	mtfScore := 0
 
-	// ── Trend protection: use 15m bars for trend, 5m for momentum ──
+	// 15m trend score (±2)
 	bars15 := s.barsForInterval("15m")
-	closes5m := s.getCloses()
-	if len(bars15) >= 20 {
+	if len(bars15) >= 8 {
 		c15 := make([]float64, len(bars15))
 		for i, b := range bars15 { c15[i] = b.Close }
-		ret15_20 := (c15[len(c15)-1] - c15[len(c15)-20]) / c15[len(c15)-20] // 15m × 20 = 5 hours
-		ret5m_6 := 0.0
-		if len(closes5m) >= 6 {
-			ret5m_6 = (closes5m[len(closes5m)-1] - closes5m[len(closes5m)-6]) / closes5m[len(closes5m)-6] // 5m × 6 = 30 min
-		}
-
-		// Downtrend on 15m: block long UNLESS 5m is rebounding
-		if ret15_20 < -0.02 && ret5m_6 < 0.005 && longConf > 0 {
-			s.log.Info("AI: BUY blocked — 15m downtrend",
-				zap.Float64("15m_5h", ret15_20*100), zap.Float64("5m_30m", ret5m_6*100))
-			longConf = 0
-		}
-		// Uptrend on 15m: block short UNLESS 5m is pulling back
-		if ret15_20 > 0.02 && ret5m_6 > -0.005 && shortConf > 0 {
-			s.log.Info("AI: SELL blocked — 15m uptrend",
-				zap.Float64("15m_5h", ret15_20*100), zap.Float64("5m_30m", ret5m_6*100))
-			shortConf = 0
-		}
+		ret15 := (c15[len(c15)-1] - c15[len(c15)-8]) / c15[len(c15)-8]
+		if ret15 > 0.01 { mtfScore += 2 } else if ret15 > 0.002 { mtfScore += 1 }
+		if ret15 < -0.01 { mtfScore -= 2 } else if ret15 < -0.002 { mtfScore -= 1 }
+		// -0.2% ~ +0.2% = neutral (0 score)
 	}
 
-	// ── Open LONG if confident ──
-	if longConf >= s.cfg.ConfidenceThreshold && s.longPos == nil {
-		// Don't open long if short exists (filled or pending) and too close
-		if s.shortPos != nil {
-			if math.Abs(s.shortPos.entryPrice-price) < minSpread {
+	// 5m momentum score (±1): MACD OR RSI, either is enough
+	closes5m := s.getCloses()
+	if len(closes5m) >= 14 {
+		rsi5m := indicator.Last(indicator.RSI(closes5m, 14))
+		macd5m := indicator.MACD(closes5m, 12, 26, 9)
+		macdHist5m := indicator.Last(macd5m.Histogram)
+		if macdHist5m > 0 || rsi5m > 60 { mtfScore++ }
+		if macdHist5m < 0 || rsi5m < 40 { mtfScore-- }
+	}
+
+	// 1m short-term score (±1): net change over last 3 bars
+	bars1m := s.barsForInterval("1m")
+	if len(bars1m) >= 3 {
+		last3 := bars1m[len(bars1m)-3:]
+		netChange := (last3[2].Close - last3[0].Close) / last3[0].Close
+		if netChange > 0.001 { mtfScore++ }   // > +0.1%
+		if netChange < -0.001 { mtfScore-- }  // < -0.1%
+	}
+
+	s.lastMTFScore = mtfScore
+	s.log.Info("AI: MTF score", zap.Int("score", mtfScore))
+
+	// Apply score: only block on extreme disagreement (±3/±4).
+	// Otherwise adjust position size via mtfQtyScale.
+	longQtyScale, shortQtyScale := 1.0, 1.0
+
+	// For LONG: negative score = headwind
+	switch {
+	case mtfScore <= -3:
+		if longConf > 0 {
+			s.log.Info("AI: BUY blocked — MTF strongly bearish", zap.Int("score", mtfScore))
+			longConf = 0
+		}
+	case mtfScore == -2:
+		longQtyScale = 0.70
+	case mtfScore == -1:
+		longQtyScale = 0.85
+	}
+
+	// For SHORT: positive score = headwind
+	switch {
+	case mtfScore >= 3:
+		if shortConf > 0 {
+			s.log.Info("AI: SELL blocked — MTF strongly bullish", zap.Int("score", mtfScore))
+			shortConf = 0
+		}
+	case mtfScore == 2:
+		shortQtyScale = 0.70
+	case mtfScore == 1:
+		shortQtyScale = 0.85
+	}
+
+	s.mtfLongScale = longQtyScale
+	s.mtfShortScale = shortQtyScale
+
+	// ── Rule-based boost (after MTF scoring, respects MTF direction) ──
+	swLow := s.findSwingLow(10)
+	swHigh := s.findSwingHigh(10)
+	if price > 0 && swLow > 0 && (price-swLow)/price < 0.0015 && longConf < 0.82 && s.longPos == nil && mtfScore >= -1 {
+		s.log.Info("AI: boost long — price near swing low",
+			zap.Float64("price", price), zap.Float64("swing_low", swLow), zap.Int("mtf", mtfScore))
+		longConf = 0.82
+		if longEntry <= 0 { longEntry = swLow }
+	}
+	if price > 0 && swHigh > 0 && (swHigh-price)/price < 0.0015 && shortConf < 0.82 && s.shortPos == nil && mtfScore <= 1 {
+		s.log.Info("AI: boost short — price near swing high",
+			zap.Float64("price", price), zap.Float64("swing_high", swHigh), zap.Int("mtf", mtfScore))
+		shortConf = 0.82
+		if shortEntry <= 0 { shortEntry = swHigh }
+	}
+
+	// ── Cancel pending orders if GPT signal reversed ──
+	if hasPendingLong && shortConf >= 0.72 {
+		s.log.Info("AI: cancelling pending LONG — signal reversed to SHORT")
+		if s.longPos.orderID != "" { ctx.CancelOrder(s.longPos.orderID) }
+		s.longPos = nil
+	}
+	if hasPendingShort && longConf >= 0.72 {
+		s.log.Info("AI: cancelling pending SHORT — signal reversed to LONG")
+		if s.shortPos.orderID != "" { ctx.CancelOrder(s.shortPos.orderID) }
+		s.shortPos = nil
+	}
+
+	// ── Single-direction mode: only open the strongest signal (after MTF + boost) ──
+	if !s.cfg.HedgeMode {
+		if longConf >= s.cfg.ConfidenceThreshold && shortConf >= s.cfg.ConfidenceThreshold {
+			if longConf >= shortConf {
+				shortConf = 0
+			} else {
 				longConf = 0
 			}
 		}
+		if s.longPos != nil && shortConf >= s.cfg.ConfidenceThreshold {
+			shortConf = 0
+		}
+		if s.shortPos != nil && longConf >= s.cfg.ConfidenceThreshold {
+			longConf = 0
+		}
+	}
+
+	// Entry: pick the better of GPT price vs 0.10% offset
+	// LONG: lower is better; SHORT: higher is better
+	entryOffset := price * 0.0013
+	maxDev := price * 0.005 // cap GPT entry within 0.5% of current price
+
+	// ── Open LONG if confident ──
+	if longConf >= s.cfg.ConfidenceThreshold && s.longPos == nil {
+		if s.shortPos != nil {
+			if math.Abs(s.shortPos.entryPrice-price) < minSpread { longConf = 0 }
+		}
 		if longConf > 0 {
-			entry := longEntry
-			// High confidence (≥0.90) → market order at current price for guaranteed fill
+			var entry float64
 			if longConf >= 0.90 {
+				// Very high confidence → market order at current price
 				entry = price
 				s.log.Info("AI: high confidence → market entry", zap.String("side", "LONG"), zap.Float64("conf", longConf))
 			} else {
-				if entry <= 0 || entry > price-minOffset { entry = price - minOffset }
-				if (price - entry) > maxDev { entry = price - minOffset }
+				offsetEntry := price - entryOffset
+				entry = offsetEntry
+				if longEntry > 0 && longEntry < entry && (price-longEntry) <= maxDev {
+					entry = longEntry
+				}
 			}
 			entry = math.Round(entry*100) / 100
 			if isRange {
@@ -463,32 +539,39 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			} else {
 				s.openTrend(ctx, "LONG", price, entry, atr)
 			}
+			// GPT entry as grid add-on if significantly better than actual entry
+			if s.longPos != nil && s.longPos.filled && longEntry > 0 && longEntry < entry && (entry-longEntry)/entry > 0.002 {
+				s.addGPTGrid(s.longPos, "LONG", longEntry)
+			}
 		}
 	}
 
 	// ── Open SHORT if confident ──
 	if shortConf >= s.cfg.ConfidenceThreshold && s.cfg.EnableShort && s.shortPos == nil {
-		// Don't open short if long exists (filled or pending) and too close
 		if s.longPos != nil {
-			if math.Abs(s.longPos.entryPrice-price) < minSpread {
-				shortConf = 0
-			}
+			if math.Abs(s.longPos.entryPrice-price) < minSpread { shortConf = 0 }
 		}
 		if shortConf > 0 {
-			entry := shortEntry
-			// High confidence (≥0.90) → market order at current price for guaranteed fill
+			var entry float64
 			if shortConf >= 0.90 {
 				entry = price
 				s.log.Info("AI: high confidence → market entry", zap.String("side", "SHORT"), zap.Float64("conf", shortConf))
 			} else {
-				if entry <= 0 || entry < price+minOffset { entry = price + minOffset }
-				if (entry - price) > maxDev { entry = price + minOffset }
+				offsetEntry := price + entryOffset
+				entry = offsetEntry
+				if shortEntry > 0 && shortEntry > entry && (shortEntry-price) <= maxDev {
+					entry = shortEntry
+				}
 			}
 			entry = math.Round(entry*100) / 100
 			if isRange {
 				s.openRange(ctx, "SHORT", price, entry, atr)
 			} else {
 				s.openTrend(ctx, "SHORT", price, entry, atr)
+			}
+			// GPT entry as grid add-on if significantly better than actual entry
+			if s.shortPos != nil && s.shortPos.filled && shortEntry > 0 && shortEntry > entry && (shortEntry-entry)/entry > 0.002 {
+				s.addGPTGrid(s.shortPos, "SHORT", shortEntry)
 			}
 		}
 	}
@@ -569,6 +652,30 @@ func (s *AIStrategy) effectiveRisk(side string) float64 {
 	return s.cfg.RiskPerTrade * 2 // single direction: double risk (4%)
 }
 
+// addGPTGrid adds the GPT-suggested support/resistance price as a grid order for future fill.
+func (s *AIStrategy) addGPTGrid(pos *posState, side string, gptEntry float64) {
+	gridQty := math.Floor(pos.initQty*s.cfg.GridQtyRatio*1000) / 1000
+	if gridQty <= 0 { return }
+	// Cap: total qty must not exceed 2x initial
+	if pos.remainQty+gridQty > pos.initQty*2 { return }
+
+	var gridTP float64
+	if side == "LONG" {
+		gridTP = math.Round((gptEntry+gptEntry*s.cfg.GridTPPct)*100) / 100
+	} else {
+		gridTP = math.Round((gptEntry-gptEntry*s.cfg.GridTPPct)*100) / 100
+	}
+
+	g := &gridOrder{
+		entryPrice: gptEntry, qty: gridQty, tp: gridTP,
+		filled: false, limitBar: s.barCount,
+	}
+	pos.gridOrders = append(pos.gridOrders, g)
+	s.log.Info("AI: GPT entry as grid add-on",
+		zap.String("side", side), zap.Float64("gpt_entry", gptEntry),
+		zap.Float64("grid_qty", gridQty), zap.Float64("grid_tp", gridTP))
+}
+
 // ─── Open Position ───────────────────────────────────────────────────────────
 
 func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice, entryPrice, atr float64) {
@@ -607,6 +714,8 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 	}
 	risk := s.effectiveRisk(side)
 	qty := math.Floor(equity*risk/slDist*1000) / 1000
+	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
+	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
 	if qty <= 0 { return }
 
 	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
@@ -628,6 +737,8 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 		zap.String("side", side), zap.Float64("entry", entryPrice),
 		zap.Float64("tp", takeProfit), zap.Float64("sl", stopLoss),
 		zap.Float64("qty", qty))
+	s.logEvent("open", side, "range", currentPrice, entryPrice, qty, 0, 0,
+		fmt.Sprintf(`{"tp":%.2f,"sl":%.2f}`, takeProfit, stopLoss))
 	s.syncToRedis(pos)
 }
 
@@ -654,6 +765,8 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	}
 	risk := s.effectiveRisk(side)
 	qty := math.Floor(equity*risk/R*1000) / 1000
+	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
+	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
 	if qty <= 0 { return }
 
 	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
@@ -673,6 +786,8 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	s.log.Info("AI: OPEN TREND",
 		zap.String("side", side), zap.Float64("entry", entryPrice),
 		zap.Float64("sl", stopLoss), zap.Float64("R", R), zap.Float64("qty", qty))
+	s.logEvent("open", side, "trend", currentPrice, entryPrice, qty, 0, 0,
+		fmt.Sprintf(`{"sl":%.2f,"R":%.2f}`, stopLoss, R))
 	s.syncToRedis(pos)
 }
 
@@ -749,6 +864,7 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
 		s.closePos(ctx, p, pptr, "stop_loss")
 		s.consecLoss++
+		s.stopBar = s.barCount
 		s.log.Info("AI: stop-loss hit")
 		return
 	}
@@ -821,6 +937,55 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 		return
 	}
 
+	// ── Range trailing: protect profits ──
+	rangePnlPct := 0.0
+	if p.side == "LONG" { rangePnlPct = (price - p.entryPrice) / p.entryPrice }
+	if p.side == "SHORT" { rangePnlPct = (p.entryPrice - price) / p.entryPrice }
+
+	// +0.3%: move SL to breakeven
+	if rangePnlPct >= 0.003 && p.side == "LONG" && p.stopLoss < p.entryPrice {
+		p.stopLoss = p.entryPrice + p.entryPrice*0.001
+		s.log.Info("AI: Range +0.3% → SL to breakeven", zap.Float64("sl", p.stopLoss))
+	}
+	if rangePnlPct >= 0.003 && p.side == "SHORT" && p.stopLoss > p.entryPrice {
+		p.stopLoss = p.entryPrice - p.entryPrice*0.001
+		s.log.Info("AI: Range +0.3% → SL to breakeven", zap.Float64("sl", p.stopLoss))
+	}
+	// +0.6%: lock in +0.3% profit
+	if rangePnlPct >= 0.006 {
+		lockPrice := 0.0
+		if p.side == "LONG" {
+			lockPrice = p.entryPrice + p.entryPrice*0.003
+			if p.stopLoss < lockPrice { p.stopLoss = lockPrice }
+		} else {
+			lockPrice = p.entryPrice - p.entryPrice*0.003
+			if p.stopLoss > lockPrice { p.stopLoss = lockPrice }
+		}
+	}
+	// +0.8%: trailing 0.3% from peak
+	if rangePnlPct >= 0.008 {
+		trailDist := p.peakPrice * 0.003
+		if p.side == "LONG" {
+			nt := p.peakPrice - trailDist
+			if nt > p.stopLoss { p.stopLoss = nt }
+			if price <= p.stopLoss {
+				s.log.Info("RANGE TRAILING", zap.Float64("price", price), zap.Float64("sl", p.stopLoss))
+				s.closePos(ctx, p, pptr, "range_trailing")
+				s.consecLoss = 0
+				return
+			}
+		} else {
+			nt := p.peakPrice + trailDist
+			if nt < p.stopLoss { p.stopLoss = nt }
+			if price >= p.stopLoss {
+				s.log.Info("RANGE TRAILING", zap.Float64("price", price), zap.Float64("sl", p.stopLoss))
+				s.closePos(ctx, p, pptr, "range_trailing")
+				s.consecLoss = 0
+				return
+			}
+		}
+	}
+
 	// ── Smart timeout (time-based, independent of bar interval) ──
 	pnlPct := 0.0
 	if p.side == "LONG" { pnlPct = (price - p.entryPrice) / p.entryPrice }
@@ -829,8 +994,23 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 	held := time.Since(p.filledAt)
 	if p.filledAt.IsZero() { held = 0 }
 
-	// Floating profit > 0.5% → skip timeout, let it run
+	// Floating profit > 0.5% → skip normal timeout but add protection
 	if pnlPct > 0.005 {
+		// Move SL to breakeven if not already
+		if p.side == "LONG" && p.stopLoss < p.entryPrice {
+			p.stopLoss = p.entryPrice + p.entryPrice*0.001
+		}
+		if p.side == "SHORT" && p.stopLoss > p.entryPrice {
+			p.stopLoss = p.entryPrice - p.entryPrice*0.001
+		}
+		// Extended timeout: 60min even with profit (prevent stale positions)
+		if held >= 60*time.Minute {
+			s.log.Info("RANGE TIMEOUT (profitable but stale)", zap.String("side", p.side),
+				zap.Float64("pnl_pct", pnlPct*100), zap.Duration("held", held))
+			s.closePos(ctx, p, pptr, "timeout_profit")
+			s.consecLoss = 0
+			return
+		}
 		return
 	}
 	// Floating loss → early timeout at 20min
@@ -921,9 +1101,12 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 
 	if !shouldAdd { return }
 
-	// Check total margin won't exceed 60% equity
+	// Check total position won't exceed safe limits
 	gridQty := math.Floor(p.initQty*s.cfg.GridQtyRatio*1000) / 1000
 	if gridQty <= 0 { return }
+	// Cap: total position (base + grids) must not exceed 2x initial qty
+	totalQty := p.remainQty + gridQty
+	if totalQty > p.initQty*2 { return }
 
 	// Place grid order as market (price already at the level)
 	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, false)
@@ -1089,9 +1272,11 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 		zap.Float64("reverse_conf", reverseConf),
 		zap.String("reasoning", reverseReason))
 
-	if reverseConf >= 0.82 {
+	// Reversal threshold lower than entry (0.72 vs 0.82) — exit faster when direction changes
+	if reverseConf >= 0.72 {
 		s.log.Info("AI: reversal → close "+p.side, zap.Float64("conf", reverseConf))
 		s.closePos(ctx, p, pptr, "gpt_reversal")
+		s.stopBar = s.barCount // prevent immediate re-entry on same bar
 	}
 }
 
@@ -1115,8 +1300,16 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 	// Only TP and timeout use limit for lower fees
 	useMarket := reason == "stop_loss" || reason == "gpt_reversal" || reason == "trailing" || reason == "timeout_loss"
 	s.placeCloseOrder(ctx, p.side, qty, useMarket)
+	bars := s.primaryBars()
+	closePrice := 0.0
+	if len(bars) > 0 { closePrice = bars[len(bars)-1].Close }
+	pnl := 0.0
+	if p.side == "LONG" { pnl = (closePrice - p.entryPrice) * qty }
+	if p.side == "SHORT" { pnl = (p.entryPrice - closePrice) * qty }
 	s.log.Info("AI: CLOSE", zap.String("side", p.side), zap.String("reason", reason),
-		zap.Float64("entry", p.entryPrice), zap.Float64("qty", qty), zap.Bool("market", useMarket))
+		zap.Float64("entry", p.entryPrice), zap.Float64("qty", qty), zap.Bool("market", useMarket),
+		zap.Float64("est_pnl", pnl))
+	s.logEvent("close", p.side, reason, closePrice, p.entryPrice, qty, 0, pnl, "")
 	s.syncRemove(p.side)
 	*pptr = nil
 }
@@ -1204,9 +1397,9 @@ RESPONSE (strict JSON):
 {"long":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."},"short":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."}}
 
 MULTI-TIMEFRAME RULES:
-1. CHECK indicators_15m FIRST for trend direction:
-   - 15m return_20bar > +1%: UPTREND → favor long (0.80+), short < 0.30
-   - 15m return_20bar < -1%: DOWNTREND → favor short (0.80+), long < 0.30
+1. CHECK indicators_15m FIRST for trend direction (2-hour window):
+   - 15m return_8bar > +1%: UPTREND → favor long (0.80+), short < 0.30
+   - 15m return_8bar < -1%: DOWNTREND → favor short (0.80+), long < 0.30
    - 15m between -1% and +1%: RANGE → both sides OK (0.65-0.85)
 2. USE 5m indicators for precise timing:
    - long entry_price: nearest SUPPORT (swing_low_10, bb_lower, ema20), below current price
@@ -1282,17 +1475,17 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 		ema50_15 := 0.0
 		if len(closes15) >= 50 { ema50_15 = indicator.Last(indicator.EMA(closes15, 50)) }
 		macd15 := indicator.MACD(closes15, 12, 26, 9)
-		ret20 := 0.0
-		if len(closes15) >= 20 { ret20 = (closes15[len(closes15)-1] - closes15[len(closes15)-20]) / closes15[len(closes15)-20] * 100 }
+		ret8 := 0.0
+		if len(closes15) >= 8 { ret8 = (closes15[len(closes15)-1] - closes15[len(closes15)-8]) / closes15[len(closes15)-8] * 100 }
 		trend := "range"
-		if ret20 > 1.0 { trend = "uptrend" } else if ret20 < -1.0 { trend = "downtrend" }
+		if ret8 > 1.0 { trend = "uptrend" } else if ret8 < -1.0 { trend = "downtrend" }
 		_ = trend
 		ind15 = map[string]float64{
 			"rsi":       r2(rsi15),
 			"ema20":     r2(ema20_15),
 			"ema50":     r2(ema50_15),
 			"macd_hist": r2(indicator.Last(macd15.Histogram)),
-			"return_20bar": r3(ret20),
+			"return_8bar": r3(ret8),
 		}
 	}
 
@@ -1374,7 +1567,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			initQty: lp.InitQty, remainQty: lp.Qty,
 			R: lp.R, stopLoss: sl, takeProfit: tp,
 			trailing: lp.Trailing, peakPrice: lp.PeakPrice,
-			tp1RHit: lp.TP1Hit, barsHeld: max(lp.BarsHeld, 10), filled: true, filledAt: time.Now(),
+			tp1RHit: lp.TP1Hit, tp2Hit: lp.TP2Hit, barsHeld: max(lp.BarsHeld, 10), filled: true, filledAt: time.Now(),
 		}
 		if s.longPos.initQty == 0 { s.longPos.initQty = lp.Qty }
 		if s.longPos.R == 0 { s.longPos.R = math.Abs(entry - sl) }
@@ -1407,7 +1600,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			initQty: sp.InitQty, remainQty: sp.Qty,
 			R: sp.R, stopLoss: sl, takeProfit: tp,
 			trailing: sp.Trailing, peakPrice: sp.PeakPrice,
-			tp1RHit: sp.TP1Hit, barsHeld: max(sp.BarsHeld, 10), filled: true, filledAt: time.Now(),
+			tp1RHit: sp.TP1Hit, tp2Hit: sp.TP2Hit, barsHeld: max(sp.BarsHeld, 10), filled: true, filledAt: time.Now(),
 		}
 		if s.shortPos.initQty == 0 { s.shortPos.initQty = sp.Qty }
 		if s.shortPos.R == 0 { s.shortPos.R = math.Abs(entry - sl) }
@@ -1437,7 +1630,7 @@ func (s *AIStrategy) syncToRedis(pos *posState) {
 		Mode: modeStr, StopLoss: pos.stopLoss, TakeProfit: pos.takeProfit,
 		Trailing: pos.trailing, PeakPrice: pos.peakPrice,
 		R: pos.R, InitQty: pos.initQty,
-		TP1Hit: pos.tp1RHit, BarsHeld: pos.barsHeld,
+		TP1Hit: pos.tp1RHit, TP2Hit: pos.tp2Hit, BarsHeld: pos.barsHeld,
 		OrderID: pos.orderID, Filled: pos.filled,
 	}
 	s.syncer.UpdatePosition(context.Background(), sp)
@@ -1466,11 +1659,12 @@ func (s *AIStrategy) findSwingHigh(n int) float64 {
 func (s *AIStrategy) cacheSignal(bar exchange.Kline, sig gptSignal) {
 	if s.rdb == nil { return }
 	entry := map[string]any{
-		"time":    bar.CloseTime.Unix(),
-		"bar":     s.barCount,
-		"price":   r2(bar.Close),
-		"atr":     r2(s.calcATR()),
-		"interval": s.cfg.PrimaryInterval,
+		"time":      bar.CloseTime.Unix(),
+		"bar":       s.barCount,
+		"price":     r2(bar.Close),
+		"atr":       r2(s.calcATR()),
+		"interval":  s.cfg.PrimaryInterval,
+		"mtf_score": s.lastMTFScore,
 	}
 	if sig.Long != nil {
 		entry["long_conf"] = sig.Long.Confidence
@@ -1500,3 +1694,18 @@ func r2(v float64) float64 { return math.Round(v*100) / 100 }
 func r3(v float64) float64 { return math.Round(v*1000) / 1000 }
 func toFloat(v any) float64 { switch n := v.(type) { case float64: return n; case int: return float64(n); case int64: return float64(n) }; return 0 }
 func toInt(v any) int { switch n := v.(type) { case float64: return int(n); case int: return n; case int64: return int(n) }; return 0 }
+
+// logEvent writes a trade event to DB for persistent analysis.
+func (s *AIStrategy) logEvent(eventType, side, reason string, price, entryPrice, qty, confidence, pnl float64, details string) {
+	if s.store == nil { return }
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.store.InsertTradeEvent(ctx, data.TradeEvent{
+			UserID: s.userID, EngineID: s.engineID, Symbol: s.cfg.Symbol,
+			EventType: eventType, Side: side, Price: price, EntryPrice: entryPrice,
+			Qty: qty, Confidence: confidence, MTFScore: s.lastMTFScore,
+			PnL: pnl, Reason: reason, Details: details,
+		})
+	}()
+}

@@ -211,3 +211,30 @@ func (s *Store) GetLatestKlines(ctx context.Context, symbol, interval string, li
 	}
 	return klines, rows.Err()
 }
+
+// TradeEvent represents a logged trading event for analysis.
+type TradeEvent struct {
+	UserID     int
+	EngineID   string
+	Symbol     string
+	EventType  string  // signal, open, close, mtf_score, reversal, grid
+	Side       string
+	Price      float64
+	EntryPrice float64
+	Qty        float64
+	Confidence float64
+	MTFScore   int
+	PnL        float64
+	Reason     string
+	Details    string // JSON
+}
+
+// InsertTradeEvent logs a trade event to the database.
+func (s *Store) InsertTradeEvent(ctx context.Context, e TradeEvent) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO trade_events (user_id, engine_id, symbol, event_type, side, price, entry_price, qty, confidence, mtf_score, pnl, reason, details)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		e.UserID, e.EngineID, e.Symbol, e.EventType, e.Side, e.Price, e.EntryPrice, e.Qty, e.Confidence, e.MTFScore, e.PnL, e.Reason, e.Details,
+	)
+	return err
+}

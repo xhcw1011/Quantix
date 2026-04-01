@@ -1,0 +1,704 @@
+[
+  {
+    "bar": 1,
+    "price": 2111.62,
+    "atr": 4.91,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2104.36,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +0.411% with EMA20 above EMA50 and positive MACD, so upside is favored. On 5m, price is extended near the upper Bollinger band with RSI 69.6, but the nearest support for timing is EMA20 at 2104.36, which is within 0.5% of current price and aligns with the intraday uptrend. Strong trend + acceptable pullback entry supports a high-confidence long."
+  },
+  {
+    "bar": 2,
+    "price": 2110.39,
+    "atr": 4.88,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2109.22,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +0.411% with EMA20 above EMA50, positive MACD histogram, and RSI 61.2. On 5m, price is holding above EMA20/EMA50 and recent bars show an uptrend with a pullback from the 2115.71 swing high. Best long timing is near support at the nearest confluence below price: swing_low_10/EMA20 area around 2109.2, which is within 0.5% of current price and offers a favorable trend-aligned entry."
+  },
+  {
+    "bar": 3,
+    "price": 2110.39,
+    "atr": 4.84,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2105.45,
+    "reasoning": "15m is clear uptrend: return_20bar is strongly positive (+0.411), EMA20 > EMA50, MACD histogram positive, and RSI is supportive. On 5m, price is above EMA20/EMA50 with bullish momentum, but it is extended near the upper Bollinger band and just below resistance at swing_high_10 2115.71. Best long timing is a pullback toward EMA20/support around 2105.45, which is within 0.5% of current price and offers a cleaner entry in trend direction."
+  },
+  {
+    "bar": 4,
+    "price": 2105.99,
+    "atr": 4.86,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2104.32,
+    "reasoning": "15m is clearly bullish: return_20bar is strongly positive, EMA20>EMA50, MACD histogram positive, and RSI is supportive. On 5m, price is pulling back into support with swing_low_10 at 2104.32 and EMA20 near 2105.5, both just below current price and within the required proximity. This is a favorable trend-aligned long setup with good timing."
+  },
+  {
+    "bar": 5,
+    "price": 2109,
+    "atr": 4.86,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2105.84,
+    "reasoning": "15m is clearly bullish: ema20>ema50, MACD positive, RSI 61.4, and return_20bar is strongly above +1%, so trend favors longs. On 5m, price pulled back into the ema20 area and near swing_low_10 (2105.27), giving a clean support-based entry close to current price and within the 0.5% rule. Momentum is slightly mixed on 5m (MACD hist mildly negative), but the higher-timeframe trend remains dominant, so long is the preferred setup."
+  },
+  {
+    "bar": 6,
+    "price": 2109,
+    "atr": 4.84,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2106.14,
+    "reasoning": "15m is clearly bullish: return_20bar +47.4%, EMA20 above EMA50, MACD positive, RSI 61.4. On 5m, price is pulling back toward support/mean reversion with EMA20 at 2106.14, swing_low_10 at 2105.27, and BB lower at 2098.52. Current price 2109 is within 0.5% of this support zone, so long timing is favorable on the dip."
+  },
+  {
+    "bar": 7,
+    "price": 2112.84,
+    "atr": 4.81,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2106.78,
+    "reasoning": "15m is clearly bullish: return_20bar is +0.474% with EMA20 above EMA50 and positive MACD histogram, so trend favors longs. On 5m, price pulled back and is holding above EMA20 (2106.78) after testing the 2105.27 swing low, while RSI is supportive at 65.46. Best long timing is near EMA20/support, within 0.5% of current price."
+  },
+  {
+    "bar": 8,
+    "price": 2112.84,
+    "atr": 4.88,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2107.35,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +0.474% with EMA20 above EMA50 and positive MACD, so upside is favored. On 5m, price is above EMA20/EMA50 with RSI 65 and positive MACD, but it is near short-term resistance (bb_upper 2115.33 / swing_high_10 2115.71). Best long timing is a pullback toward EMA20/support around 2107.35, which is within 0.5% of current price and aligns with support."
+  },
+  {
+    "bar": 10,
+    "price": 2118.01,
+    "atr": 5.06,
+    "action": "SELL",
+    "confidence": 0.58,
+    "entry_price": 2121.42,
+    "reasoning": "15m is not in a strong downtrend, but it is slightly negative, so short is acceptable though not high-conviction. On 5m, price is at the upper Bollinger band with RSI 71.9 and strong recent expansion, suggesting possible mean reversion. Nearest resistance is the 10-bar swing high at 2121.42, which is within 0.5% of current price and suitable for timing a short if price tags resistance."
+  },
+  {
+    "bar": 11,
+    "price": 2121.77,
+    "atr": 5.12,
+    "action": "SELL",
+    "confidence": 0.72,
+    "entry_price": 2123.9,
+    "reasoning": "15m is range-to-slightly-down, which allows shorts if 5m shows exhaustion. On 5m, price is stretched above BB upper and EMA20 with RSI 75.71, suggesting overbought conditions after a strong push. Nearest resistance is swing_high_10 at 2123.9, which is within 0.5% of current price, making it a reasonable short timing level if rejection appears."
+  },
+  {
+    "bar": 12,
+    "price": 2121.77,
+    "atr": 5.19,
+    "action": "SELL",
+    "confidence": 0.58,
+    "entry_price": 2123.9,
+    "reasoning": "15m is not a strong downtrend, but it is mildly negative, so short is acceptable in a range/weak-down context. On 5m, price is stretched above BB upper with RSI 75.72 and has just tagged the swing_high_10 at 2123.9, making this the nearest resistance for timing. Momentum is strong, so short is only moderate confidence and should be treated as a fade rather than a trend trade."
+  },
+  {
+    "bar": 13,
+    "price": 2126.54,
+    "atr": 5.17,
+    "action": "HOLD",
+    "confidence": 0,
+    "entry_price": 0,
+    "reasoning": ""
+  },
+  {
+    "bar": 14,
+    "price": 2126.54,
+    "atr": 5.32,
+    "action": "SELL",
+    "confidence": 0.58,
+    "entry_price": 2135.6,
+    "reasoning": "15m is range-to-slightly bearish, so shorts are acceptable but not dominant. On 5m, price is extended above BB upper with RSI 79.76, suggesting exhaustion and mean reversion risk. Best short trigger is near resistance at swing_high_10 2135.6, which is within 0.5% above current price and aligns with a likely rejection zone. However, strong 5m momentum and MACD/EMA alignment reduce confidence from high to moderate."
+  },
+  {
+    "bar": 15,
+    "price": 2128.77,
+    "atr": 5.28,
+    "action": "HOLD",
+    "confidence": 0,
+    "entry_price": 0,
+    "reasoning": ""
+  },
+  {
+    "bar": 16,
+    "price": 2128.77,
+    "atr": 5.27,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2116.9,
+    "reasoning": "15m is clearly in an uptrend (return_20bar +1.328%, EMA20>EMA50, MACD positive, RSI strong), so long is favored. On 5m, price is extended near the upper Bollinger band and above EMA20, but the best support-based entry is around EMA20 at 2116.90, which is within 0.5% of current price and aligns with trend continuation. RSI is overbought, so confidence is high but not maximal due to stretched conditions."
+  },
+  {
+    "bar": 17,
+    "price": 2124.26,
+    "atr": 5.33,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2117.6,
+    "reasoning": "15m trend is clearly bullish: return_20bar +1.328% with EMA20>EMA50 and strong positive MACD, so long is favored. On 5m, price is pulling back from the recent high and is near EMA20/support area (2117.6) within 0.5% of current price, giving a good dip-buy timing setup. RSI is elevated but not extreme enough to negate the trend."
+  },
+  {
+    "bar": 18,
+    "price": 2124.26,
+    "atr": 5.33,
+    "action": "HOLD",
+    "confidence": 0,
+    "entry_price": 0,
+    "reasoning": ""
+  },
+  {
+    "bar": 19,
+    "price": 2124.6,
+    "atr": 5.34,
+    "action": "HOLD",
+    "confidence": 0,
+    "entry_price": 0,
+    "reasoning": ""
+  },
+  {
+    "bar": 20,
+    "price": 2124.6,
+    "atr": 5.36,
+    "action": "BUY",
+    "confidence": 0.82,
+    "entry_price": 2119.39,
+    "reasoning": "15m trend is clearly bullish: return_20bar +1.328% with EMA20>EMA50 and positive MACD, so longs are favored. On 5m, price is pulling back toward EMA20 (2119.39), which is the nearest support below current price and within 0.5% of spot. RSI is elevated but not extreme, so this is a valid trend-continuation long on a dip."
+  },
+  {
+    "bar": 21,
+    "price": 2124.06,
+    "atr": 5.28,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2119.84,
+    "reasoning": "15m is in a clear uptrend: return_20bar +1.372% with EMA20>EMA50 and strong positive MACD, so longs are favored. On 5m, price is pulling back toward EMA20 (2119.84) after a push to 2135.6, giving a good dip-buy timing setup. Support is nearby at EMA20/swing_low_10, and the current price is only slightly above that zone, within the required 0.5% band."
+  },
+  {
+    "bar": 22,
+    "price": 2124.06,
+    "atr": 5.23,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2121.63,
+    "reasoning": "15m is clearly bullish: return_20bar +1.372% with EMA20>EMA50 and strong positive MACD, so trend favors longs. On 5m, price is pulling back from 2135.6 and is sitting near support at swing_low_10/EMA20 area (2121.63-2120.24), which is within 0.5% of current price and offers a good dip-buy timing zone. RSI is elevated but not extreme, so continuation is still plausible if support holds."
+  },
+  {
+    "bar": 23,
+    "price": 2124.91,
+    "atr": 5.22,
+    "action": "BUY",
+    "confidence": 0.82,
+    "entry_price": 2121.63,
+    "reasoning": "15m trend is clearly bullish: return_20bar +1.372%, EMA20 above EMA50, MACD positive, RSI strong. On 5m, price is pulling back from 2135.6 toward support with current price above EMA20/EMA50 and near swing_low_10 at 2121.63, which is the nearest valid support below current price and within 0.5% of spot. Momentum is cooling on 5m (MACD hist negative, return_10bar negative), so this is a buy-the-dip setup aligned with the higher-timeframe uptrend."
+  },
+  {
+    "bar": 24,
+    "price": 2124.91,
+    "atr": 5.2,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2122.25,
+    "reasoning": "15m trend is clearly bullish: return_20bar +1.372% with EMA20 above EMA50 and positive MACD, so favor longs. On 5m, price is holding above EMA20 and near the swing_low_10/bb_lower support zone; the nearest support below current price is 2122.25, which is within 0.5% of spot and offers a clean pullback entry. RSI is elevated, so prefer buying support rather than chasing."
+  },
+  {
+    "bar": 25,
+    "price": 2121.65,
+    "atr": 5.18,
+    "action": "BUY",
+    "confidence": 0.82,
+    "entry_price": 2121.48,
+    "reasoning": "15m trend is bullish: return_20bar +1.372% with EMA20>EMA50 and positive MACD, so long is favored. On 5m, price is holding near support at swing_low_10/EMA20 around 2121.5-2121.1, with current price essentially at support and within 0.5% of spot. Momentum is cooling on 5m (MACD hist negative, vol_ratio low), but this looks like a pullback within an uptrend, giving a decent long timing setup."
+  },
+  {
+    "bar": 26,
+    "price": 2121.65,
+    "atr": 5.16,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2121.48,
+    "reasoning": "15m is clearly bullish: return_20bar +1.372% with EMA20 above EMA50, MACD positive, and RSI strong at 69.69. On 5m, price is pulling back into support near swing_low_10 2121.48 and EMA20 2121.19, with current price near the lower Bollinger area. This is a good trend-aligned dip-buy setup, though MACD_hist on 5m is negative and volume is light, so confidence is high but not max."
+  },
+  {
+    "bar": 27,
+    "price": 2124.99,
+    "atr": 5.17,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2121.48,
+    "reasoning": "15m trend is clearly bullish: return_20bar +1.417% with EMA20 above EMA50 and positive MACD, so long is favored. On 5m, price is pulling back toward support with swing_low_10 at 2121.48, EMA20 at 2121.55, and BB lower at 2115.99. Current price 2124.99 is close to that support zone and within the 0.5% timing window, making this a good dip-buy setup despite slightly negative 5m MACD and moderate RSI."
+  },
+  {
+    "bar": 28,
+    "price": 2124.99,
+    "atr": 5.18,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2121.88,
+    "reasoning": "15m trend is clearly bullish: return_20bar +1.417%, EMA20 above EMA50, MACD positive, RSI 65.5. On 5m, price is pulling back into support near EMA20 (2121.88) and just above swing_low_10 (2121.48), with current price 2124.99 still within 0.5% of that support zone. This is a clean trend-aligned long setup."
+  },
+  {
+    "bar": 1,
+    "price": 2132.11,
+    "atr": 5.05,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2118.88,
+    "reasoning": "15m trend is clearly bullish (return_20bar +1.637%, EMA20>EMA50, MACD positive), so long is favored. On 5m, price is extended near the upper Bollinger band with RSI 72.45, suggesting a pullback entry is better than chasing. Nearest support below current price is EMA20 at 2118.88, which is within 0.5% of spot and aligns with a high-probability dip-buy in the uptrend."
+  },
+  {
+    "bar": 2,
+    "price": 2137.45,
+    "atr": 5.11,
+    "action": "HOLD",
+    "confidence": 0,
+    "entry_price": 0,
+    "reasoning": ""
+  },
+  {
+    "bar": 2,
+    "price": 2137.55,
+    "atr": 5.11,
+    "action": "BUY",
+    "confidence": 0.9,
+    "entry_price": 2135.6,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +1.866% with EMA20 above EMA50 and strong MACD, so long is favored. On 5m, price is pressing the upper Bollinger band and near the recent swing high, but the nearest support below current price is the 5m swing_high breakout area around 2135.6-2137.2, which is within 0.5% of current price and aligns with momentum continuation. RSI is overbought, so this is a momentum long rather than a deep pullback entry, but trend alignment is strong."
+  },
+  {
+    "bar": 3,
+    "price": 2137.23,
+    "atr": 5.18,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2133.27,
+    "reasoning": "15m trend is clearly bullish: return_20bar +1.975% with EMA20 above EMA50 and strong positive MACD, so long is favored. On 5m, price is extended but still supported by the intraday uptrend; the nearest support below current price is EMA20/swing area around 2133.27, which is within 0.5% of current price and offers a better pullback entry. RSI is overbought, so chase risk is high, but trend alignment keeps long confidence high."
+  },
+  {
+    "bar": 3,
+    "price": 2139.04,
+    "atr": 5.21,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2123.76,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +1.899% with EMA20>EMA50 and strong positive MACD, so long is favored. On 5m, price is extended near the upper Bollinger band and RSI is overbought, but the best nearby support for timing is EMA20 at 2123.76, which is within 0.5% of current price and aligns with the intraday uptrend. This is a trend-following pullback long, not a chase entry."
+  },
+  {
+    "bar": 1,
+    "price": 2139.04,
+    "atr": 5.18,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2137.23,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.043% with EMA20 above EMA50 and strong positive MACD, so long is favored. On 5m, price is pressing the upper Bollinger band with momentum intact, and the nearest support below current price is the 10-bar swing low at 2121.48 (also near EMA20 2122.47), giving a clean pullback entry zone. RSI is overbought, so chase risk is high, but trend alignment keeps long confidence high if price retests support first."
+  },
+  {
+    "bar": 2,
+    "price": 2139.41,
+    "atr": 5.14,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2124.09,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.043% with EMA20 above EMA50 and strong positive MACD, so long is favored. On 5m, price is extended near the upper Bollinger band with RSI overbought, but the best pullback support for timing is EMA20 at 2124.09, which is within 0.5% of current price and aligns with recent breakout structure. This is a trend-following long, not a chase at highs."
+  },
+  {
+    "bar": 3,
+    "price": 2139.8,
+    "atr": 5.19,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2125.58,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.043% with EMA20 above EMA50 and strong positive MACD, so long is favored. On 5m, price is extended but still above EMA20/EMA50 with bullish momentum; the nearest support below current price is EMA20 at 2125.58 (also near swing_low_10 2121.48), giving a precise pullback entry within 0.5% of current price. RSI is overbought, so prefer buying dips rather than chasing, but trend alignment remains strong."
+  },
+  {
+    "bar": 4,
+    "price": 2143,
+    "atr": 5.15,
+    "action": "BUY",
+    "confidence": 0.91,
+    "entry_price": 2127.24,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.043% with EMA20 above EMA50 and strong positive MACD, so long is favored. On 5m, price is extended near the upper Bollinger band and RSI is overbought, but the best support-based timing level below current price is EMA20 at 2127.24, which is within 0.5% of current price and aligns with the uptrend. Existing long position also supports continuation bias."
+  },
+  {
+    "bar": 5,
+    "price": 2146.1,
+    "atr": 5.14,
+    "action": "BUY",
+    "confidence": 0.9,
+    "entry_price": 2129.04,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.437% with EMA20 above EMA50 and strong MACD, so long is favored. On 5m, price is extended above EMA20 and near the upper Bollinger band with RSI overbought, so chasing here is poor; best long timing is a pullback to EMA20 at 2129.04, which is within 0.5% of current price and acts as nearest support below spot."
+  },
+  {
+    "bar": 6,
+    "price": 2144.99,
+    "atr": 5.18,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2140,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.437% with EMA20>EMA50 and strong positive MACD, so longs are favored. 5m also supports continuation, but price is extended near the upper Bollinger band and RSI is overbought, so best long timing is a pullback into nearby support. Nearest support below current price is around EMA20/swing area near 2140.0, which is within 0.5% of current price."
+  },
+  {
+    "bar": 7,
+    "price": 2154.1,
+    "atr": 5.28,
+    "action": "BUY",
+    "confidence": 0.92,
+    "entry_price": 2132.8,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.437% with EMA20 above EMA50 and strong positive MACD, so long is strongly favored. On 5m, price is extended above EMA20 and near the upper Bollinger band, but the nearest support for timing is EMA20 at 2132.8, which is within 0.5% of current price and aligns with the trend. RSI is very overbought, so expect pullback risk, but trend strength keeps long high-confidence."
+  },
+  {
+    "bar": 8,
+    "price": 2147.64,
+    "atr": 5.36,
+    "action": "HOLD",
+    "confidence": 0,
+    "entry_price": 0,
+    "reasoning": ""
+  },
+  {
+    "bar": 9,
+    "price": 2148.58,
+    "atr": 5.33,
+    "action": "BUY",
+    "confidence": 0.9,
+    "entry_price": 2143,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.983% with EMA20>EMA50 and strong MACD, so long is favored. On 5m, price is above EMA20/EMA50 and holding near the upper band after a breakout, with swing_low_10 at 2133.27 and EMA20 at 2135.58 providing nearby support. Best long timing is a pullback into the nearest support zone around 2143.00, which is within 0.5% of current price and aligns with trend continuation."
+  },
+  {
+    "bar": 10,
+    "price": 2150.27,
+    "atr": 5.35,
+    "action": "BUY",
+    "confidence": 0.9,
+    "entry_price": 2136.98,
+    "reasoning": "15m trend is clearly bullish (return_20bar +2.983%, EMA20>EMA50, strong MACD), so long is favored. On 5m, price is above EMA20 and EMA50 with positive MACD, and the nearest support below current price is EMA20 at 2136.98, which is within 0.5% of current price. RSI is overbought, so momentum is extended, but trend alignment remains strong."
+  },
+  {
+    "bar": 11,
+    "price": 2151.18,
+    "atr": 5.36,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2138.33,
+    "reasoning": "15m trend is clearly bullish: return_20bar +3.149% with EMA20>EMA50 and strong positive MACD, so long is favored. On 5m, price is above EMA20/EMA50 and holding near the upper band after a breakout, but RSI is elevated (73.74), so best long timing is a pullback toward EMA20 at 2138.33, which is within 0.5% of current price and acts as nearby support."
+  },
+  {
+    "bar": 12,
+    "price": 2153.78,
+    "atr": 5.34,
+    "action": "BUY",
+    "confidence": 0.9,
+    "entry_price": 2139.8,
+    "reasoning": "15m is a clear uptrend: return_20bar +3.149% with EMA20>EMA50 and strong positive MACD, so long is strongly favored. On 5m, price is above EMA20/EMA50 and momentum remains bullish, though RSI is overbought, so a pullback entry is better than chasing. Nearest support below current price is EMA20 at 2139.8 (also close to swing low 2134.79), within 0.5% of spot, making it a precise long timing level."
+  },
+  {
+    "bar": 13,
+    "price": 2148.76,
+    "atr": 5.39,
+    "action": "BUY",
+    "confidence": 0.9,
+    "entry_price": 2140.66,
+    "reasoning": "15m trend is clearly bullish: return_20bar +3.149% with EMA20>EMA50 and strong positive MACD, so long is favored. On 5m, price is pulling back from the 2157.99 swing high and is holding above EMA20 (2140.66), which is the nearest support below current price and within 0.5% of spot. RSI is elevated but not extreme, and recent bars show a controlled retrace rather than breakdown, making this a high-probability trend-continuation long."
+  },
+  {
+    "bar": 14,
+    "price": 2141.5,
+    "atr": 5.46,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2140.74,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.947% with EMA20 above EMA50 and positive MACD, so long is favored. On 5m, price is pulling back to the EMA20 at 2140.74, which is also very close to the swing_low_10/support at 2140.4 and just above the lower Bollinger band at 2120.77. This gives a clean support-based long entry within 0.5% of current price, aligned with the higher-timeframe uptrend."
+  },
+  {
+    "bar": 15,
+    "price": 2139.02,
+    "atr": 5.35,
+    "action": "HOLD",
+    "confidence": 0,
+    "entry_price": 0,
+    "reasoning": ""
+  },
+  {
+    "bar": 2,
+    "price": 2140.44,
+    "atr": 5.37,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2136.75,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.561%, EMA20 > EMA50, MACD positive, RSI 65.38. On 5m, price pulled back from 2157.99 resistance into the swing_low_10 at 2136.75 and is now near EMA20 (2140.16), giving a clean support-based long entry within 0.5% of current price. Short is counter-trend against a strong 15m uptrend."
+  },
+  {
+    "bar": 4,
+    "price": 2137.17,
+    "atr": 5.28,
+    "action": "BUY",
+    "confidence": 0.91,
+    "entry_price": 2136.54,
+    "reasoning": "15m is clearly bullish: return_20bar +2.437%, EMA20 above EMA50, MACD positive, RSI 63.3. On 5m, price has pulled back into support near swing_low_10/BB lower/EMA20 zone, with current price 2137.17 sitting just above swing_low_10 2136.54 and BB lower 2128.71. This is a high-quality trend-continuation long setup, though 5m MACD is negative and momentum is cooling, so use the pullback support for timing."
+  },
+  {
+    "bar": 2,
+    "price": 2139.22,
+    "atr": 5.32,
+    "action": "BUY",
+    "confidence": 0.82,
+    "entry_price": 2136.54,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.47% with EMA20>EMA50, MACD positive, RSI 63.8. On 5m, price has pulled back into support near swing_low_10 2136.54 and is holding above bb_lower 2128.6, making this a good trend-continuation long setup. Current price is close to support and within the 0.5% timing window."
+  },
+  {
+    "bar": 3,
+    "price": 2139.21,
+    "atr": 5.36,
+    "action": "BUY",
+    "confidence": 0.82,
+    "entry_price": 2136.54,
+    "reasoning": "15m trend is clearly bullish: return_20bar +2.47% with EMA20 above EMA50 and positive MACD, so long is favored. On 5m, price has pulled back into support near swing_low_10/bb_lower area, with current price 2139.21 sitting close to EMA20 2139.62 and support at 2136.54 within 0.5% of price. RSI is neutral-bullish and the recent selloff looks like a retracement inside the higher-timeframe uptrend."
+  },
+  {
+    "bar": 1,
+    "price": 2137.19,
+    "atr": 5.33,
+    "action": "BUY",
+    "confidence": 0.82,
+    "entry_price": 2136.54,
+    "reasoning": "15m trend is bullish: return_20bar +2.39% with EMA20 above EMA50, MACD positive, RSI 62.6. On 5m, price has pulled back into support near swing_low_10/bb_lower (2136.54/2131.45) while remaining above EMA50, giving a decent long timing setup. Entry is near current price and within 0.5%."
+  },
+  {
+    "bar": 1,
+    "price": 2138.34,
+    "atr": 5.33,
+    "action": "BUY",
+    "confidence": 0.82,
+    "entry_price": 2136.54,
+    "reasoning": "15m trend is clearly bullish: return_20bar +1.839% with EMA20>EMA50, positive MACD, and RSI 63.7. On 5m, price has pulled back into support near swing_low_10/bb_lower area, with current price just above that zone and within 0.5% of entry. This is a favorable trend-aligned dip-buy setup, though 5m MACD is still negative so confidence is strong but not maximal."
+  },
+  {
+    "bar": 2,
+    "price": 2130.13,
+    "atr": 5.39,
+    "action": "SELL",
+    "confidence": 0.82,
+    "entry_price": 2130.85,
+    "reasoning": "15m trend remains bullish overall, but 5m is in a pullback with bearish momentum (MACD hist -2.95, price below EMA20, RSI 42.4, recent bars making lower highs/lows). Short is a tactical fade into nearby resistance at the 5m lower Bollinger/near current price zone around 2130.85, with entry within 0.5% of spot and clear intraday weakness."
+  },
+  {
+    "bar": 3,
+    "price": 2133.04,
+    "atr": 5.44,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2130.11,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +1.55% with EMA20 above EMA50 and RSI 55.7, so bias favors longs. On 5m, price has pulled back into support near the lower Bollinger band/swing low zone (bb_lower 2130.11, swing_low_10 2129.11) while still holding above EMA50, giving a good dip-buy setup. Current price 2133.04 is within 0.5% of that support, so timing is aligned for a long continuation."
+  },
+  {
+    "bar": 4,
+    "price": 2127.81,
+    "atr": 5.52,
+    "action": "HOLD",
+    "confidence": 0,
+    "entry_price": 0,
+    "reasoning": ""
+  },
+  {
+    "bar": 5,
+    "price": 2125.57,
+    "atr": 5.49,
+    "action": "SELL",
+    "confidence": 0.41,
+    "entry_price": 2158.33,
+    "reasoning": "15m trend is still bullish, so short is counter-trend and not favored. However, 5m momentum is bearish with price below EMA20/EMA50, MACD histogram negative, RSI under 40, and recent bars showing lower highs/lower lows. If price rebounds, the nearest resistance is the BB upper band around 2158.33, but this is well above current price and not an ideal immediate entry. Short is only a tactical fade against the higher-timeframe uptrend."
+  },
+  {
+    "bar": 6,
+    "price": 2129.2,
+    "atr": 5.32,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2124.43,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +1.23% with EMA20 above EMA50 and RSI just above 50, so long is favored. On 5m, price has pulled back into support near swing_low_10/bb_lower (2124.43/2123.95) while current price is 2129.2, giving a tight support-based entry within 0.5% of market. Momentum is still mixed on 5m (MACD hist negative, RSI 43.8), but the pullback is occurring inside a higher-timeframe uptrend, making this a good long timing zone."
+  },
+  {
+    "bar": 7,
+    "price": 2132.58,
+    "atr": 5.33,
+    "action": "BUY",
+    "confidence": 0.82,
+    "entry_price": 2124.43,
+    "reasoning": "15m trend is mildly bullish: return_20bar is +1.23% with EMA20 above EMA50 and RSI above 50, so the higher timeframe favors longs. On 5m, price has pulled back into support near swing_low_10/bb_lower (2124.43/2123.03) while current price is 2132.58, keeping the entry within the 0.5% timing window. Momentum is still mixed on 5m (MACD hist negative, RSI neutral), so this is a buy-the-dip setup rather than a breakout chase."
+  },
+  {
+    "bar": 8,
+    "price": 2135.44,
+    "atr": 5.35,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2135.14,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +1.597% with EMA20 above EMA50 and RSI 58.4, so the higher timeframe favors longs. On 5m, price is holding near EMA20 (2135.14) and just above the lower Bollinger area, with recent recovery from the 2124.43 swing low. Current price is at a valid support zone for timing a long, and the existing long is already near breakeven, aligning with the trend."
+  },
+  {
+    "bar": 9,
+    "price": 2134.42,
+    "atr": 5.35,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2135.07,
+    "reasoning": "15m trend is clearly bullish (return_20bar +1.597% with EMA20 above EMA50 and RSI 58.4), so longs are favored. On 5m, price is pulling back to EMA20 at 2135.07 with nearby support from swing_low_10 2124.43 and BB lower 2122.63, while current price is essentially at the entry zone. Momentum is mixed short-term (MACD hist negative, vol low), but the higher-timeframe uptrend keeps the long setup strong."
+  },
+  {
+    "bar": 10,
+    "price": 2139.31,
+    "atr": 5.45,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2135.48,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +1.597% with EMA20 above EMA50 and RSI 58.4, so trend favors longs. On 5m, price is holding above EMA20/EMA50 and near support; the nearest support below current price is EMA20 at 2135.48 (also close to the recent breakout area), which is within 0.5% of current price. MACD histogram is still slightly negative, so momentum is not perfect, but the higher-timeframe trend and 5m structure remain aligned for a long bias."
+  },
+  {
+    "bar": 11,
+    "price": 2139.19,
+    "atr": 5.45,
+    "action": "BUY",
+    "confidence": 0.88,
+    "entry_price": 2135.83,
+    "reasoning": "15m trend is clearly bullish: return_20bar is +1.824% with EMA20 above EMA50 and RSI at 60.5, so long is favored. On 5m, price is holding above EMA20 (2135.83) and EMA50, with recent push to 2142.1 showing momentum. Best long timing is near EMA20/support, which is also within 0.5% of current price and aligns with the current pullback/retest zone."
+  },
+  {
+    "bar": 1,
+    "price": 2138.05,
+    "atr": 5.38,
+    "action": "SELL",
+    "confidence": 0.58,
+    "entry_price": 2142.1,
+    "reasoning": "15m trend is slightly down/weak, which favors shorts more than longs, but it is not a full downtrend. On 5m, price is near the upper band and below the recent swing high at 2142.1, making that the nearest resistance for timing. MACD is positive on 5m, so this is a counter to short-term momentum, but the 15m backdrop and nearby resistance make a short viable only on a push into 2142.1. Confidence is moderate, not high, because the higher timeframe decline is mild rather than decisive."
+  },
+  {
+    "bar": 2,
+    "price": 2139.13,
+    "atr": 5.37,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 2135.99,
+    "reasoning": "15m is still mildly bearish/weak range rather than a clean uptrend: return_8bar is -0.499% (not a strong downtrend), EMA20 > EMA50 but MACD histogram is negative, so trend is mixed. On 5m, price is above EMA20/EMA50 with positive MACD and RSI 55.8, showing short-term recovery. Best long timing is near nearest support below current price: EMA20 at 2135.99, which is within 0.5% of current price and aligns with the recent push from 2124.43. This is a reasonable support-based long, but not high confidence because 15m momentum is not fully aligned."
+  },
+  {
+    "bar": 3,
+    "price": 2134.3,
+    "atr": 5.49,
+    "action": "SELL",
+    "confidence": 0.58,
+    "entry_price": 2142.76,
+    "reasoning": "15m is not a strong downtrend, but it is leaning bearish with negative MACD and slightly negative 8-bar return. On 5m, price rejected the swing_high_10/upper resistance zone at 2142.76 and closed back near 2134.3, showing failed breakout behavior. Short entry is best on a retest of resistance near 2142.76, which is within 0.5% of current price."
+  },
+  {
+    "bar": 4,
+    "price": 2136.02,
+    "atr": 5.56,
+    "action": "SELL",
+    "confidence": 0.72,
+    "entry_price": 2142.76,
+    "reasoning": "15m trend is mildly down/weak (return_8bar -0.499%, MACD hist negative), which favors shorts more than longs, though not a full downtrend. On 5m, price just rejected the swing high/bb upper area at 2142.76 after failing to hold above 2140+, and current momentum has cooled with volume fading. The nearest resistance is 2142.76, above current price and within the 0.5% entry window, making this the cleaner setup for a short on another test of resistance."
+  },
+  {
+    "bar": 5,
+    "price": 2137.53,
+    "atr": 5.57,
+    "action": "BUY",
+    "confidence": 0.58,
+    "entry_price": 2129.2,
+    "reasoning": "15m trend is slightly bearish/neutral (return_8bar -0.114%, MACD hist negative) so this is not a strong long environment. On 5m, price is holding above EMA20/EMA50 with RSI 53 and MACD hist positive, but recent rejection from 2142.76 shows overhead supply. Best long timing is near the nearest support at swing_low_10 2129.2, which is below current price and within 0.5% of it."
+  },
+  {
+    "bar": 6,
+    "price": 2131.68,
+    "atr": 5.67,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2142.42,
+    "reasoning": "15m is in a mild downtrend/weak pullback phase, favoring shorts more than longs. On 5m, price failed at the 2142.76 swing high and BB upper near 2142.42, then sold off sharply to 2131.68. The nearest resistance for timing is the 5m BB upper/swing high zone around 2142.42-2142.76, which is within 0.5% of current price only if price retests upward. Short is the cleaner setup if price retraces into resistance and rejects."
+  },
+  {
+    "bar": 7,
+    "price": 2132.77,
+    "atr": 5.61,
+    "action": "SELL",
+    "confidence": 0.88,
+    "entry_price": 2142.76,
+    "reasoning": "15m trend is clearly bearish, so shorts are favored strongly. On 5m, price failed at the recent swing high / upper resistance area near 2142.76 and is trading below EMA20 with negative MACD histogram. A short entry near 2142.76 is the nearest resistance above current price and fits the multi-timeframe trend alignment."
+  },
+  {
+    "bar": 8,
+    "price": 2131.43,
+    "atr": 5.59,
+    "action": "SELL",
+    "confidence": 0.58,
+    "entry_price": 2142.76,
+    "reasoning": "15m is not a strong downtrend, but short is favored slightly because 5m momentum is weak: MACD histogram negative, return_10bar negative, price below EMA20, and recent highs were rejected at 2142.76. The nearest clear resistance is swing_high_10 2142.76, which is within 0.5% of current price? It is slightly above but still close enough for timing. Short has better structure than long, though the higher timeframe is not decisively bearish."
+  },
+  {
+    "bar": 9,
+    "price": 2128.5,
+    "atr": 5.62,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2127.4,
+    "reasoning": "15m trend is only mildly bearish/range-like (return_8bar -0.288%, EMA20 above EMA50, RSI 55), so no strong directional edge. On 5m, price is sitting near local support at swing_low_10 2127.4 and just above bb_lower 2125.6, with RSI 41 and price below EMA20/EMA50, suggesting a possible support bounce but still weak momentum (MACD hist negative). Long is a range-support play, not a trend trade."
+  },
+  {
+    "bar": 1,
+    "price": 2128.5,
+    "atr": 5.63,
+    "action": "SELL",
+    "confidence": 0.58,
+    "entry_price": 2130.75,
+    "reasoning": "15m is slightly bearish with negative MACD hist and return_8bar below zero, favoring shorts modestly. On 5m, price is below EMA20/EMA50 and recent bars show lower highs with a breakdown from 2134-2142 area. Best short timing is a small pullback into nearby resistance around 2130.75-2134.23 (EMA20), which is within 0.5% of current price and offers a cleaner risk/reward than chasing lower."
+  },
+  {
+    "bar": 1,
+    "price": 2135.9,
+    "atr": 5.67,
+    "action": "BUY",
+    "confidence": 0.82,
+    "entry_price": 2127.34,
+    "reasoning": "15m trend is mildly bullish/range-to-up: return_8bar is +0.504% (not a strong trend, but above zero), EMA20 > EMA50, and RSI 57.5 supports upside. 5m is also constructive with price above EMA20/EMA50 and MACD slightly positive, but current price is near the upper Bollinger band and recent bars show choppy action. Best long timing is a pullback to nearby support at bb_lower/swing_low_10 around 2127.34, which is within 0.5% of current price and offers a favorable entry."
+  },
+  {
+    "bar": 2,
+    "price": 2136.07,
+    "atr": 5.67,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 2133.85,
+    "reasoning": "15m trend is mildly bullish/range-to-up: return_8bar is +0.504% with EMA20 above EMA50 and RSI 57.5, so upside bias exists but not a strong breakout trend. On 5m, price is above EMA20/EMA50 with positive MACD histogram and recent push to 2137.49, but it is also near the upper Bollinger band and swing high, so long is best on a pullback to support. Nearest support below current price is EMA20 at 2133.85 (also close to recent consolidation), within 0.5% of current price."
+  },
+  {
+    "bar": 3,
+    "price": 2135.49,
+    "atr": 5.62,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2128.16,
+    "reasoning": "15m trend is mildly bullish/range: return_8bar is only +0.2% (not a strong trend), EMA20 > EMA50, RSI 56.8, but MACD hist is negative, so trend is not fully confirmed. On 5m, price is above EMA20/EMA50 and near the lower Bollinger/support zone after a pullback, making a long at bb_lower (2128.16) the best support-based entry within 0.5% of current price. Momentum is mixed but support is clear."
+  },
+  {
+    "bar": 1,
+    "price": 2131.48,
+    "atr": 5.65,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 2127.86,
+    "reasoning": "15m trend is mildly bearish/range-to-down: return_8bar is -0.185% (not a strong downtrend), EMA20 > EMA50 but MACD hist is negative, so trend is mixed. On 5m, price is sitting near support with bb_lower at 2127.86 and swing_low_10 at 2127.06, while current price is 2131.48. This gives a reasonable long timing near support, but momentum is weak (RSI 46.86, vol_ratio 0.472), so confidence is moderate rather than high."
+  },
+  {
+    "bar": 2,
+    "price": 2131.15,
+    "atr": 5.69,
+    "action": "SELL",
+    "confidence": 0.58,
+    "entry_price": 2137.49,
+    "reasoning": "15m trend is not a clean downtrend, but it is leaning bearish with negative MACD and slightly negative 8-bar return. On 5m, price has rejected the 2137.49 swing high area and is trading below EMA20/BB upper, making that the nearest resistance for timing a short. Confidence is moderate because the higher timeframe is not strongly bearish."
+  }
+]
