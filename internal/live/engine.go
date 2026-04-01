@@ -848,6 +848,13 @@ func (e *Engine) Cash() float64 { return e.broker.Cash() }
 // Equity returns the current total equity.
 func (e *Engine) Equity() float64 { return e.broker.Equity() }
 
+// SetExtra injects arbitrary data into the strategy context.
+func (e *Engine) SetExtra(key string, val any) {
+	if e.stratCtx != nil {
+		e.stratCtx.Extra[key] = val
+	}
+}
+
 // SetPositionSyncer injects the Redis-backed position syncer.
 func (e *Engine) SetPositionSyncer(s *position.Syncer) {
 	e.posSyncer = s

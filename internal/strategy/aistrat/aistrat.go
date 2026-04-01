@@ -24,6 +24,7 @@ import (
 	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/strategy"
 	"github.com/Quantix/quantix/internal/strategy/registry"
+	"github.com/redis/go-redis/v9"
 )
 
 func init() {
@@ -44,6 +45,15 @@ func init() {
 		if v, ok := params["HedgeMode"].(bool); ok { cfg.HedgeMode = v }
 		if v, ok := params["RangeTPPct"]; ok { cfg.RangeTPPct = toFloat(v) }
 		if v, ok := params["RangeSLPct"]; ok { cfg.RangeSLPct = toFloat(v) }
+		if v, ok := params["Interval"].(string); ok && cfg.PrimaryInterval == "" { cfg.PrimaryInterval = v }
+		if v, ok := params["Intervals"]; ok {
+			switch vv := v.(type) {
+			case []string:
+				cfg.Intervals = vv
+			case []any:
+				for _, item := range vv { if s, ok := item.(string); ok { cfg.Intervals = append(cfg.Intervals, s) } }
+			}
+		}
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("ai strategy requires APIKey parameter")
 		}
@@ -62,6 +72,10 @@ type Config struct {
 	CallIntervalBars    int
 	EnableShort         bool
 	HedgeMode           bool // true = long+short simultaneously; false = single strongest direction
+
+	// Multi-timeframe
+	PrimaryInterval string   // "5m" — drives GPT signals + entries
+	Intervals       []string // all subscribed intervals, e.g. ["1m","5m","15m"]
 
 	// Trend mode
 	RiskPerTrade float64 // 1% of equity per trade
@@ -110,6 +124,7 @@ type posState struct {
 	tp1RHit    bool
 	barsHeld   int
 	filled     bool
+	filledAt   time.Time
 	orderID    string
 	limitBar   int
 }
@@ -121,15 +136,17 @@ type AIStrategy struct {
 	log    *zap.Logger
 	client *http.Client
 
-	bars        []exchange.Kline
-	warmedUp    bool
-	barCount    int
-	lastCallBar int
-	totalCall   int
+	barsByInterval map[string][]exchange.Kline // key = interval ("1m","5m","15m")
+	warmedUp       bool
+	liveReady      bool // true after first real-time primary bar (skip backfill GPT calls)
+	barCount       int  // primary interval bar count
+	lastCallBar    int
+	totalCall      int
 
 	longPos  *posState
 	shortPos *posState
 	syncer   *position.Syncer // Redis-backed, set at warmup from ctx.Extra
+	rdb      *redis.Client    // for signal caching
 
 	dayStart       time.Time
 	dayStartEquity float64
@@ -139,9 +156,14 @@ type AIStrategy struct {
 }
 
 func New(cfg Config, log *zap.Logger) *AIStrategy {
+	if cfg.PrimaryInterval == "" {
+		cfg.PrimaryInterval = "5m"
+	}
 	return &AIStrategy{
-		cfg: cfg, log: log,
-		client: &http.Client{Timeout: 15 * time.Second},
+		cfg:            cfg,
+		log:            log,
+		client:         &http.Client{Timeout: 15 * time.Second},
+		barsByInterval: make(map[string][]exchange.Kline),
 	}
 }
 
@@ -154,30 +176,38 @@ func (s *AIStrategy) Name() string {
 func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Symbol != s.cfg.Symbol { return }
 
-	s.bars = append(s.bars, bar)
-	if len(s.bars) > s.cfg.LookbackBars*2 {
-		s.bars = s.bars[len(s.bars)-s.cfg.LookbackBars*2:]
+	// ── Buffer bar by interval ──
+	iv := bar.Interval
+	if iv == "" { iv = s.cfg.PrimaryInterval }
+	s.barsByInterval[iv] = append(s.barsByInterval[iv], bar)
+	maxBuf := s.cfg.LookbackBars * 2
+	if len(s.barsByInterval[iv]) > maxBuf {
+		s.barsByInterval[iv] = s.barsByInterval[iv][len(s.barsByInterval[iv])-maxBuf:]
 	}
-	s.barCount++
 
+	// ── Warmup: need enough primary-interval bars ──
+	primaryBars := s.barsByInterval[s.cfg.PrimaryInterval]
 	if !s.warmedUp {
-		if len(s.bars) >= s.cfg.LookbackBars && time.Since(bar.CloseTime) < 10*time.Minute {
+		if len(primaryBars) >= s.cfg.LookbackBars && time.Since(bar.CloseTime) < 10*time.Minute {
 			s.warmedUp = true
 			s.dayStart = time.Now()
 			if pf := ctx.Portfolio; pf != nil {
 				s.dayStartEquity = pf.Equity(map[string]float64{s.cfg.Symbol: bar.Close})
 			}
-			// Get syncer from context (injected by live engine)
 			if v, ok := ctx.Extra["position_syncer"]; ok {
 				if ps, ok := v.(*position.Syncer); ok {
 					s.syncer = ps
-					// Set onChange callback to detect external closes
-					// (already wired in engine, but we can also react here)
 				}
 			}
-			// Recover positions from syncer (Redis → exchange verified)
+			if v, ok := ctx.Extra["redis_client"]; ok {
+				if rc, ok := v.(*redis.Client); ok {
+					s.rdb = rc
+				}
+			}
 			s.recoverFromSyncer(bar.Close)
-			s.log.Info("AI warmed up", zap.Int("bars", len(s.bars)),
+			s.log.Info("AI warmed up",
+				zap.Int("primary_bars", len(primaryBars)),
+				zap.String("primary", s.cfg.PrimaryInterval),
 				zap.Bool("syncer", s.syncer != nil),
 				zap.Bool("long", s.longPos != nil),
 				zap.Bool("short", s.shortPos != nil))
@@ -186,10 +216,29 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 
 	price := bar.Close
+
+	// ── 1m bars: precision stop/timeout management only ──
+	if iv != s.cfg.PrimaryInterval {
+		if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
+		if s.shortPos != nil { s.managePos(ctx, bar, s.shortPos, &s.shortPos) }
+		return
+	}
+
+	// ── Primary interval bars: full logic below ──
+	s.barCount++
+	// Skip GPT calls on stale backfill bars; wait for first real-time bar
+	if !s.liveReady {
+		if time.Since(bar.CloseTime) < 2*time.Minute {
+			s.liveReady = true
+			s.log.Info("AI: live ready — first real-time bar")
+		} else {
+			return
+		}
+	}
 	s.checkDayReset(ctx, price)
 	if s.dayHalted { return }
 
-	// Check syncer for externally closed positions (manual close on exchange)
+	// Check syncer for externally closed positions
 	if s.syncer != nil {
 		if s.longPos != nil && !s.syncer.HasPosition("LONG") {
 			s.log.Warn("AI: LONG externally closed — clearing posState")
@@ -201,17 +250,14 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 
-	// Manage both positions independently (every bar)
+	// Manage positions on primary bar too
 	if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
 	if s.shortPos != nil { s.managePos(ctx, bar, s.shortPos, &s.shortPos) }
 
-	// GPT signal check (every N bars)
+	// GPT signal check (every N primary bars)
 	interval := s.cfg.CallIntervalBars
 	if interval < 1 { interval = 1 }
 	if s.barCount-s.lastCallBar < interval { return }
-
-	// Cooldown after stop-loss — wait 10 bars before new entries
-	if s.barCount < s.cooldownUntil { return }
 
 	atr := s.calcATR()
 	if price > 0 && atr/price > 0.05 {
@@ -238,6 +284,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	s.lastCallBar = s.barCount
 	s.totalCall++
+	s.cacheSignal(bar, signal)
 
 	// Log both signals
 	longConf, shortConf := 0.0, 0.0
@@ -291,16 +338,16 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Rule-based boost: if price is near swing low/high, override GPT confidence
 	swLow := s.findSwingLow(10)
 	swHigh := s.findSwingHigh(10)
-	if price > 0 && swLow > 0 && (price-swLow)/price < 0.0015 && longConf < 0.70 {
+	if price > 0 && swLow > 0 && (price-swLow)/price < 0.0015 && longConf < 0.82 {
 		s.log.Info("AI: boost long — price near swing low",
 			zap.Float64("price", price), zap.Float64("swing_low", swLow))
-		longConf = 0.70
+		longConf = 0.82
 		if longEntry <= 0 { longEntry = swLow }
 	}
-	if price > 0 && swHigh > 0 && (swHigh-price)/price < 0.0015 && shortConf < 0.70 {
+	if price > 0 && swHigh > 0 && (swHigh-price)/price < 0.0015 && shortConf < 0.82 {
 		s.log.Info("AI: boost short — price near swing high",
 			zap.Float64("price", price), zap.Float64("swing_high", swHigh))
-		shortConf = 0.70
+		shortConf = 0.82
 		if shortEntry <= 0 { shortEntry = swHigh }
 	}
 
@@ -330,26 +377,28 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 
-	// ── Trend protection: don't trade against momentum ──
-	// Uses 60-bar (1h) trend + 10-bar (10min) momentum to allow rebounds
-	closes := s.getCloses()
-	if len(closes) >= 60 {
-		ret60 := (closes[len(closes)-1] - closes[len(closes)-60]) / closes[len(closes)-60]
-		ret10 := 0.0
-		if len(closes) >= 10 {
-			ret10 = (closes[len(closes)-1] - closes[len(closes)-10]) / closes[len(closes)-10]
+	// ── Trend protection: use 15m bars for trend, 5m for momentum ──
+	bars15 := s.barsForInterval("15m")
+	closes5m := s.getCloses()
+	if len(bars15) >= 20 {
+		c15 := make([]float64, len(bars15))
+		for i, b := range bars15 { c15[i] = b.Close }
+		ret15_20 := (c15[len(c15)-1] - c15[len(c15)-20]) / c15[len(c15)-20] // 15m × 20 = 5 hours
+		ret5m_6 := 0.0
+		if len(closes5m) >= 6 {
+			ret5m_6 = (closes5m[len(closes5m)-1] - closes5m[len(closes5m)-6]) / closes5m[len(closes5m)-6] // 5m × 6 = 30 min
 		}
 
-		// Downtrend: block long UNLESS short-term is rebounding
-		if ret60 < -0.005 && ret10 < 0.003 && longConf > 0 {
-			s.log.Info("AI: BUY blocked — downtrend, no rebound",
-				zap.Float64("1h", ret60*100), zap.Float64("10m", ret10*100))
+		// Downtrend on 15m: block long UNLESS 5m is rebounding
+		if ret15_20 < -0.02 && ret5m_6 < 0.005 && longConf > 0 {
+			s.log.Info("AI: BUY blocked — 15m downtrend",
+				zap.Float64("15m_5h", ret15_20*100), zap.Float64("5m_30m", ret5m_6*100))
 			longConf = 0
 		}
-		// Uptrend: block short UNLESS short-term is pulling back
-		if ret60 > 0.005 && ret10 > -0.003 && shortConf > 0 {
-			s.log.Info("AI: SELL blocked — uptrend, no pullback",
-				zap.Float64("1h", ret60*100), zap.Float64("10m", ret10*100))
+		// Uptrend on 15m: block short UNLESS 5m is pulling back
+		if ret15_20 > 0.02 && ret5m_6 > -0.005 && shortConf > 0 {
+			s.log.Info("AI: SELL blocked — 15m uptrend",
+				zap.Float64("15m_5h", ret15_20*100), zap.Float64("5m_30m", ret5m_6*100))
 			shortConf = 0
 		}
 	}
@@ -407,6 +456,7 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	if pos == nil || pos.filled { return }
 
 	pos.filled = true
+	pos.filledAt = time.Now()
 	if fill.Price > 0 {
 		diff := fill.Price - pos.entryPrice
 		pos.entryPrice = fill.Price
@@ -444,6 +494,18 @@ func (s *AIStrategy) isRangeRegime(price float64) bool {
 	return false
 }
 
+// effectiveRisk returns risk-per-trade based on current exposure.
+// Single direction: 2x configured risk (e.g. 4%); dual hedge: 1x (e.g. 2%).
+func (s *AIStrategy) effectiveRisk(side string) float64 {
+	hasOpposite := false
+	if side == "LONG" && s.shortPos != nil && s.shortPos.filled { hasOpposite = true }
+	if side == "SHORT" && s.longPos != nil && s.longPos.filled { hasOpposite = true }
+	if hasOpposite {
+		return s.cfg.RiskPerTrade // hedge mode: use base risk (2%)
+	}
+	return s.cfg.RiskPerTrade * 2 // single direction: double risk (4%)
+}
+
 // ─── Open Position ───────────────────────────────────────────────────────────
 
 func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice, entryPrice, atr float64) {
@@ -467,19 +529,22 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 	if pf := ctx.Portfolio; pf != nil {
 		equity = pf.Equity(map[string]float64{s.cfg.Symbol: currentPrice})
 	}
-	qty := math.Floor(equity*s.cfg.RiskPerTrade/slDist*1000) / 1000
+	risk := s.effectiveRisk(side)
+	qty := math.Floor(equity*risk/slDist*1000) / 1000
 	if qty <= 0 { return }
 
 	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
 	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit)
 	if omsID == "" { return }
 
+	filledAt := time.Time{}
+	if !useLimit { filledAt = time.Now() }
 	pos := &posState{
 		side: side, mode: modeRange, entryPrice: entryPrice,
 		initQty: qty, remainQty: qty,
 		R: slDist, stopLoss: stopLoss, takeProfit: takeProfit,
 		trailing: stopLoss, peakPrice: entryPrice,
-		filled: !useLimit, orderID: omsID, limitBar: s.barCount,
+		filled: !useLimit, filledAt: filledAt, orderID: omsID, limitBar: s.barCount,
 	}
 	if side == "LONG" { s.longPos = pos } else { s.shortPos = pos }
 
@@ -511,18 +576,21 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	if pf := ctx.Portfolio; pf != nil {
 		equity = pf.Equity(map[string]float64{s.cfg.Symbol: currentPrice})
 	}
-	qty := math.Floor(equity*s.cfg.RiskPerTrade/R*1000) / 1000
+	risk := s.effectiveRisk(side)
+	qty := math.Floor(equity*risk/R*1000) / 1000
 	if qty <= 0 { return }
 
 	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
 	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit)
 	if omsID == "" { return }
 
+	filledAt := time.Time{}
+	if !useLimit { filledAt = time.Now() }
 	pos := &posState{
 		side: side, mode: modeTrend, entryPrice: entryPrice,
 		initQty: qty, remainQty: qty,
 		R: R, stopLoss: stopLoss, trailing: stopLoss, peakPrice: entryPrice,
-		filled: !useLimit, orderID: omsID, limitBar: s.barCount,
+		filled: !useLimit, filledAt: filledAt, orderID: omsID, limitBar: s.barCount,
 	}
 	if side == "LONG" { s.longPos = pos } else { s.shortPos = pos }
 
@@ -549,15 +617,45 @@ func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty f
 	return ctx.PlaceOrder(req)
 }
 
+// placeCloseOrder places a close order. Uses limit order (maker fee) unless useMarket is true.
+// Limit close price: sell at current+$0.01 (LONG), buy at current-$0.01 (SHORT) to get maker fee.
+func (s *AIStrategy) placeCloseOrder(ctx *strategy.Context, side string, qty float64, useMarket bool) {
+	closeSide := strategy.SideSell
+	psSide := strategy.PositionSideLong
+	if side == "SHORT" {
+		closeSide = strategy.SideBuy
+		psSide = strategy.PositionSideShort
+	}
+	req := strategy.OrderRequest{
+		Symbol: s.cfg.Symbol, Side: closeSide, PositionSide: psSide, Qty: qty,
+	}
+	if !useMarket {
+		// Get current price from latest primary bar
+		bars := s.primaryBars()
+		if len(bars) > 0 {
+			lastPrice := bars[len(bars)-1].Close
+			if side == "LONG" {
+				req.Price = math.Round((lastPrice+0.01)*100) / 100 // sell slightly above
+			} else {
+				req.Price = math.Round((lastPrice-0.01)*100) / 100 // buy slightly below
+			}
+			req.Type = strategy.OrderLimit
+		}
+	}
+	ctx.PlaceOrder(req)
+}
+
 // ─── Position Management (every bar) ─────────────────────────────────────────
 
 func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
 	price := bar.Close
-	p.barsHeld++
+	iv := bar.Interval; if iv == "" { iv = s.cfg.PrimaryInterval }
+	isPrimary := iv == s.cfg.PrimaryInterval
+	if isPrimary { p.barsHeld++ }
 
-	// Limit order pending
+	// Limit order pending (check on primary bars only)
 	if !p.filled {
-		if s.barCount-p.limitBar > 15 {
+		if isPrimary && s.barCount-p.limitBar > 2 {
 			s.log.Warn("AI: limit timeout", zap.String("side", p.side), zap.String("id", p.orderID))
 			if p.orderID != "" { ctx.CancelOrder(p.orderID) }
 			*pptr = nil
@@ -575,8 +673,7 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
 		s.closePos(ctx, p, pptr, "stop_loss")
 		s.consecLoss++
-		s.cooldownUntil = s.barCount + 10 // 10 bar cooldown after stop-loss
-		s.log.Info("AI: cooldown 10 bars after stop-loss")
+		s.log.Info("AI: stop-loss hit")
 		return
 	}
 
@@ -648,10 +745,30 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 		return
 	}
 
-	// ── Timeout: 45 bars ──
-	if p.barsHeld >= 45 {
-		s.log.Info("RANGE TIMEOUT", zap.String("side", p.side), zap.Int("bars", p.barsHeld))
-		s.closePos(ctx, p, pptr, "timeout")
+	// ── Smart timeout (time-based, independent of bar interval) ──
+	pnlPct := 0.0
+	if p.side == "LONG" { pnlPct = (price - p.entryPrice) / p.entryPrice }
+	if p.side == "SHORT" { pnlPct = (p.entryPrice - price) / p.entryPrice }
+
+	held := time.Since(p.filledAt)
+	if p.filledAt.IsZero() { held = 0 }
+
+	// Floating profit > 0.5% → skip timeout, let it run
+	if pnlPct > 0.005 {
+		return
+	}
+	// Floating loss → early timeout at 20min
+	if pnlPct < 0 && held >= 20*time.Minute {
+		s.log.Info("RANGE TIMEOUT (floating loss)", zap.String("side", p.side),
+			zap.Float64("pnl_pct", pnlPct*100), zap.Duration("held", held))
+		s.closePos(ctx, p, pptr, "timeout_loss")
+		return
+	}
+	// Sideways → timeout at 30min
+	if held >= 30*time.Minute {
+		s.log.Info("RANGE TIMEOUT (sideways)", zap.String("side", p.side),
+			zap.Float64("pnl_pct", pnlPct*100), zap.Duration("held", held))
+		s.closePos(ctx, p, pptr, "timeout_flat")
 		return
 	}
 }
@@ -719,19 +836,32 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 	if err != nil { s.lastCallBar = s.barCount; return }
 	s.lastCallBar = s.barCount
 	s.totalCall++
+	s.cacheSignal(bar, signal)
+
+	// Extract reversal signal from new dual format
+	reverseConf := 0.0
+	reverseReason := ""
+	if p.side == "LONG" && signal.Short != nil {
+		reverseConf = signal.Short.Confidence
+		reverseReason = signal.Short.Reasoning
+	}
+	if p.side == "SHORT" && signal.Long != nil {
+		reverseConf = signal.Long.Confidence
+		reverseReason = signal.Long.Reasoning
+	}
+	// Backward compat: old single-signal format
+	if signal.Action != "" {
+		if p.side == "LONG" && signal.Action == "SELL" { reverseConf = signal.Confidence; reverseReason = signal.Reasoning }
+		if p.side == "SHORT" && signal.Action == "BUY" { reverseConf = signal.Confidence; reverseReason = signal.Reasoning }
+	}
 
 	s.log.Info("AI reversal check",
-		zap.String("holding", p.side), zap.String("signal", signal.Action),
-		zap.Float64("confidence", signal.Confidence),
-		zap.String("reasoning", signal.Reasoning))
+		zap.String("holding", p.side),
+		zap.Float64("reverse_conf", reverseConf),
+		zap.String("reasoning", reverseReason))
 
-	if signal.Confidence < 0.75 { return }
-	if p.side == "LONG" && signal.Action == "SELL" {
-		s.log.Info("AI: reversal → close LONG")
-		s.closePos(ctx, p, pptr, "gpt_reversal")
-	}
-	if p.side == "SHORT" && signal.Action == "BUY" {
-		s.log.Info("AI: reversal → close SHORT")
+	if reverseConf >= 0.82 {
+		s.log.Info("AI: reversal → close "+p.side, zap.Float64("conf", reverseConf))
 		s.closePos(ctx, p, pptr, "gpt_reversal")
 	}
 }
@@ -742,17 +872,11 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 	qty := math.Floor(p.remainQty*1000) / 1000
 	if qty <= 0 { *pptr = nil; return }
 
-	closeSide := strategy.SideSell
-	psSide := strategy.PositionSideLong
-	if p.side == "SHORT" {
-		closeSide = strategy.SideBuy
-		psSide = strategy.PositionSideShort
-	}
-	ctx.PlaceOrder(strategy.OrderRequest{
-		Symbol: s.cfg.Symbol, Side: closeSide, PositionSide: psSide, Qty: qty,
-	})
+	// Stop-loss uses market order (must fill immediately); others use limit for lower fees
+	useMarket := reason == "stop_loss"
+	s.placeCloseOrder(ctx, p.side, qty, useMarket)
 	s.log.Info("AI: CLOSE", zap.String("side", p.side), zap.String("reason", reason),
-		zap.Float64("entry", p.entryPrice), zap.Float64("qty", qty))
+		zap.Float64("entry", p.entryPrice), zap.Float64("qty", qty), zap.Bool("market", useMarket))
 	s.syncRemove(p.side)
 	*pptr = nil
 }
@@ -762,15 +886,7 @@ func (s *AIStrategy) closePartial(ctx *strategy.Context, p *posState, pptr **pos
 	if qty <= 0 { return }
 	if qty > p.remainQty { qty = p.remainQty }
 
-	closeSide := strategy.SideSell
-	psSide := strategy.PositionSideLong
-	if p.side == "SHORT" {
-		closeSide = strategy.SideBuy
-		psSide = strategy.PositionSideShort
-	}
-	ctx.PlaceOrder(strategy.OrderRequest{
-		Symbol: s.cfg.Symbol, Side: closeSide, PositionSide: psSide, Qty: qty,
-	})
+	s.placeCloseOrder(ctx, p.side, qty, false) // partial close always uses limit
 	p.remainQty -= qty
 	if p.remainQty <= 1e-10 {
 		s.syncRemove(p.side)
@@ -797,16 +913,25 @@ func (s *AIStrategy) checkDayReset(ctx *strategy.Context, price float64) {
 
 // ─── Technical Helpers ───────────────────────────────────────────────────────
 
+func (s *AIStrategy) primaryBars() []exchange.Kline {
+	return s.barsByInterval[s.cfg.PrimaryInterval]
+}
+
+func (s *AIStrategy) barsForInterval(iv string) []exchange.Kline {
+	return s.barsByInterval[iv]
+}
+
 func (s *AIStrategy) getCloses() []float64 {
-	c := make([]float64, len(s.bars))
-	for i, b := range s.bars { c[i] = b.Close }
+	bars := s.primaryBars()
+	c := make([]float64, len(bars))
+	for i, b := range bars { c[i] = b.Close }
 	return c
 }
 
 func (s *AIStrategy) calcATR() float64 {
 	n := 60
-	if len(s.bars) < n+1 { n = len(s.bars) - 1; if n < 5 { return 0 } }
-	recent := s.bars[len(s.bars)-n-1:]
+	if len(s.primaryBars()) < n+1 { n = len(s.primaryBars()) - 1; if n < 5 { return 0 } }
+	recent := s.primaryBars()[len(s.primaryBars())-n-1:]
 	var sum float64
 	for i := 1; i < len(recent); i++ {
 		sum += math.Max(recent[i].High-recent[i].Low,
@@ -833,40 +958,36 @@ type subSignal struct {
 	Reasoning  string  `json:"reasoning"`
 }
 
-const systemPrompt = `You are a crypto futures trader using HEDGE MODE (hold long AND short simultaneously).
-
-Evaluate BOTH directions independently every time. In range markets, BOTH sides should often be >= 0.65.
+const systemPrompt = `You are a crypto futures trader. Multi-timeframe analysis: 5m (entry) + 15m (trend).
 
 RESPONSE (strict JSON):
 {"long":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."},"short":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."}}
 
-RULES:
-- long entry_price: at nearest SUPPORT (swing_low_10, bb_lower, EMA20), below current price
-- short entry_price: at nearest RESISTANCE (swing_high_10, bb_upper), above current price
-- entry_price within 0.5% of current price
-- Both can be >= 0.65 simultaneously — this is EXPECTED in range markets
+MULTI-TIMEFRAME RULES:
+1. CHECK indicators_15m FIRST for trend direction:
+   - 15m return_20bar > +1%: UPTREND → favor long (0.80+), short < 0.30
+   - 15m return_20bar < -1%: DOWNTREND → favor short (0.80+), long < 0.30
+   - 15m between -1% and +1%: RANGE → both sides OK (0.65-0.85)
+2. USE 5m indicators for precise timing:
+   - long entry_price: nearest SUPPORT (swing_low_10, bb_lower, ema20), below current price
+   - short entry_price: nearest RESISTANCE (swing_high_10, bb_upper), above current price
+   - entry_price within 0.5% of current price
 
-CRITICAL — CHECK return_60bar FIRST:
-- return_60bar < -0.5%: DOWNTREND. Do NOT buy. Only short or hold.
-- return_60bar > +0.5%: UPTREND. Do NOT short. Only buy or hold.
-- return_60bar between -0.5% and +0.5%: RANGE. Both sides OK.
+CONFIDENCE GUIDE:
+- Strong trend + aligned 5m signal: 0.85-0.95
+- Range + clear support/resistance: 0.75-0.85
+- Weak/conflicting signals: 0.30-0.60
+- Counter-trend: < 0.30
 
-RANGE MARKET:
-- LONG at swing_low / bb_lower — confidence 0.65-0.80
-- SHORT at swing_high / bb_upper — confidence 0.65-0.80
-
-TREND MARKET:
-- Trade WITH the trend only: higher confidence for trend direction
-- Counter-trend: confidence < 0.30 (strongly discouraged)
-
-KEY: In ranging markets you MUST give both sides a fair evaluation. Do not bias toward one direction.`
+Be decisive. When 15m trend is clear AND 5m timing aligns, give HIGH confidence (0.85+).`
 
 type mktCtx struct {
-	Symbol     string             `json:"symbol"`
-	Price      float64            `json:"price"`
-	Indicators map[string]float64 `json:"indicators"`
-	RecentBars []barData          `json:"recent_bars"`
-	Position   string             `json:"position"`
+	Symbol       string             `json:"symbol"`
+	Price        float64            `json:"price"`
+	Indicators   map[string]float64 `json:"indicators"`
+	Indicators15 map[string]float64 `json:"indicators_15m,omitempty"`
+	RecentBars   []barData          `json:"recent_bars"`
+	Position     string             `json:"position"`
 }
 type barData struct {
 	T string `json:"t"`; O, H, L, C, V float64
@@ -882,7 +1003,7 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 	atr := s.calcATR()
 	bbU, bbL := indicator.Last(bb.Upper), indicator.Last(bb.Lower)
 	bbPos := 0.5; if bbU-bbL > 0 { bbPos = (bar.Close - bbL) / (bbU - bbL) }
-	vols := make([]float64, len(s.bars)); for i, b := range s.bars { vols[i] = b.Volume }
+	vols := make([]float64, len(s.primaryBars())); for i, b := range s.primaryBars() { vols[i] = b.Volume }
 	volMA := indicator.Last(indicator.SMA(vols, 20)); vr := 1.0; if volMA > 0 { vr = bar.Volume / volMA }
 
 	ind := map[string]float64{
@@ -903,11 +1024,36 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 		}(),
 	}
 
-	n := 10; if len(s.bars) < n { n = len(s.bars) }
-	bars := make([]barData, n); st := len(s.bars) - n
+	n := 10; if len(s.primaryBars()) < n { n = len(s.primaryBars()) }
+	bars := make([]barData, n); st := len(s.primaryBars()) - n
 	for i := 0; i < n; i++ {
-		b := s.bars[st+i]
+		b := s.primaryBars()[st+i]
 		bars[i] = barData{T: b.OpenTime.Format("15:04"), O: r2(b.Open), H: r2(b.High), L: r2(b.Low), C: r2(b.Close), V: r2(b.Volume)}
+	}
+
+	// ── 15m trend indicators ──
+	var ind15 map[string]float64
+	bars15 := s.barsForInterval("15m")
+	if len(bars15) >= 20 {
+		closes15 := make([]float64, len(bars15))
+		for i, b := range bars15 { closes15[i] = b.Close }
+		rsi15 := indicator.Last(indicator.RSI(closes15, 14))
+		ema20_15 := indicator.Last(indicator.EMA(closes15, 20))
+		ema50_15 := 0.0
+		if len(closes15) >= 50 { ema50_15 = indicator.Last(indicator.EMA(closes15, 50)) }
+		macd15 := indicator.MACD(closes15, 12, 26, 9)
+		ret20 := 0.0
+		if len(closes15) >= 20 { ret20 = (closes15[len(closes15)-1] - closes15[len(closes15)-20]) / closes15[len(closes15)-20] * 100 }
+		trend := "range"
+		if ret20 > 1.0 { trend = "uptrend" } else if ret20 < -1.0 { trend = "downtrend" }
+		_ = trend
+		ind15 = map[string]float64{
+			"rsi":       r2(rsi15),
+			"ema20":     r2(ema20_15),
+			"ema50":     r2(ema50_15),
+			"macd_hist": r2(indicator.Last(macd15.Histogram)),
+			"return_20bar": r3(ret20),
+		}
 	}
 
 	posStr := "FLAT"
@@ -916,7 +1062,7 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 	if s.shortPos != nil && s.shortPos.filled { parts = append(parts, fmt.Sprintf("SHORT@%.2f", s.shortPos.entryPrice)) }
 	if len(parts) > 0 { posStr = fmt.Sprintf("%v", parts) }
 
-	return mktCtx{Symbol: s.cfg.Symbol, Price: r2(bar.Close), Indicators: ind, RecentBars: bars, Position: posStr}
+	return mktCtx{Symbol: s.cfg.Symbol, Price: r2(bar.Close), Indicators: ind, Indicators15: ind15, RecentBars: bars, Position: posStr}
 }
 
 func (s *AIStrategy) callGPT(mc mktCtx) (gptSignal, error) {
@@ -962,7 +1108,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		sl := lp.StopLoss
 		if sl == 0 {
 			slDist := atr * s.cfg.ATRK
-			minDist := entry * 0.003
+			minDist := entry * 0.008
 			if slDist < minDist { slDist = minDist }
 			sl = entry - slDist
 		}
@@ -974,7 +1120,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			initQty: lp.InitQty, remainQty: lp.Qty,
 			R: lp.R, stopLoss: sl, takeProfit: tp,
 			trailing: lp.Trailing, peakPrice: lp.PeakPrice,
-			tp1RHit: lp.TP1Hit, barsHeld: max(lp.BarsHeld, 10), filled: true,
+			tp1RHit: lp.TP1Hit, barsHeld: max(lp.BarsHeld, 10), filled: true, filledAt: time.Now(),
 		}
 		if s.longPos.initQty == 0 { s.longPos.initQty = lp.Qty }
 		if s.longPos.R == 0 { s.longPos.R = math.Abs(entry - sl) }
@@ -995,7 +1141,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		sl := sp.StopLoss
 		if sl == 0 {
 			slDist := atr * s.cfg.ATRK
-			minDist := entry * 0.003
+			minDist := entry * 0.008
 			if slDist < minDist { slDist = minDist }
 			sl = entry + slDist
 		}
@@ -1007,7 +1153,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			initQty: sp.InitQty, remainQty: sp.Qty,
 			R: sp.R, stopLoss: sl, takeProfit: tp,
 			trailing: sp.Trailing, peakPrice: sp.PeakPrice,
-			tp1RHit: sp.TP1Hit, barsHeld: max(sp.BarsHeld, 10), filled: true,
+			tp1RHit: sp.TP1Hit, barsHeld: max(sp.BarsHeld, 10), filled: true, filledAt: time.Now(),
 		}
 		if s.shortPos.initQty == 0 { s.shortPos.initQty = sp.Qty }
 		if s.shortPos.R == 0 { s.shortPos.R = math.Abs(entry - sl) }
@@ -1050,15 +1196,50 @@ func (s *AIStrategy) syncRemove(side string) {
 }
 
 func (s *AIStrategy) findSwingLow(n int) float64 {
-	if len(s.bars) < n { n = len(s.bars) }
+	if len(s.primaryBars()) < n { n = len(s.primaryBars()) }
 	low := math.MaxFloat64
-	for i := len(s.bars) - n; i < len(s.bars); i++ { if s.bars[i].Low < low { low = s.bars[i].Low } }
+	for i := len(s.primaryBars()) - n; i < len(s.primaryBars()); i++ { if s.primaryBars()[i].Low < low { low = s.primaryBars()[i].Low } }
 	return low
 }
 func (s *AIStrategy) findSwingHigh(n int) float64 {
-	high := 0.0; start := len(s.bars) - n; if start < 0 { start = 0 }
-	for i := start; i < len(s.bars); i++ { if s.bars[i].High > high { high = s.bars[i].High } }
+	high := 0.0; start := len(s.primaryBars()) - n; if start < 0 { start = 0 }
+	for i := start; i < len(s.primaryBars()); i++ { if s.primaryBars()[i].High > high { high = s.primaryBars()[i].High } }
 	return high
+}
+
+// cacheSignal stores GPT signal in Redis for backtesting replay.
+// Key: quantix:signals:{symbol}:{interval} → JSON list
+func (s *AIStrategy) cacheSignal(bar exchange.Kline, sig gptSignal) {
+	if s.rdb == nil { return }
+	entry := map[string]any{
+		"time":    bar.CloseTime.Unix(),
+		"bar":     s.barCount,
+		"price":   r2(bar.Close),
+		"atr":     r2(s.calcATR()),
+		"interval": s.cfg.PrimaryInterval,
+	}
+	if sig.Long != nil {
+		entry["long_conf"] = sig.Long.Confidence
+		entry["long_entry"] = sig.Long.EntryPrice
+		entry["long_reason"] = sig.Long.Reasoning
+	}
+	if sig.Short != nil {
+		entry["short_conf"] = sig.Short.Confidence
+		entry["short_entry"] = sig.Short.EntryPrice
+		entry["short_reason"] = sig.Short.Reasoning
+	}
+	// Backward compat
+	if sig.Action != "" {
+		entry["action"] = sig.Action
+		entry["confidence"] = sig.Confidence
+		entry["entry_price"] = sig.EntryPrice
+	}
+	data, err := json.Marshal(entry)
+	if err != nil { return }
+	key := fmt.Sprintf("quantix:signals:%s:%s", s.cfg.Symbol, s.cfg.PrimaryInterval)
+	if err := s.rdb.RPush(context.Background(), key, string(data)).Err(); err != nil {
+		s.log.Warn("AI: signal cache failed", zap.Error(err))
+	}
 }
 
 func r2(v float64) float64 { return math.Round(v*100) / 100 }
