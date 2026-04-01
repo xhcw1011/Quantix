@@ -1,0 +1,146 @@
+version: "3.9"
+
+services:
+  # ─────────────────────────────────────────────
+  # TimescaleDB (PostgreSQL + time-series extension)
+  # ─────────────────────────────────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: quantix-timescaledb
+    environment:
+      POSTGRES_USER: quantix
+      POSTGRES_PASSWORD: quantix_secret
+      POSTGRES_DB: quantix
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantix -d quantix"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Redis (real-time ticker/orderbook cache)
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: quantix-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # NATS (message bus: market data → strategy → OMS)
+  # ─────────────────────────────────────────────
+  nats:
+    image: nats:2-alpine
+    container_name: quantix-nats
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # HTTP monitoring
+    command: ["-js", "-m", "8222"]   # enable JetStream + monitoring
+    healthcheck:
+      test: ["CMD", "nats-server", "--help"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Prometheus (metrics scraping)
+  # ─────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: quantix-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Grafana (dashboards)
+  # ─────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: quantix-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: quantix_grafana
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+      - timescaledb
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Quantix API server
+  # ─────────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: quantix-api
+    ports:
+      - "8080:8080"
+    environment:
+      QUANTIX_ENCRYPTION_KEY: "${QUANTIX_ENCRYPTION_KEY}"
+      QUANTIX_JWT_SECRET: "${QUANTIX_JWT_SECRET}"
+      QUANTIX_LIVE_CONFIRM: "${QUANTIX_LIVE_CONFIRM:-}"
+      QUANTIX_CORS_ORIGINS: "${QUANTIX_CORS_ORIGINS:-http://localhost:5173,http://localhost:3000}"
+      # Override DB host so the API container resolves the TimescaleDB service name,
+      # not the "localhost" that is typically in config/config.yaml.
+      QUANTIX_DATABASE_HOST: timescaledb
+    env_file:
+      - .env
+    volumes:
+      - ../config/config.yaml:/app/config/config.yaml:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Quantix frontend (Nginx + React SPA)
+  # ─────────────────────────────────────────────
+  web:
+    build:
+      # Build context is the project root so web/Dockerfile can reference
+      # both web/ sources and deploy/nginx.conf in a single build context.
+      context: ..
+      dockerfile: web/Dockerfile
+    container_name: quantix-web
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  timescaledb_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

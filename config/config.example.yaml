@@ -1,0 +1,108 @@
+# Quantix Configuration Example
+# Copy this file to config.yaml and fill in your values
+
+app:
+  name: quantix
+  env: development  # development | production
+  log_level: debug  # debug | info | warn | error
+
+exchange:
+  # Active exchange: "binance" | "okx" | "bybit" (bybit = market data only, no order execution)
+  active: binance
+
+  binance:
+    api_key: ""
+    api_secret: ""        # Leave empty when testing private-key auth to avoid HMAC confusion
+    testnet: false        # true → testnet.binance.vision (legacy, independent market data)
+    demo: true            # true → demo-api.binance.com (recommended, mirrors live market data)
+    market_type: "spot"   # "spot" | "futures" (USDM perpetual)
+    # key_type: "RSA"             # "HMAC" (default) | "RSA" | "ED25519"
+    # private_key_path: ""        # Path to PEM private key file (required for RSA/ED25519)
+
+  okx:
+    api_key: ""
+    api_secret: ""
+    passphrase: ""        # OKX API passphrase
+    demo: true            # Use OKX demo trading environment
+    market_type: "SWAP"   # "SPOT" | "SWAP" (perpetual)
+
+  bybit:
+    api_key: ""
+    api_secret: ""
+    # NOTE: Bybit currently supports market data only (REST + WebSocket).
+    # Order execution (live/paper trading) is not yet implemented.
+
+data:
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  intervals:
+    - 1m
+    - 5m
+    - 1h
+  # How many historical candles to backfill on startup
+  backfill_limit: 500
+
+database:
+  host: localhost
+  port: 5432
+  user: quantix
+  password: quantix_secret
+  name: quantix
+  ssl_mode: disable
+  max_conns: 10
+
+redis:
+  addr: localhost:6379
+  password: ""
+  db: 0
+
+nats:
+  url: nats://localhost:4222
+
+trading:
+  mode: paper  # paper | live | backtest
+  base_currency: USDT
+
+risk:
+  max_position_pct: 0.10    # Max 10% of balance per position
+  max_drawdown_pct: 0.15    # Circuit-breaker at 15% drawdown
+  max_single_loss_pct: 0.02 # Max 2% loss per trade
+
+monitor:
+  prometheus_port: 9090
+  enabled: true
+  # Margin monitoring thresholds (futures/swap only)
+  margin_warn_threshold: 0.20      # Warn when margin ratio drops below 20%
+  margin_critical_threshold: 0.12  # Critical alert below 12%
+  margin_check_interval: 60s       # How often to poll margin status
+
+# HTTP server settings
+server:
+  rate_limit_rps: 10        # Requests per second per IP
+  rate_limit_burst: 30      # Burst allowance per IP
+  jwt_expiry: 24h           # JWT token lifetime
+  read_timeout: 15s         # HTTP read timeout
+  write_timeout: 30s        # HTTP write timeout
+  idle_timeout: 60s         # HTTP idle connection timeout
+
+telegram:
+  bot_token: ""   # Get from @BotFather; set via QUANTIX_TELEGRAM_BOT_TOKEN
+  chat_id: 0      # Your Telegram chat/group ID; set via QUANTIX_TELEGRAM_CHAT_ID
+
+# Live trading kill-switch. When enabled=false (default), all live engine starts
+# are rejected. Paper mode is unaffected. Override via QUANTIX_LIVE_ENABLED=true.
+live:
+  enabled: false
+
+# OpenAI / GPT configuration for AI strategy
+# API key can also be set via QUANTIX_OPENAI_API_KEY environment variable
+openai:
+  api_key: ""              # Your OpenAI API key
+  model: "gpt-5.4-mini"   # Default model: gpt-5.4-mini (cheapest), gpt-5.4 (best)
+
+paper:
+  initial_capital: 10000.0    # Starting capital in base_currency
+  fee_rate: 0.001             # 0.1% maker/taker fee
+  slippage: 0.0005            # 0.05% slippage simulation
+  strategy_id: macross-btc-1h

@@ -1,0 +1,56 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+quantix
+api
+
+# Test binary
+*.test
+
+# Go build cache
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+*.pem
+*.key
+
+# Config with secrets (keep only config.example.yaml)
+config/config.yaml
+config/config.spot.yaml
+config/config.futures.yaml
+
+# Dependencies
+vendor/
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# ML models (large files)
+scripts/ml/*.pkl
+scripts/ml/*.joblib
+
+# Logs
+*.log
+logs/
+
+# Compiled binaries
+bin/
+
+# Swagger generated (can regenerate)
+# docs/docs.go

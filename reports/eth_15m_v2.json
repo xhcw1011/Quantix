@@ -1,0 +1,1928 @@
+[
+  {
+    "bar": 60,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2059.9,
+    "reasoning": "Price is holding above the EMA cluster with positive MACD and strong RSI momentum, and a pullback entry near 2059 offers support just below current price within range.",
+    "price": 2066.76,
+    "atr": 13.370714285714339
+  },
+  {
+    "bar": 63,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2046.9,
+    "reasoning": "Price is holding above the 10-bar swing low with EMA20/EMA50 support nearby, RSI is neutral, MACD remains positive, and elevated volume suggests a rebound entry into support.",
+    "price": 2048.71,
+    "atr": 16.132142857142885
+  },
+  {
+    "bar": 66,
+    "action": "BUY",
+    "confidence": 0.67,
+    "entry_price": 2052.5,
+    "reasoning": "Price is holding above the 20/50 EMA cluster with RSI neutral-bullish, volume expanding, and a pullback entry near support around 2052 offers favorable upside toward the recent 2078 swing high.",
+    "price": 2059.96,
+    "atr": 16.212142857142876
+  },
+  {
+    "bar": 69,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2060,
+    "reasoning": "Price is holding above the 20/50 EMA with positive MACD and RSI still constructive, while a pullback into the 2054-2060 support zone offers a favorable long entry before the 2084 swing high.",
+    "price": 2072.3,
+    "atr": 15.805714285714316
+  },
+  {
+    "bar": 72,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2058.9,
+    "reasoning": "Price is holding above the 20/50 EMA with positive MACD and neutral-strong RSI, and a pullback entry near the 50 EMA/support offers favorable risk-reward toward the recent swing high.",
+    "price": 2069.99,
+    "atr": 15.005000000000027
+  },
+  {
+    "bar": 75,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound near EMA20/EMA50 with neutral RSI and bearish MACD momentum, so there is no clean high-probability breakout or pullback setup.",
+    "price": 2065.18,
+    "atr": 13.792142857142851
+  },
+  {
+    "bar": 78,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped near EMA20/EMA50 with weak volume, bearish MACD, and only mid-range RSI, so there is no high-probability breakout or clean support/resistance entry yet.",
+    "price": 2057.1,
+    "atr": 11.664285714285695
+  },
+  {
+    "bar": 81,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped near the EMA cluster with weak volume, bearish MACD momentum, and no clean support/resistance edge for a high-probability futures entry.",
+    "price": 2052.63,
+    "atr": 9.670714285714244
+  },
+  {
+    "bar": 84,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between flat EMAs with weak momentum, RSI neutral, MACD still negative, and volume below average, so there is no high-probability breakout or reversal setup.",
+    "price": 2055.53,
+    "atr": 8.772142857142788
+  },
+  {
+    "bar": 87,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2057.8,
+    "reasoning": "Price is holding above the EMA cluster with strong volume, RSI is neutral-bullish, and a pullback into 2058 support offers a favorable long entry toward the recent 2075 swing high.",
+    "price": 2065.56,
+    "atr": 9.522857142857058
+  },
+  {
+    "bar": 90,
+    "action": "HOLD",
+    "confidence": 0.71,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between tight EMAs with neutral RSI, negative MACD momentum, and no clean support/resistance edge despite elevated volume, so the setup lacks a decisive directional advantage.",
+    "price": 2058.7,
+    "atr": 9.158571428571397
+  },
+  {
+    "bar": 93,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2042.5,
+    "reasoning": "Price is near the lower Bollinger band and swing low support with RSI recovering from oversold territory, while a mean-reversion bounce is favored despite weak momentum and below-average volume.",
+    "price": 2046.23,
+    "atr": 9.244285714285686
+  },
+  {
+    "bar": 96,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2040.5,
+    "reasoning": "Price is holding near the 10-bar swing low and lower Bollinger band with RSI still above oversold and a likely mean-reversion bounce setup despite bearish MACD momentum.",
+    "price": 2044.45,
+    "atr": 9.507857142857151
+  },
+  {
+    "bar": 99,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/50 overhead and support near 2040 with weak momentum (MACD negative, RSI neutral, volume below average), so there is no clean high-probability breakout or reversal setup.",
+    "price": 2049.72,
+    "atr": 9.91785714285717
+  },
+  {
+    "bar": 102,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped below both EMA20/EMA50 with weak volume and neutral RSI, while MACD is positive but not enough to justify a clean long or short setup.",
+    "price": 2047.26,
+    "atr": 9.538571428571442
+  },
+  {
+    "bar": 105,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2035.8,
+    "reasoning": "Price is near the 10-bar swing low and lower Bollinger band with RSI below 50 and elevated volume, suggesting a support bounce setup despite weak MACD.",
+    "price": 2043.43,
+    "atr": 8.078571428571454
+  },
+  {
+    "bar": 108,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is below both EMAs with bearish MACD, but RSI is near oversold and price is sitting close to lower Bollinger support, so the edge is mixed and not clean enough to short or buy decisively.",
+    "price": 2036.97,
+    "atr": 8.562142857142883
+  },
+  {
+    "bar": 111,
+    "action": "BUY",
+    "confidence": 0.79,
+    "entry_price": 2009.5,
+    "reasoning": "Price is deeply oversold with RSI 26.4, below the lower Bollinger band and near the 10-bar swing low, while ATR suggests room for a mean-reversion bounce from support.",
+    "price": 2018.4,
+    "atr": 11.527142857142897
+  },
+  {
+    "bar": 114,
+    "action": "BUY",
+    "confidence": 0.84,
+    "entry_price": 2008.5,
+    "reasoning": "Price is at oversold support near the 10-bar swing low and below the lower Bollinger Band with RSI deeply oversold, while downside momentum is stretched enough to favor a mean-reversion long.",
+    "price": 2009.62,
+    "atr": 12.15500000000002
+  },
+  {
+    "bar": 117,
+    "action": "BUY",
+    "confidence": 0.84,
+    "entry_price": 1998.9,
+    "reasoning": "Price is at the lower Bollinger band and near the 10-bar swing low with deeply oversold RSI, while the recent bounce from 1996 suggests a mean-reversion long despite weak momentum.",
+    "price": 2000.42,
+    "atr": 12.357857142857158
+  },
+  {
+    "bar": 120,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 1997.4,
+    "reasoning": "Price is holding above the 10-bar swing low and lower Bollinger band with oversold RSI, strong volume expansion, and a likely mean-reversion bounce toward EMA20.",
+    "price": 2006.68,
+    "atr": 15.127142857142871
+  },
+  {
+    "bar": 123,
+    "action": "BUY",
+    "confidence": 0.84,
+    "entry_price": 1976.8,
+    "reasoning": "Price is deeply oversold near the lower Bollinger band and swing low with RSI 25.8 and MACD negative but stretched, so a mean-reversion long at nearby support offers favorable risk/reward.",
+    "price": 1984.59,
+    "atr": 17.012857142857165
+  },
+  {
+    "bar": 126,
+    "action": "BUY",
+    "confidence": 0.86,
+    "entry_price": 1967.42,
+    "reasoning": "Price is deeply oversold near the lower Bollinger Band with RSI 23.5, strong volume expansion, and a bullish mean-reversion setup toward EMA20 despite negative MACD momentum.",
+    "price": 1972.83,
+    "atr": 18.817142857142876
+  },
+  {
+    "bar": 129,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 1981.5,
+    "reasoning": "Price is holding above the recent swing low with RSI recovering from neutral, MACD momentum positive, and a pullback entry near support around 1981 offers favorable risk-reward toward the 2018-2023 resistance zone.",
+    "price": 1991.29,
+    "atr": 22.52714285714288
+  },
+  {
+    "bar": 132,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/EMA50 with neutral RSI, weak volume, and MACD momentum not yet confirming a clean breakout or breakdown, so the edge is insufficient.",
+    "price": 2003.26,
+    "atr": 21.730714285714303
+  },
+  {
+    "bar": 135,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1989.9,
+    "reasoning": "Price is holding above the 20 EMA with positive MACD momentum and neutral RSI, while the recent pullback into the 1990 area offers a support entry below current price.",
+    "price": 2000.44,
+    "atr": 16.18714285714285
+  },
+  {
+    "bar": 138,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 and EMA50 with weak volume, RSI neutral-bearish, and no clean high-probability support/resistance breakout setup.",
+    "price": 1995.04,
+    "atr": 15.22285714285712
+  },
+  {
+    "bar": 141,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 1994.8,
+    "reasoning": "Price is holding above the 20 EMA with positive MACD momentum and RSI neutral, while a pullback into the 1993-1995 support zone offers a favorable long entry toward the 2008-2011 resistance area.",
+    "price": 1997.27,
+    "atr": 8.875
+  },
+  {
+    "bar": 144,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 and EMA50 with weak volume, neutral RSI, and mixed momentum, so there is no high-quality directional edge yet.",
+    "price": 1992.75,
+    "atr": 5.647857142857139
+  },
+  {
+    "bar": 147,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 and EMA50 with RSI neutral, MACD positive but fading, and no clean high-probability support/resistance break despite nearby swing levels.",
+    "price": 1995.65,
+    "atr": 5.8321428571428635
+  },
+  {
+    "bar": 150,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 and EMA50 with neutral RSI, weak volume, and mixed momentum, so there is no high-probability breakout or reversal setup.",
+    "price": 1996.74,
+    "atr": 6.124285714285731
+  },
+  {
+    "bar": 153,
+    "action": "BUY",
+    "confidence": 0.67,
+    "entry_price": 1989.9,
+    "reasoning": "Price is holding above the 10-bar swing low and near the lower Bollinger band with RSI neutral and MACD still positive, suggesting a mean-reversion long toward EMA20/EMA50 resistance.",
+    "price": 1992.33,
+    "atr": 6.543571428571421
+  },
+  {
+    "bar": 156,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 1986.5,
+    "reasoning": "Price is pressing the lower Bollinger band and swing low support with oversold momentum, while elevated volume suggests a likely mean-reversion bounce from 1985.5-1986.5.",
+    "price": 1988.66,
+    "atr": 7.307857142857107
+  },
+  {
+    "bar": 159,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound between 1985.5 support and 2003 resistance with weak volume, RSI near neutral, and mixed momentum, so there is no high-probability breakout or reversal setup.",
+    "price": 1993.96,
+    "atr": 7.154999999999957
+  },
+  {
+    "bar": 162,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1984.9,
+    "reasoning": "Price is pressing the lower Bollinger band with RSI below 50, volume elevated, and support near the recent swing low suggests a mean-reversion long from just below current price.",
+    "price": 1986.12,
+    "atr": 8.142857142857094
+  },
+  {
+    "bar": 165,
+    "action": "BUY",
+    "confidence": 0.69,
+    "entry_price": 1986.9,
+    "reasoning": "Price is holding near the lower Bollinger band with RSI below 50, MACD only slightly negative, and strong volume on the recent selloff suggests a support bounce toward the 1992-2000 resistance zone.",
+    "price": 1988.52,
+    "atr": 9.022142857142821
+  },
+  {
+    "bar": 168,
+    "action": "SELL",
+    "confidence": 0.77,
+    "entry_price": 2002.2,
+    "reasoning": "Price is pressing the 2002.77 swing high and upper range with weakening volume, while RSI is mid-range and MACD momentum is positive but stretched near resistance, favoring a short fade above current price.",
+    "price": 2001.68,
+    "atr": 9.007857142857135
+  },
+  {
+    "bar": 171,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2007,
+    "reasoning": "Price is pressing the 10-bar swing high and upper range with weakening volume, while RSI is only moderate and a short fade toward EMA20/EMA50 offers a favorable resistance entry.",
+    "price": 2005,
+    "atr": 7.993571428571419
+  },
+  {
+    "bar": 174,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range between support and resistance with weak volume and neutral RSI, while MACD remains positive but EMA20/50 overhead cap upside, so there is no clean high-probability entry.",
+    "price": 1994.89,
+    "atr": 8.849285714285722
+  },
+  {
+    "bar": 177,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/EMA50 with weak momentum, RSI near neutral, MACD still negative, and no clear support/resistance break confirming a high-probability futures setup.",
+    "price": 1995.66,
+    "atr": 7.460714285714256
+  },
+  {
+    "bar": 180,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1999.6,
+    "reasoning": "Price is holding above the 20/50 EMA cluster with positive MACD and RSI mid-range, and a pullback entry near 1999.6 offers support just below current price within the allowed range.",
+    "price": 2001.59,
+    "atr": 5.996428571428543
+  },
+  {
+    "bar": 183,
+    "action": "SELL",
+    "confidence": 0.72,
+    "entry_price": 2005.1,
+    "reasoning": "Price is stretched near the 10-bar swing high and above EMA20/EMA50 with fading volume, while RSI is only moderate and MACD momentum is positive but likely near resistance, favoring a short into 2005.1.",
+    "price": 2004.08,
+    "atr": 5.714285714285698
+  },
+  {
+    "bar": 186,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2007.6,
+    "reasoning": "Price is stretched near the upper Bollinger band and recent swing high resistance with weakening volume, while RSI is only moderate and EMA structure is flat, favoring a short fade into resistance.",
+    "price": 2005,
+    "atr": 5.674999999999987
+  },
+  {
+    "bar": 189,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is pinned between flat EMAs with neutral RSI and weak volume, so there is no clean breakout or pullback edge despite nearby support/resistance.",
+    "price": 2001.36,
+    "atr": 4.654999999999989
+  },
+  {
+    "bar": 192,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is pinned between converged EMAs with neutral RSI, weak negative MACD, and no clear breakout or breakdown beyond the recent 10-bar range, so the edge is insufficient.",
+    "price": 2000.83,
+    "atr": 4.7042857142857235
+  },
+  {
+    "bar": 195,
+    "action": "HOLD",
+    "confidence": 0.67,
+    "entry_price": 0,
+    "reasoning": "Price is pinned near flat EMA20/50 with neutral RSI and weak MACD, so there is no clean directional edge despite nearby support at 1998.76 and resistance at 2009.48.",
+    "price": 2000.8,
+    "atr": 4.46285714285716
+  },
+  {
+    "bar": 198,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2006,
+    "reasoning": "Price is stretched near the upper Bollinger band and recent swing high while MACD remains negative and volume is fading, favoring a short into resistance around 2006.",
+    "price": 2004.96,
+    "atr": 5.161428571428587
+  },
+  {
+    "bar": 201,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2011.8,
+    "reasoning": "Price is stretched above the upper Bollinger band with RSI elevated and momentum likely fading into the 2011.89 swing high resistance, offering a favorable short setup.",
+    "price": 2011.14,
+    "atr": 5.284285714285732
+  },
+  {
+    "bar": 204,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2014,
+    "reasoning": "Price is stretched above the upper Bollinger band with RSI elevated and strong volume after a push into the 2019 swing high, favoring a short fade into resistance.",
+    "price": 2012.67,
+    "atr": 5.802857142857159
+  },
+  {
+    "bar": 207,
+    "action": "BUY",
+    "confidence": 0.68,
+    "entry_price": 2001.5,
+    "reasoning": "Price is holding above the 10-bar swing low and both EMAs with neutral RSI and positive MACD histogram, suggesting a mild bullish continuation/retest setup near support.",
+    "price": 2005.58,
+    "atr": 5.867857142857166
+  },
+  {
+    "bar": 210,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/50 with weak MACD and only middling RSI, while volume is below average and the recent swing range offers no clean high-probability breakout or pullback setup.",
+    "price": 2003.97,
+    "atr": 5.570714285714303
+  },
+  {
+    "bar": 213,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between tight EMAs with neutral RSI, negative MACD histogram, and no clean edge despite elevated volume, so waiting for a decisive break above 2012.5 or below 1998 is safer.",
+    "price": 2003.16,
+    "atr": 5.938571428571452
+  },
+  {
+    "bar": 216,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1991.5,
+    "reasoning": "Price is testing the lower Bollinger band and swing low with RSI oversold, rising volume, and downside momentum likely stretched, making a mean-reversion long attractive near support.",
+    "price": 1992.68,
+    "atr": 6.4978571428571446
+  },
+  {
+    "bar": 219,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1991.8,
+    "reasoning": "Price is near lower Bollinger support with RSI oversold-leaning, MACD still negative but momentum appears stretched while volume is elevated, making a mean-reversion long attractive below current price.",
+    "price": 1994.11,
+    "atr": 5.766428571428572
+  },
+  {
+    "bar": 222,
+    "action": "SELL",
+    "confidence": 0.77,
+    "entry_price": 2012.2,
+    "reasoning": "Price is stretched near the 10-bar swing high with RSI elevated, MACD still positive but volume weak, and the move looks overextended into resistance just above current price.",
+    "price": 2010.92,
+    "atr": 8.216428571428585
+  },
+  {
+    "bar": 225,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1998.9,
+    "reasoning": "Price is holding above rising momentum with MACD positive and RSI neutral, and a pullback into the 2000 area near EMA20/50 and recent swing support offers a favorable long entry.",
+    "price": 2005.31,
+    "atr": 8.477857142857147
+  },
+  {
+    "bar": 228,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2020.5,
+    "reasoning": "Price is stretched at the upper Bollinger band with RSI elevated and momentum showing exhaustion near the recent swing high, making a short into resistance favorable.",
+    "price": 2018.59,
+    "atr": 8.756428571428566
+  },
+  {
+    "bar": 231,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2025,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper Bollinger area with RSI elevated, while volume is weak and momentum looks overextended, making a short into resistance favorable.",
+    "price": 2021.74,
+    "atr": 8.335000000000004
+  },
+  {
+    "bar": 234,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2007,
+    "reasoning": "Price is above rising EMAs with positive MACD and healthy RSI, and a pullback into the 2007 support area offers a favorable long entry within the current uptrend.",
+    "price": 2019.52,
+    "atr": 8.296428571428562
+  },
+  {
+    "bar": 237,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound between EMA20/EMA50 with weak volume and no clean breakout or pullback edge, so the risk-reward is poor for a new futures entry.",
+    "price": 2017.8,
+    "atr": 5.836428571428574
+  },
+  {
+    "bar": 240,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 2016.1,
+    "reasoning": "Price is holding above EMA50 and near the 10-bar swing low support with RSI still constructive, so a dip-buy at support offers a favorable long setup despite weak volume and slightly negative MACD momentum.",
+    "price": 2020.81,
+    "atr": 4.550714285714288
+  },
+  {
+    "bar": 243,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2017.4,
+    "reasoning": "Price is holding above EMA50 with RSI neutral-bullish and strong volume, while a pullback to the EMA20/near swing support offers a favorable long entry before the 2024 resistance.",
+    "price": 2020.09,
+    "atr": 4.430000000000031
+  },
+  {
+    "bar": 246,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2024.8,
+    "reasoning": "Price is stretched near the upper Bollinger band with bearish MACD histogram, elevated volume on a failed push above 2026 resistance, and a short setup favors fading into resistance above current price.",
+    "price": 2023.48,
+    "atr": 4.7857142857143185
+  },
+  {
+    "bar": 249,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2027.8,
+    "reasoning": "Price is pressing the 10-bar swing high and Bollinger upper band with elevated volume while RSI is near overbought and MACD momentum is flat-to-negative, favoring a short from resistance.",
+    "price": 2026.94,
+    "atr": 4.980000000000034
+  },
+  {
+    "bar": 252,
+    "action": "SELL",
+    "confidence": 0.77,
+    "entry_price": 2030.6,
+    "reasoning": "Price is extended above EMA20 with bearish MACD histogram, RSI near overbought, and heavy volume rejection from the 2038.81 swing high, favoring a short into resistance.",
+    "price": 2027.14,
+    "atr": 6.2549999999999955
+  },
+  {
+    "bar": 255,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range near EMA20 with mixed momentum (RSI neutral, MACD still negative) and no clean support/resistance edge, so the risk-reward is not strong enough to force a trade.",
+    "price": 2025.81,
+    "atr": 7.683571428571407
+  },
+  {
+    "bar": 258,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 and EMA50 with bearish MACD momentum but no clean breakout or pullback entry, so the risk/reward is not strong enough to force a trade.",
+    "price": 2025.5,
+    "atr": 8.236428571428535
+  },
+  {
+    "bar": 261,
+    "action": "HOLD",
+    "confidence": 0.84,
+    "entry_price": 0,
+    "reasoning": "Price is sitting near the 10-bar swing low with RSI oversold and MACD still negative, but volume is weak and the market is below the short-term EMA cluster, so the bounce setup is not strong enough to force a trade.",
+    "price": 2001.52,
+    "atr": 12.721428571428548
+  },
+  {
+    "bar": 264,
+    "action": "BUY",
+    "confidence": 0.73,
+    "entry_price": 1996.2,
+    "reasoning": "Price is near the lower Bollinger band and swing low support with RSI oversold-leaning and MACD still negative but stretched, making a mean-reversion long favorable above 1991 support.",
+    "price": 2000.81,
+    "atr": 13.307857142857122
+  },
+  {
+    "bar": 267,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 1989.5,
+    "reasoning": "Price is near the lower Bollinger band with RSI oversold, MACD still negative but momentum appears stretched after a sharp selloff, so a mean-reversion long at support below current price is favored.",
+    "price": 1997.1,
+    "atr": 11.645714285714282
+  },
+  {
+    "bar": 270,
+    "action": "HOLD",
+    "confidence": 0.77,
+    "entry_price": 0,
+    "reasoning": "Price is below both EMAs with bearish MACD and weak volume, but RSI is near oversold and price sits close to short-term support, so the edge is not clean enough to short or buy.",
+    "price": 1995.68,
+    "atr": 10.282857142857129
+  },
+  {
+    "bar": 273,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is trapped below the 20/50 EMA cluster with bearish MACD and weak volume, while RSI is only mid-low and support near 1991 is not yet cleanly tested for a high-probability long.",
+    "price": 1999.32,
+    "atr": 7.1357142857142595
+  },
+  {
+    "bar": 276,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/50 overhead and recent swing support with weak volume, while RSI is still below 50 and MACD momentum is only mildly positive, so there is no clean high-probability breakout or reversal setup.",
+    "price": 1997.83,
+    "atr": 5.1371428571428295
+  },
+  {
+    "bar": 279,
+    "action": "SELL",
+    "confidence": 0.72,
+    "entry_price": 2002.3,
+    "reasoning": "Price is below EMA20/EMA50 with RSI neutral-bearish and MACD still positive but fading near the upper swing resistance, making a short into 2002.3 a favorable risk/reward fade.",
+    "price": 2000.04,
+    "atr": 4.451428571428551
+  },
+  {
+    "bar": 282,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2007.2,
+    "reasoning": "Price is stretched above the upper Bollinger band with RSI neutral and MACD still positive but momentum appears overextended near the 2007.63 swing high, favoring a short into resistance.",
+    "price": 2005.94,
+    "atr": 5.026428571428563
+  },
+  {
+    "bar": 285,
+    "action": "HOLD",
+    "confidence": 0.71,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/EMA50 overhead and the 10-bar swing low support with neutral RSI and weakening volume, so there is no clean high-probability breakout or pullback setup.",
+    "price": 2003.29,
+    "atr": 4.992857142857149
+  },
+  {
+    "bar": 288,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/EMA50 with RSI neutral and MACD positive but fading near swing resistance, so despite elevated volume there is no clean high-probability breakout or pullback entry.",
+    "price": 2002.5,
+    "atr": 4.869285714285736
+  },
+  {
+    "bar": 291,
+    "action": "BUY",
+    "confidence": 0.84,
+    "entry_price": 1991.2,
+    "reasoning": "Price is pressing the lower Bollinger band and swing support with RSI oversold-ish and MACD negative but stretched, suggesting a mean-reversion long near support.",
+    "price": 1992.12,
+    "atr": 5.293571428571454
+  },
+  {
+    "bar": 294,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is pinned near the lower Bollinger band with oversold RSI, but weak volume and bearish MACD without a clear reversal trigger make the edge insufficient for a clean futures entry.",
+    "price": 1989.59,
+    "atr": 4.8685714285714665
+  },
+  {
+    "bar": 297,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 1986.2,
+    "reasoning": "Price is at the lower Bollinger band and near the 10-bar swing low with RSI oversold and ATR support intact, suggesting a mean-reversion long despite weak momentum.",
+    "price": 1987.11,
+    "atr": 4.699285714285728
+  },
+  {
+    "bar": 300,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound below EMA20/EMA50 with weak volume and bearish momentum, but RSI is near oversold and price sits mid-band without a clean support or resistance breakout setup.",
+    "price": 1989.23,
+    "atr": 4.377142857142871
+  },
+  {
+    "bar": 303,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 1981.8,
+    "reasoning": "Price is near the lower Bollinger band with RSI oversold, MACD still negative but momentum appears stretched, and a buy near the 1981.5 swing-low support offers favorable mean-reversion upside.",
+    "price": 1985.2,
+    "atr": 3.359999999999997
+  },
+  {
+    "bar": 306,
+    "action": "BUY",
+    "confidence": 0.68,
+    "entry_price": 1984.9,
+    "reasoning": "Price is holding above the 10-bar swing low and near the lower half of the Bollinger band with RSI below 50, while MACD momentum is positive, favoring a mean-reversion long from support.",
+    "price": 1989.22,
+    "atr": 3.8721428571428596
+  },
+  {
+    "bar": 309,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 1983.9,
+    "reasoning": "Price is holding above the recent swing low and lower Bollinger band with oversold RSI, rising volume, and positive MACD momentum, favoring a mean-reversion long near support.",
+    "price": 1985.85,
+    "atr": 4.527857142857117
+  },
+  {
+    "bar": 312,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/EMA50 with RSI neutral, MACD still positive but weakening, and volume below average, so there is no high-probability breakout or pullback setup.",
+    "price": 1991.17,
+    "atr": 4.993571428571419
+  },
+  {
+    "bar": 315,
+    "action": "BUY",
+    "confidence": 0.68,
+    "entry_price": 1983.9,
+    "reasoning": "Price is holding above the lower Bollinger band and swing low with RSI neutral and MACD positive, so a dip-buy near support offers favorable risk/reward toward the 1994 resistance zone.",
+    "price": 1990.19,
+    "atr": 5.287857142857141
+  },
+  {
+    "bar": 318,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 1983,
+    "reasoning": "Price is pressing the lower Bollinger band with RSI oversold-leaning, MACD still positive, and the recent sweep of 1977.9 suggests support is holding for a bounce toward the 1988-1994 resistance zone.",
+    "price": 1984.4,
+    "atr": 5.526428571428563
+  },
+  {
+    "bar": 321,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 1981.7,
+    "reasoning": "Price is near the lower Bollinger band with RSI oversold-leaning, MACD still negative but momentum appears stretched to the downside, making a support bounce from 1981.7 the higher-probability trade.",
+    "price": 1983.91,
+    "atr": 5.149285714285692
+  },
+  {
+    "bar": 324,
+    "action": "HOLD",
+    "confidence": 0.71,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound near EMA20/50 with weak volume, neutral RSI, and mixed momentum, so there is no high-probability breakout or reversal setup.",
+    "price": 1987.85,
+    "atr": 4.741428571428563
+  },
+  {
+    "bar": 327,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 1980.8,
+    "reasoning": "Price is pressing the lower Bollinger band and swing low with oversold RSI, rising volume, and flat MACD suggesting a mean-reversion long from support.",
+    "price": 1981.15,
+    "atr": 5.104285714285701
+  },
+  {
+    "bar": 330,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 1987.1,
+    "reasoning": "Price is holding above the 20 EMA with positive MACD, RSI neutral, and strong volume on a pullback toward support near 1987, offering a favorable long entry toward the recent swing high.",
+    "price": 1990.28,
+    "atr": 6.564999999999974
+  },
+  {
+    "bar": 333,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 1979.9,
+    "reasoning": "Price is near the lower Bollinger band and above the recent swing low with RSI recovering from oversold territory while MACD remains positive, favoring a support bounce long.",
+    "price": 1981,
+    "atr": 7.632142857142851
+  },
+  {
+    "bar": 336,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 1977.6,
+    "reasoning": "Price is pressing the lower Bollinger band and swing low support with oversold-leaning RSI, while elevated volume suggests a potential mean-reversion bounce despite bearish momentum.",
+    "price": 1978.9,
+    "atr": 8.40714285714286
+  },
+  {
+    "bar": 339,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1974.9,
+    "reasoning": "Price is pressing the lower Bollinger band with RSI near oversold, strong volume expansion, and a nearby swing-low support at 1973.37 offering a favorable long mean-reversion setup despite bearish momentum.",
+    "price": 1975.9,
+    "atr": 8.832142857142847
+  },
+  {
+    "bar": 342,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound near EMA20/EMA50 with neutral RSI and mixed momentum, so there is no high-probability breakout or pullback setup yet.",
+    "price": 1985.89,
+    "atr": 9.783571428571431
+  },
+  {
+    "bar": 345,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1979.8,
+    "reasoning": "Price is holding above the 20/50 EMA cluster with positive MACD, neutral RSI, and elevated volume after a pullback toward support, offering a favorable long entry near the recent consolidation low.",
+    "price": 1986.11,
+    "atr": 9.598571428571436
+  },
+  {
+    "bar": 348,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2000.8,
+    "reasoning": "Price is stretched near the upper Bollinger band with RSI only moderate, EMA20/50 overhead, and a recent high-volume rejection from 2009.46 suggests a short back toward support.",
+    "price": 1994.37,
+    "atr": 11.5207142857143
+  },
+  {
+    "bar": 351,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1974.5,
+    "reasoning": "Price is holding near the 10-bar swing low and lower Bollinger support with RSI below 50 and MACD slightly negative, offering a favorable mean-reversion long with limited downside.",
+    "price": 1977.59,
+    "atr": 12.435714285714312
+  },
+  {
+    "bar": 354,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 1972.8,
+    "reasoning": "Price is holding above the 10-bar swing low and near lower Bollinger support with elevated volume and RSI below neutral, suggesting a mean-reversion long toward the EMA cluster.",
+    "price": 1977.94,
+    "atr": 13.467857142857156
+  },
+  {
+    "bar": 357,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between flat EMAs with neutral RSI, weak volume, and no clean support/resistance edge despite recent range expansion, so the higher-probability move is to wait.",
+    "price": 1988.59,
+    "atr": 14.52928571428572
+  },
+  {
+    "bar": 360,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is pinned between flat EMA20/EMA50 with RSI near 50, weak volume, and no clear directional edge despite recent range expansion, so skipping is higher quality than forcing a trade.",
+    "price": 1986,
+    "atr": 13.622857142857145
+  },
+  {
+    "bar": 363,
+    "action": "SELL",
+    "confidence": 0.71,
+    "entry_price": 1998.8,
+    "reasoning": "Price is pressing into the 1997 swing high and near the upper Bollinger band with weak volume, while EMA20/50 are flat and RSI is only mid-range, favoring a short fade into resistance.",
+    "price": 1993.41,
+    "atr": 11.977142857142862
+  },
+  {
+    "bar": 366,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is pinned between converged EMAs with neutral RSI, mixed momentum, and elevated volume after a sharp range expansion, so there is no clean high-probability breakout or pullback entry yet.",
+    "price": 1989.7,
+    "atr": 12.404285714285736
+  },
+  {
+    "bar": 369,
+    "action": "SELL",
+    "confidence": 0.84,
+    "entry_price": 2040.5,
+    "reasoning": "Price is stretched above the upper Bollinger band with RSI overbought and volume fading, while the recent spike into 2043 failed to hold, making a short into resistance the higher-probability setup.",
+    "price": 2038.71,
+    "atr": 14.776428571428612
+  },
+  {
+    "bar": 372,
+    "action": "SELL",
+    "confidence": 0.84,
+    "entry_price": 2050.3,
+    "reasoning": "Price is pressing the 10-bar swing high and upper Bollinger band with RSI deeply overbought and volume fading, making a short near resistance the higher-probability fade.",
+    "price": 2049.32,
+    "atr": 14.895000000000048
+  },
+  {
+    "bar": 375,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 2019.5,
+    "reasoning": "Price is above EMA20/EMA50 with strong MACD and elevated volume, and a pullback to the 2019-2004 support zone offers a favorable long entry before the 2056 resistance.",
+    "price": 2041.76,
+    "atr": 17.2442857142858
+  },
+  {
+    "bar": 378,
+    "action": "SELL",
+    "confidence": 0.84,
+    "entry_price": 2070,
+    "reasoning": "Price is stretched near the recent swing high with RSI overbought and volume fading, while upside appears capped around 2069.84-2079.56, making a short into resistance favorable.",
+    "price": 2064.95,
+    "atr": 18.97785714285723
+  },
+  {
+    "bar": 381,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2071.5,
+    "reasoning": "Price is extended above EMA20/50 with RSI overbought at 74 and weakening volume, while 2071.59 is a clear nearby swing resistance for a short fade.",
+    "price": 2066.67,
+    "atr": 13.748571428571479
+  },
+  {
+    "bar": 384,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2070,
+    "reasoning": "Price is extended near the recent swing high with RSI overbought and volume fading, while MACD is flat and the setup favors a short from resistance around 2070.",
+    "price": 2063.66,
+    "atr": 11.590714285714366
+  },
+  {
+    "bar": 387,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range above EMA20 with weak volume and bearish MACD momentum, but RSI is still elevated and support/resistance are too close for a clean high-probability entry.",
+    "price": 2057.72,
+    "atr": 10.335000000000052
+  },
+  {
+    "bar": 390,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range near EMA20 with weak volume and negative MACD momentum, while RSI is neutral and neither a clean support bounce nor resistance rejection is confirmed.",
+    "price": 2052.13,
+    "atr": 8.549285714285784
+  },
+  {
+    "bar": 393,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2042.8,
+    "reasoning": "Price is holding near the lower Bollinger band and swing low with strong volume expansion while EMA50 support sits below, making a mean-reversion long attractive despite weak MACD momentum.",
+    "price": 2045.7,
+    "atr": 8.536428571428635
+  },
+  {
+    "bar": 396,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is extended above EMA20 with RSI near overbought and MACD histogram still negative while volume is weak, so momentum confirmation is lacking and the risk/reward is poor for a fresh entry.",
+    "price": 2062.23,
+    "atr": 8.802142857142924
+  },
+  {
+    "bar": 399,
+    "action": "SELL",
+    "confidence": 0.73,
+    "entry_price": 2072.9,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper Bollinger band with RSI elevated and MACD histogram negative while volume is weak, favoring a short fade into resistance.",
+    "price": 2068.18,
+    "atr": 9.500714285714366
+  },
+  {
+    "bar": 402,
+    "action": "SELL",
+    "confidence": 0.77,
+    "entry_price": 2075.5,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper Bollinger band with RSI elevated and MACD histogram slightly negative, suggesting a short fade into resistance.",
+    "price": 2073.18,
+    "atr": 8.944285714285797
+  },
+  {
+    "bar": 405,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 and EMA50 with weakening volume, bearish MACD histogram, and RSI not oversold, so there is no high-probability breakout or pullback setup.",
+    "price": 2068.36,
+    "atr": 8.43642857142858
+  },
+  {
+    "bar": 408,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound near EMA20 with weak momentum (negative MACD histogram, subpar volume) and no clean high-probability breakout or pullback setup despite support at EMA50.",
+    "price": 2059.19,
+    "atr": 7.283571428571479
+  },
+  {
+    "bar": 411,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 resistance and EMA50 support with bearish MACD momentum but no clean breakout or oversold signal, so the edge is insufficient for a futures entry.",
+    "price": 2058.64,
+    "atr": 7.5371428571428885
+  },
+  {
+    "bar": 414,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound near EMA20 with weak volume and bearish MACD momentum, while RSI is neutral and support/resistance are too close for a clean risk-reward setup.",
+    "price": 2064.67,
+    "atr": 7.365714285714278
+  },
+  {
+    "bar": 417,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2072.5,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper Bollinger band with MACD still negative, suggesting a likely rejection from resistance despite RSI being mid-high.",
+    "price": 2068.26,
+    "atr": 8.519285714285713
+  },
+  {
+    "bar": 420,
+    "action": "SELL",
+    "confidence": 0.81,
+    "entry_price": 2074.7,
+    "reasoning": "Price is stretched near the upper Bollinger band and recent swing high with RSI/volume showing overextension, while 2074.7 offers a tight resistance short entry just above current price.",
+    "price": 2072.41,
+    "atr": 8.539285714285727
+  },
+  {
+    "bar": 423,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is extended near the upper Bollinger band with MACD still negative and RSI only moderate, so upside continuation lacks confirmation while support is not yet tested.",
+    "price": 2070.57,
+    "atr": 8.79000000000003
+  },
+  {
+    "bar": 426,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is below EMA20/EMA50 with bearish MACD and only moderate RSI, but it is sitting near the 10-bar swing low and lower Bollinger area, so downside follow-through is not confirmed enough for a clean short.",
+    "price": 2047.86,
+    "atr": 12.44285714285713
+  },
+  {
+    "bar": 429,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2039.8,
+    "reasoning": "Price is holding near the lower Bollinger band with RSI oversold, MACD still negative but momentum appears stretched while support sits around 2038-2040, offering a favorable long bounce setup.",
+    "price": 2042.23,
+    "atr": 13.398571428571374
+  },
+  {
+    "bar": 432,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 2034.5,
+    "reasoning": "Price is at the lower Bollinger band with RSI oversold, MACD still negative but momentum appears stretched after a high-volume flush into the 2033-2035 support zone, favoring a mean-reversion long.",
+    "price": 2036.25,
+    "atr": 13.662857142857108
+  },
+  {
+    "bar": 435,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range above both EMAs with neutral MACD, RSI not stretched, and weak volume, so there is no high-probability breakout or pullback setup.",
+    "price": 2066.06,
+    "atr": 15.754285714285677
+  },
+  {
+    "bar": 438,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range between EMA support and recent swing resistance with neutral RSI, positive MACD but weak volume, so there is no high-conviction breakout or pullback setup.",
+    "price": 2060.12,
+    "atr": 15.045714285714244
+  },
+  {
+    "bar": 441,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2059,
+    "reasoning": "Price is holding above the 20/50 EMA with positive MACD and RSI mid-range, and a pullback into the 2059 support area offers a favorable long entry toward the 2070 swing high.",
+    "price": 2068.99,
+    "atr": 11.216428571428553
+  },
+  {
+    "bar": 444,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2059.9,
+    "reasoning": "Price is holding above the 20/50 EMA with positive MACD, neutral RSI, and elevated volume, so a pullback entry near support offers a favorable long setup toward the recent swing high.",
+    "price": 2064.7,
+    "atr": 12.312142857142833
+  },
+  {
+    "bar": 447,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2081.5,
+    "reasoning": "Price is stretched near the upper Bollinger band and recent swing high with RSI cooling from overbought while volume is fading, favoring a short into resistance.",
+    "price": 2076.21,
+    "atr": 12.455000000000009
+  },
+  {
+    "bar": 450,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2086.6,
+    "reasoning": "Price is stretched near the upper Bollinger band with RSI elevated and a strong volume spike after a failed push toward the 2093.64 swing high, favoring a short into resistance.",
+    "price": 2080.07,
+    "atr": 11.547142857142815
+  },
+  {
+    "bar": 453,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2069.9,
+    "reasoning": "Price is above the 20/50 EMA with positive MACD and neutral RSI, and a pullback entry near EMA20/support offers a favorable long setup despite slightly fading volume.",
+    "price": 2077.65,
+    "atr": 12.032857142857113
+  },
+  {
+    "bar": 456,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound near EMA20/EMA50 with weak volume, neutral RSI, and bearish MACD histogram, so there is no high-conviction breakout or reversal setup.",
+    "price": 2070.3,
+    "atr": 11.390714285714305
+  },
+  {
+    "bar": 459,
+    "action": "HOLD",
+    "confidence": 0.71,
+    "entry_price": 0,
+    "reasoning": "Price is sitting near EMA20/EMA50 with neutral RSI, weak MACD, and below the recent swing high, so momentum is mixed and there is no clean high-probability breakout or breakdown setup.",
+    "price": 2069.93,
+    "atr": 9.657857142857113
+  },
+  {
+    "bar": 462,
+    "action": "HOLD",
+    "confidence": 0.77,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range near EMA20/50 with weak volume and bearish MACD momentum but no clean support or resistance break, so the edge is insufficient for a futures entry.",
+    "price": 2077.38,
+    "atr": 9.365714285714278
+  },
+  {
+    "bar": 465,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 2066,
+    "reasoning": "Price is holding above EMA20/EMA50 with positive MACD and RSI neutral, while elevated volume and a nearby support zone around 2066 offer a favorable long entry toward the 2082 resistance.",
+    "price": 2076,
+    "atr": 8.218571428571456
+  },
+  {
+    "bar": 468,
+    "action": "SELL",
+    "confidence": 0.86,
+    "entry_price": 2117.8,
+    "reasoning": "Price is extended above the upper Bollinger band with RSI deeply overbought and volume fading, while 2117.8 is a clear nearby swing-high resistance for a short entry.",
+    "price": 2115.81,
+    "atr": 12.703571428571454
+  },
+  {
+    "bar": 471,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2117.8,
+    "reasoning": "Price is stretched near the upper Bollinger band with RSI overbought and volume fading, while 2120.9 swing high offers nearby resistance for a short setup.",
+    "price": 2115.2,
+    "atr": 12.658571428571447
+  },
+  {
+    "bar": 474,
+    "action": "SELL",
+    "confidence": 0.84,
+    "entry_price": 2125,
+    "reasoning": "Price is extended above EMA20/50 with RSI overbought and volume weak, while 2126.24 swing high is nearby resistance offering a favorable short entry.",
+    "price": 2122.37,
+    "atr": 13.001428571428571
+  },
+  {
+    "bar": 477,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is extended above EMA20/EMA50 with RSI overbought near 70 and weakening volume, so despite bullish momentum the risk-reward is poor and a pullback or breakout confirmation is needed.",
+    "price": 2119.14,
+    "atr": 12.27642857142853
+  },
+  {
+    "bar": 480,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is extended near the upper Bollinger band with RSI overbought and volume fading, while MACD remains positive so momentum is still intact but not ideal for a fresh entry.",
+    "price": 2121.69,
+    "atr": 11.70214285714282
+  },
+  {
+    "bar": 483,
+    "action": "SELL",
+    "confidence": 0.79,
+    "entry_price": 2140.5,
+    "reasoning": "Price is stretched above EMA20/50 with RSI overbought, MACD histogram negative, and recent rejection near the 2144 swing high suggests a short into resistance.",
+    "price": 2129,
+    "atr": 9.614285714285643
+  },
+  {
+    "bar": 486,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2150.5,
+    "reasoning": "Price is extended above the upper Bollinger band with RSI deeply overbought and volume fading, while 2153.52 is nearby swing resistance, making a short into resistance the higher-probability setup.",
+    "price": 2148.45,
+    "atr": 11.215714285714187
+  },
+  {
+    "bar": 489,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2152.8,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper Bollinger area with RSI overbought at 74 while volume is weak, favoring a short fade into resistance.",
+    "price": 2147.45,
+    "atr": 10.276428571428498
+  },
+  {
+    "bar": 492,
+    "action": "SELL",
+    "confidence": 0.72,
+    "entry_price": 2153.5,
+    "reasoning": "Price is extended near the recent swing high with RSI overbought and volume fading, while MACD remains positive but momentum looks stretched for a short-term mean reversion short.",
+    "price": 2146.83,
+    "atr": 10.44642857142854
+  },
+  {
+    "bar": 495,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is above EMA50 and near EMA20 with RSI elevated and MACD still negative, while recent candles show choppy consolidation after a volume spike, so the edge is insufficient for a clean directional futures entry.",
+    "price": 2148.23,
+    "atr": 10.986428571428535
+  },
+  {
+    "bar": 498,
+    "action": "SELL",
+    "confidence": 0.77,
+    "entry_price": 2166.5,
+    "reasoning": "Price is extended above EMA20 with RSI overbought and MACD histogram negative while volume is fading, so a short near the recent swing high offers a favorable mean-reversion setup.",
+    "price": 2163.7,
+    "atr": 8.995714285714257
+  },
+  {
+    "bar": 501,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2168.5,
+    "reasoning": "Price is extended near the 10-bar swing high and upper Bollinger band with RSI overbought and MACD histogram negative, while volume is weak, favoring a short into resistance.",
+    "price": 2162.72,
+    "atr": 8.207857142857133
+  },
+  {
+    "bar": 504,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2170.2,
+    "reasoning": "Price is extended above EMA20 with RSI near overbought and MACD histogram negative while momentum is stalling under the 2171 swing high, favoring a short into resistance.",
+    "price": 2164.9,
+    "atr": 8.488571428571406
+  },
+  {
+    "bar": 507,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2170.8,
+    "reasoning": "Price is extended above EMA20 with bearish MACD histogram, RSI near overbought, and repeated rejection near the 2172 swing high, making a short into resistance favorable.",
+    "price": 2165,
+    "atr": 7.847857142857135
+  },
+  {
+    "bar": 510,
+    "action": "SELL",
+    "confidence": 0.83,
+    "entry_price": 2176.2,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper Bollinger area with RSI overbought and MACD histogram negative, suggesting a short into resistance around 2176.",
+    "price": 2173.29,
+    "atr": 6.909999999999984
+  },
+  {
+    "bar": 513,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range near EMA20 with weak momentum (negative MACD histogram, low volume) and no clean support/resistance edge, so the risk-reward is poor for a fresh futures entry.",
+    "price": 2162.43,
+    "atr": 8.285714285714253
+  },
+  {
+    "bar": 516,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2159.5,
+    "reasoning": "Price is holding above EMA20 and EMA50 with RSI neutral-bullish, and the pullback toward the 2160 support/swing low offers a favorable long entry despite short-term MACD weakness.",
+    "price": 2163,
+    "atr": 7.4742857142856725
+  },
+  {
+    "bar": 519,
+    "action": "HOLD",
+    "confidence": 0.71,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range near EMA20 with weak volume and bearish MACD but RSI still neutral, so there is no clean high-probability breakout or pullback setup.",
+    "price": 2165,
+    "atr": 7.495714285714257
+  },
+  {
+    "bar": 522,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2173.2,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper Bollinger band with bearish MACD histogram divergence and fading volume, favoring a short into resistance.",
+    "price": 2171.73,
+    "atr": 8.023571428571424
+  },
+  {
+    "bar": 525,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2165.5,
+    "reasoning": "Price is holding above EMA20 and EMA50 with strong volume expansion, RSI is constructive, and a pullback to EMA20 offers a favorable long entry before the 2176 swing high.",
+    "price": 2168.44,
+    "atr": 7.51785714285711
+  },
+  {
+    "bar": 528,
+    "action": "BUY",
+    "confidence": 0.67,
+    "entry_price": 2159.5,
+    "reasoning": "Price is holding above EMA50 with RSI neutral-bullish and elevated volume after a pullback, so a dip into the 2158-2160 support zone offers a favorable long entry toward the 2176 swing high.",
+    "price": 2168.48,
+    "atr": 8.011428571428496
+  },
+  {
+    "bar": 531,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range between EMA20 and EMA50 with bearish MACD momentum but no clean breakout or pullback edge, so the risk/reward is not strong enough to enter.",
+    "price": 2164.43,
+    "atr": 8.40071428571423
+  },
+  {
+    "bar": 534,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2176,
+    "reasoning": "Price is stretched near the upper Bollinger band with bearish MACD histogram, RSI only moderate, and recent rejection from 2177.65 suggests a short into resistance.",
+    "price": 2173,
+    "atr": 8.792142857142803
+  },
+  {
+    "bar": 537,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 2157.9,
+    "reasoning": "Price is holding near the 10-bar swing low and EMA50 with RSI below 50, MACD still negative but stretched near the lower Bollinger band on elevated volume, favoring a mean-reversion long from support.",
+    "price": 2159.23,
+    "atr": 11.089285714285714
+  },
+  {
+    "bar": 540,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range near EMA20 with mixed momentum (RSI neutral, MACD still negative) and no clean support/resistance entry within 0.5%, so the edge is insufficient for a futures trade.",
+    "price": 2165.01,
+    "atr": 11.781428571428608
+  },
+  {
+    "bar": 543,
+    "action": "SELL",
+    "confidence": 0.82,
+    "entry_price": 2180,
+    "reasoning": "Price is stretched near the upper Bollinger band with RSI below overbought but momentum fading, volume is weak, and 2180-2188 is a clear resistance zone near the recent swing high.",
+    "price": 2177.51,
+    "atr": 13.712142857142876
+  },
+  {
+    "bar": 546,
+    "action": "SELL",
+    "confidence": 0.77,
+    "entry_price": 2186.5,
+    "reasoning": "Price is pressing the upper Bollinger band with RSI elevated and momentum stretched near the 10-bar swing high, so a short into resistance offers a favorable mean-reversion setup.",
+    "price": 2183.3,
+    "atr": 14.399285714285725
+  },
+  {
+    "bar": 549,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2190.8,
+    "reasoning": "Price is extended near the upper Bollinger band with RSI elevated and momentum showing signs of exhaustion below the 2197 swing high, making a short into resistance favorable.",
+    "price": 2183.88,
+    "atr": 14.923571428571481
+  },
+  {
+    "bar": 552,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound between EMA20 and EMA50 with bearish MACD but neutral RSI and elevated volume, so there is no clean high-probability breakout or pullback setup yet.",
+    "price": 2170.98,
+    "atr": 15.844285714285759
+  },
+  {
+    "bar": 555,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2195.5,
+    "reasoning": "Price is extended near the upper Bollinger band with strong volume but fading momentum into the 2200 swing high, while RSI is only moderate and a rejection from 2197-2200 offers a favorable short entry above current price.",
+    "price": 2189.99,
+    "atr": 15.752857142857172
+  },
+  {
+    "bar": 558,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2179.5,
+    "reasoning": "Price is holding above EMA20/EMA50 with positive MACD and neutral RSI, and a pullback entry near 2179.5 offers support within range before the 2200 resistance.",
+    "price": 2184.02,
+    "atr": 14.524285714285757
+  },
+  {
+    "bar": 561,
+    "action": "HOLD",
+    "confidence": 0.67,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range near EMA20 with weak volume and negative MACD momentum, so there is no clean high-probability breakout or pullback setup.",
+    "price": 2184.99,
+    "atr": 12.6257142857143
+  },
+  {
+    "bar": 564,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 and EMA50 with weak volume, negative MACD histogram, and only neutral RSI, so there is no high-probability breakout or reversal setup.",
+    "price": 2179.8,
+    "atr": 11.45857142857137
+  },
+  {
+    "bar": 567,
+    "action": "HOLD",
+    "confidence": 0.71,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range near EMA20 with neutral RSI and mixed momentum, while elevated volume has not confirmed a clean breakout above 2189.99 or breakdown below 2173.69.",
+    "price": 2182.35,
+    "atr": 8.879999999999882
+  },
+  {
+    "bar": 570,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is sitting below EMA20 with bearish MACD momentum and weak volume, but it is also near the lower Bollinger band and swing support, so the edge is not clean enough to short or buy decisively.",
+    "price": 2163.7,
+    "atr": 9.631428571428453
+  },
+  {
+    "bar": 573,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA support and recent swing resistance with weak momentum (MACD negative, RSI neutral, volume below average), so there is no clean high-probability breakout or reversal setup.",
+    "price": 2170.88,
+    "atr": 10.188571428571322
+  },
+  {
+    "bar": 576,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between flat EMAs with weak momentum (negative MACD, RSI neutral) and below recent swing high resistance, so there is no high-probability breakout or reversal setup.",
+    "price": 2171.09,
+    "atr": 10.391428571428476
+  },
+  {
+    "bar": 579,
+    "action": "HOLD",
+    "confidence": 0.71,
+    "entry_price": 0,
+    "reasoning": "Price is pinned between flat EMAs with weak momentum (MACD negative, RSI neutral) and below-average volume, so there is no high-probability breakout or reversal setup.",
+    "price": 2172.11,
+    "atr": 10.569999999999936
+  },
+  {
+    "bar": 582,
+    "action": "BUY",
+    "confidence": 0.68,
+    "entry_price": 2159.8,
+    "reasoning": "Price is near the lower Bollinger band and swing low with RSI below 50 and MACD only mildly negative, suggesting a mean-reversion long from support despite weak volume.",
+    "price": 2165.22,
+    "atr": 9.998571428571333
+  },
+  {
+    "bar": 585,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped below EMA20/EMA50 with weak momentum and below-average volume, while RSI is only mid-range and support near 2155-2157 has not been convincingly tested for a high-probability long or short.",
+    "price": 2161.69,
+    "atr": 8.53142857142851
+  },
+  {
+    "bar": 588,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is below EMA20/EMA50 with bearish MACD and only mildly oversold RSI, but it is sitting near the lower Bollinger band and swing low support so downside follow-through is not clean enough for a high-probability short.",
+    "price": 2151.48,
+    "atr": 8.602142857142812
+  },
+  {
+    "bar": 591,
+    "action": "HOLD",
+    "confidence": 0.73,
+    "entry_price": 0,
+    "reasoning": "Price is trapped below EMA20/EMA50 with negative MACD and weak volume, while RSI is neutral and support near 2145 is not yet convincingly tested for a high-probability long.",
+    "price": 2159.05,
+    "atr": 8.549999999999955
+  },
+  {
+    "bar": 594,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is stuck below EMA20/EMA50 with weak volume and negative MACD, but RSI is neutral and the market is near the lower Bollinger band/swing low, so the edge is not strong enough to short or buy decisively.",
+    "price": 2155.5,
+    "atr": 8.579999999999993
+  },
+  {
+    "bar": 597,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between slightly bearish EMAs and a still-neutral RSI with positive MACD momentum, so there is no clean high-probability breakout or pullback setup yet.",
+    "price": 2161.26,
+    "atr": 7.5835714285714335
+  },
+  {
+    "bar": 600,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is below EMA20/EMA50 with weak volume and only a modest RSI recovery, while MACD remains positive but the market is still trapped mid-range near support without a clean long or short trigger.",
+    "price": 2153.93,
+    "atr": 9.484285714285729
+  },
+  {
+    "bar": 603,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2152,
+    "reasoning": "Price is holding above EMA20 with positive MACD histogram, RSI neutral, and elevated volume after a sharp sweep low suggests a rebound toward the 2164-2168 resistance zone.",
+    "price": 2159.67,
+    "atr": 8.8757142857143
+  },
+  {
+    "bar": 606,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2146.8,
+    "reasoning": "Price is at the lower Bollinger band and near swing support with RSI oversold-leaning and MACD negative but stretched, while low volume suggests a mean-reversion bounce is favored.",
+    "price": 2144.25,
+    "atr": 9.755000000000011
+  },
+  {
+    "bar": 609,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range between support and resistance with bearish MACD but only neutral RSI and no clean edge, so the risk/reward is not strong enough to force a trade.",
+    "price": 2153.41,
+    "atr": 10.359285714285729
+  },
+  {
+    "bar": 612,
+    "action": "HOLD",
+    "confidence": 0.77,
+    "entry_price": 0,
+    "reasoning": "Price is below EMA20/EMA50 with bearish MACD and weak volume, but it is already near the lower Bollinger band and swing low support, so downside is stretched and not ideal for a fresh short.",
+    "price": 2143.65,
+    "atr": 10.640714285714305
+  },
+  {
+    "bar": 615,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 and EMA50 with only mild bullish MACD, RSI below 50, and elevated volume but no clean breakout or breakdown confirmation, so the edge is insufficient for a futures entry.",
+    "price": 2148.28,
+    "atr": 9.745714285714289
+  },
+  {
+    "bar": 618,
+    "action": "BUY",
+    "confidence": 0.74,
+    "entry_price": 2114.8,
+    "reasoning": "Price is at the lower Bollinger band with oversold RSI and a nearby swing low support, making a mean-reversion long favorable despite weak momentum.",
+    "price": 2115.96,
+    "atr": 12.817142857142796
+  },
+  {
+    "bar": 621,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is below EMA20/EMA50 with negative MACD and weak volume, but RSI is near oversold and price sits close to lower Bollinger/support, so the edge is insufficient for a clean directional futures entry.",
+    "price": 2124.99,
+    "atr": 12.187142857142785
+  },
+  {
+    "bar": 624,
+    "action": "BUY",
+    "confidence": 0.78,
+    "entry_price": 2109.5,
+    "reasoning": "Price is near the lower Bollinger band and swing low with RSI oversold, MACD still negative but volume is rising, making a mean-reversion long attractive above support.",
+    "price": 2116.43,
+    "atr": 12.167142857142737
+  },
+  {
+    "bar": 627,
+    "action": "BUY",
+    "confidence": 0.84,
+    "entry_price": 2102.5,
+    "reasoning": "Price is at the lower Bollinger band with deeply oversold RSI, strong volume expansion, and a likely mean-reversion bounce from the 2102 support zone despite bearish momentum.",
+    "price": 2103.66,
+    "atr": 12.914999999999898
+  },
+  {
+    "bar": 630,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20 and EMA50 with neutral RSI, weak volume, and no clean breakout or pullback confirmation, so the edge is insufficient for a futures entry.",
+    "price": 2126.6,
+    "atr": 12.164999999999932
+  },
+  {
+    "bar": 633,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2140.5,
+    "reasoning": "Price is stretched above EMA20/EMA50 near the 10-bar swing high with fading volume, while RSI is only mid-range and MACD momentum is positive but likely extended, favoring a short into resistance.",
+    "price": 2137.1,
+    "atr": 11.751428571428537
+  },
+  {
+    "bar": 636,
+    "action": "SELL",
+    "confidence": 0.72,
+    "entry_price": 2141.5,
+    "reasoning": "Price is stretched near the upper Bollinger area with RSI only moderate, EMA20 below EMA50, and recent momentum showing a likely fade from the 2146.55 swing high resistance.",
+    "price": 2137.97,
+    "atr": 12.480000000000018
+  },
+  {
+    "bar": 639,
+    "action": "BUY",
+    "confidence": 0.67,
+    "entry_price": 2128.9,
+    "reasoning": "Price is holding above the 20 EMA with positive MACD momentum and neutral RSI, while a pullback near the 2130 support area offers a favorable long entry below current price.",
+    "price": 2132.66,
+    "atr": 13.117142857142913
+  },
+  {
+    "bar": 642,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/EMA50 with RSI neutral, MACD positive but not enough for a clean breakout, and the recent high-volume swing rejection near 2147 suggests waiting for either a confirmed break above resistance or a dip to support.",
+    "price": 2137.34,
+    "atr": 13.967142857142887
+  },
+  {
+    "bar": 645,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2160.5,
+    "reasoning": "Price is pressing the upper Bollinger band and recent swing high resistance while RSI is elevated and volume is fading, making a short near resistance favorable.",
+    "price": 2155.91,
+    "atr": 15.01071428571426
+  },
+  {
+    "bar": 648,
+    "action": "SELL",
+    "confidence": 0.74,
+    "entry_price": 2167.5,
+    "reasoning": "Price is extended above the upper Bollinger band with RSI overbought and volume fading, while 2167.64 is nearby swing resistance offering a favorable short entry.",
+    "price": 2166.02,
+    "atr": 14.8192857142857
+  },
+  {
+    "bar": 651,
+    "action": "SELL",
+    "confidence": 0.83,
+    "entry_price": 2173.2,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper Bollinger area with RSI overbought at 74, while momentum is still positive but likely due for a mean-reversion short into resistance.",
+    "price": 2170.54,
+    "atr": 15.132142857142851
+  },
+  {
+    "bar": 654,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2151.75,
+    "reasoning": "Price is holding above the 20/50 EMA with positive MACD and RSI still constructive, so a pullback entry near EMA20 support offers a favorable long setup despite muted volume.",
+    "price": 2160.26,
+    "atr": 14.062142857142849
+  },
+  {
+    "bar": 657,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range above EMA20/50 with weak volume and negative MACD histogram, but RSI is neutral-bullish and there is no clean high-probability support or resistance break setup.",
+    "price": 2159.79,
+    "atr": 11.17642857142859
+  },
+  {
+    "bar": 660,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is mid-range near EMA20/EMA50 with weak momentum (negative MACD histogram, sub-1 volume) and no clean support/resistance breakout, so the edge is insufficient for a futures entry.",
+    "price": 2151.75,
+    "atr": 10.627857142857108
+  },
+  {
+    "bar": 663,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is range-bound between EMA20 and recent swing levels with weak MACD momentum and only moderate RSI, so there is no high-probability breakout or pullback setup.",
+    "price": 2159.42,
+    "atr": 11.27285714285709
+  },
+  {
+    "bar": 666,
+    "action": "SELL",
+    "confidence": 0.78,
+    "entry_price": 2169.5,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper range while MACD remains negative despite elevated volume, favoring a short into resistance around 2169.5.",
+    "price": 2164.33,
+    "atr": 10.947142857142776
+  },
+  {
+    "bar": 669,
+    "action": "BUY",
+    "confidence": 0.67,
+    "entry_price": 2151.68,
+    "reasoning": "Price is holding above the 50 EMA with RSI neutral-bullish and strong volume, while a pullback to the EMA50 near support offers a favorable long entry despite short-term MACD weakness.",
+    "price": 2159.73,
+    "atr": 12.441428571428462
+  },
+  {
+    "bar": 672,
+    "action": "BUY",
+    "confidence": 0.71,
+    "entry_price": 2135.5,
+    "reasoning": "Price is testing the 10-bar swing low and lower Bollinger area with RSI below 40 and near-flat EMAs, while downside momentum is fading enough for a small mean-reversion long.",
+    "price": 2136.53,
+    "atr": 13.299999999999923
+  },
+  {
+    "bar": 675,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is below both EMAs with negative MACD and weak volume, but it is already near the 10-bar swing low and lower Bollinger band so downside is extended and not ideal for a fresh short.",
+    "price": 2134.92,
+    "atr": 11.978571428571318
+  },
+  {
+    "bar": 678,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is below both EMAs with negative MACD and weak volume, but RSI is not oversold and price sits near the lower Bollinger band/support, so the edge is insufficient for a clean short or long.",
+    "price": 2135.22,
+    "atr": 11.359999999999932
+  },
+  {
+    "bar": 681,
+    "action": "HOLD",
+    "confidence": 0.74,
+    "entry_price": 0,
+    "reasoning": "Price is pinned near the EMA20/EMA50 cluster with neutral RSI, weak MACD, and no clear breakout or breakdown confirmation, so the edge is insufficient to force a trade.",
+    "price": 2145.13,
+    "atr": 10.5271428571428
+  },
+  {
+    "bar": 684,
+    "action": "HOLD",
+    "confidence": 0.78,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA resistance and recent swing support with weak volume, neutral RSI, and mixed momentum, so there is no high-probability breakout or reversal setup.",
+    "price": 2138.52,
+    "atr": 8.249999999999968
+  },
+  {
+    "bar": 687,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between slightly bearish EMAs and mid-Bollinger with weak volume, RSI neutral, and MACD positive but not enough to justify a clean directional futures entry.",
+    "price": 2137.94,
+    "atr": 8.634999999999991
+  },
+  {
+    "bar": 690,
+    "action": "BUY",
+    "confidence": 0.72,
+    "entry_price": 2132.9,
+    "reasoning": "Price is holding above the 10-bar swing low with rising volume, RSI neutral, MACD positive, and a pullback entry near support offers a favorable long setup toward the EMA50/swing high.",
+    "price": 2136.58,
+    "atr": 9.278571428571468
+  },
+  {
+    "bar": 693,
+    "action": "HOLD",
+    "confidence": 0.72,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/50 overhead and the recent swing low support with neutral RSI and fading volume, so there is no clean high-probability breakout or reversal setup yet.",
+    "price": 2139.54,
+    "atr": 11.219999999999995
+  },
+  {
+    "bar": 696,
+    "action": "HOLD",
+    "confidence": 0.76,
+    "entry_price": 0,
+    "reasoning": "Price is trapped between EMA20/EMA50 with neutral RSI and mixed momentum after a volatile range, so there is no clean high-probability breakout or pullback setup.",
+    "price": 2141.38,
+    "atr": 11.324285714285745
+  },
+  {
+    "bar": 699,
+    "action": "SELL",
+    "confidence": 0.71,
+    "entry_price": 2152,
+    "reasoning": "Price is stretched near the 10-bar swing high and upper Bollinger area with weakening volume, while momentum is only mildly positive and a fade back toward the EMA cluster is favored.",
+    "price": 2149.44,
+    "atr": 12.068571428571431
+  }
+]

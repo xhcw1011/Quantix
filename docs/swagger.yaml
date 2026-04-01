@@ -1,0 +1,1042 @@
+basePath: /
+definitions:
+  api.EngineInfo:
+    properties:
+      engine_id:
+        type: string
+      error:
+        type: string
+      interval:
+        type: string
+      leverage:
+        type: integer
+      mode:
+        description: '"live" | "paper"'
+        type: string
+      running:
+        type: boolean
+      started_at:
+        type: string
+      strategy_id:
+        type: string
+      symbol:
+        type: string
+      user_id:
+        description: populated in admin views
+        type: integer
+    type: object
+  api.PaperConfig:
+    properties:
+      fee_rate:
+        description: default 0.001
+        type: number
+      initial_capital:
+        description: default 10000
+        type: number
+      slippage:
+        description: default 0.0005
+        type: number
+    type: object
+  api.RiskOverride:
+    properties:
+      max_drawdown_pct:
+        type: number
+      max_position_pct:
+        type: number
+      max_single_loss_pct:
+        type: number
+    type: object
+  api.StartRequest:
+    properties:
+      contract_mode:
+        description: '"hedge" | "one_way" (futures/swap only)'
+        type: string
+      credential_id:
+        type: integer
+      interval:
+        type: string
+      leverage:
+        description: 1–20; 0 = use exchange default (futures/swap only)
+        type: integer
+      mode:
+        description: '"live" (default) | "paper"'
+        type: string
+      paper:
+        allOf:
+        - $ref: '#/definitions/api.PaperConfig'
+        description: required when mode=paper
+      params:
+        additionalProperties: {}
+        description: extra strategy parameters
+        type: object
+      risk:
+        $ref: '#/definitions/api.RiskOverride'
+      strategy_id:
+        type: string
+      symbol:
+        type: string
+    type: object
+  api.authResp:
+    properties:
+      role:
+        type: string
+      token:
+        type: string
+      user_id:
+        type: integer
+      username:
+        type: string
+    type: object
+  api.backtestReq:
+    properties:
+      end_date:
+        description: '"2024-12-31"'
+        type: string
+      fee_rate:
+        type: number
+      initial_capital:
+        type: number
+      interval:
+        type: string
+      params:
+        additionalProperties: {}
+        type: object
+      slippage:
+        type: number
+      start_date:
+        description: '"2024-01-01"'
+        type: string
+      strategy_id:
+        type: string
+      symbol:
+        type: string
+    type: object
+  api.credentialReq:
+    properties:
+      api_key:
+        type: string
+      api_secret:
+        type: string
+      demo:
+        type: boolean
+      exchange:
+        type: string
+      label:
+        type: string
+      market_type:
+        type: string
+      passphrase:
+        type: string
+      testnet:
+        type: boolean
+    type: object
+  api.credentialResp:
+    properties:
+      api_key_mask:
+        description: first 6 chars + "..."
+        type: string
+      created_at:
+        type: string
+      demo:
+        type: boolean
+      exchange:
+        type: string
+      id:
+        type: integer
+      is_active:
+        type: boolean
+      label:
+        type: string
+      market_type:
+        type: string
+      testnet:
+        type: boolean
+    type: object
+  api.errorResp:
+    properties:
+      error:
+        type: string
+    type: object
+  api.loginReq:
+    properties:
+      password:
+        type: string
+      username:
+        type: string
+    type: object
+  api.msgResp:
+    properties:
+      message:
+        type: string
+    type: object
+  api.registerReq:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+      username:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: REST API for the Quantix algorithmic crypto trading platform.
+  title: Quantix Trading API
+  version: "1.0"
+paths:
+  /api/admin/engines:
+    get:
+      description: Returns all running engines across all users (admin only)
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.EngineInfo'
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: 'Admin: List all engines'
+      tags:
+      - admin
+  /api/admin/engines/{user_id}/{engine_id}:
+    delete:
+      description: Force-stop any engine regardless of owner (admin only)
+      parameters:
+      - description: User ID
+        in: path
+        name: user_id
+        required: true
+        type: integer
+      - description: Engine ID
+        in: path
+        name: engine_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: 'Admin: Force stop engine'
+      tags:
+      - admin
+  /api/admin/users:
+    get:
+      description: Returns all registered users (admin only)
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: 'Admin: List users'
+      tags:
+      - admin
+  /api/admin/users/{id}/activate:
+    put:
+      consumes:
+      - application/json
+      description: Activate or deactivate a user account (admin only)
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Active flag
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: 'Admin: Set user active'
+      tags:
+      - admin
+  /api/auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Authenticate and receive a JWT token
+      parameters:
+      - description: Login credentials
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.loginReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.authResp'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      summary: Login
+      tags:
+      - auth
+  /api/auth/register:
+    post:
+      consumes:
+      - application/json
+      description: Create a new user account
+      parameters:
+      - description: Registration details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.registerReq'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.authResp'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      summary: Register
+      tags:
+      - auth
+  /api/backtest:
+    get:
+      description: Returns paginated list of backtest jobs for the current user
+      parameters:
+      - description: Max records (default 20)
+        in: query
+        name: limit
+        type: integer
+      - description: Pagination offset
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              type: object
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: List backtests
+      tags:
+      - backtest
+    post:
+      consumes:
+      - application/json
+      description: Start an asynchronous backtest job and return its ID
+      parameters:
+      - description: Backtest parameters
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.backtestReq'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Submit backtest
+      tags:
+      - backtest
+  /api/backtest/{id}:
+    delete:
+      description: Delete a backtest job record by ID
+      parameters:
+      - description: Backtest job ID (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.msgResp'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Delete backtest
+      tags:
+      - backtest
+    get:
+      description: Returns the status and result of a specific backtest job
+      parameters:
+      - description: Backtest job ID (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Get backtest
+      tags:
+      - backtest
+  /api/credentials:
+    get:
+      description: Returns all saved exchange API credentials (keys are masked)
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.credentialResp'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: List credentials
+      tags:
+      - credentials
+    post:
+      consumes:
+      - application/json
+      description: Save a new exchange API key and secret (encrypted at rest)
+      parameters:
+      - description: Credential details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.credentialReq'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Create credential
+      tags:
+      - credentials
+  /api/credentials/{id}:
+    delete:
+      description: Permanently delete an exchange API credential
+      parameters:
+      - description: Credential ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.msgResp'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Delete credential
+      tags:
+      - credentials
+    put:
+      consumes:
+      - application/json
+      description: Update an existing exchange API credential by ID
+      parameters:
+      - description: Credential ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Updated credential fields
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.credentialReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.msgResp'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Update credential
+      tags:
+      - credentials
+  /api/credentials/{id}/test:
+    post:
+      description: Test exchange API connectivity and return USDT balance
+      parameters:
+      - description: Credential ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Test credential
+      tags:
+      - credentials
+  /api/engines:
+    get:
+      description: Returns all running and recently stopped engines for the authenticated
+        user
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.EngineInfo'
+            type: array
+      security:
+      - BearerAuth: []
+      summary: List engines
+      tags:
+      - engines
+    post:
+      consumes:
+      - application/json
+      description: Start a new live or paper trading engine for the authenticated
+        user
+      parameters:
+      - description: Engine start parameters
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.StartRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Start engine
+      tags:
+      - engines
+  /api/engines/{id}:
+    delete:
+      description: Gracefully stop a running engine by its ID
+      parameters:
+      - description: Engine ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.msgResp'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Stop engine
+      tags:
+      - engines
+    get:
+      description: Returns the status and info for a specific engine
+      parameters:
+      - description: Engine ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.EngineInfo'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Get engine
+      tags:
+      - engines
+  /api/equity:
+    get:
+      description: Returns equity snapshot history for chart display
+      parameters:
+      - description: Filter by strategy ID
+        in: query
+        name: strategy_id
+        type: string
+      - description: Max records (default 200)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Get equity curve
+      tags:
+      - trading
+  /api/fills:
+    get:
+      description: Returns paginated fill history with optional filters
+      parameters:
+      - description: Filter by symbol
+        in: query
+        name: symbol
+        type: string
+      - description: Filter by strategy ID
+        in: query
+        name: strategy_id
+        type: string
+      - description: Filter by mode (live|paper)
+        in: query
+        name: mode
+        type: string
+      - description: Start date YYYY-MM-DD
+        in: query
+        name: from
+        type: string
+      - description: End date YYYY-MM-DD
+        in: query
+        name: to
+        type: string
+      - description: Max records (default 50)
+        in: query
+        name: limit
+        type: integer
+      - description: Pagination offset
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: List fills
+      tags:
+      - trading
+  /api/orders:
+    get:
+      description: Returns paginated order history with optional filters
+      parameters:
+      - description: Filter by symbol (e.g. BTCUSDT)
+        in: query
+        name: symbol
+        type: string
+      - description: Filter by strategy ID
+        in: query
+        name: strategy_id
+        type: string
+      - description: Filter by mode (live|paper)
+        in: query
+        name: mode
+        type: string
+      - description: Start date YYYY-MM-DD
+        in: query
+        name: from
+        type: string
+      - description: End date YYYY-MM-DD
+        in: query
+        name: to
+        type: string
+      - description: Max records (default 50)
+        in: query
+        name: limit
+        type: integer
+      - description: Pagination offset
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: List orders
+      tags:
+      - trading
+  /api/positions:
+    get:
+      description: Returns live open positions with unrealized P&L for all running
+        engines
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get positions
+      tags:
+      - trading
+  /api/strategies:
+    get:
+      description: Returns all registered trading strategy identifiers
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              type: string
+            type: array
+      security:
+      - BearerAuth: []
+      summary: List strategies
+      tags:
+      - strategies
+  /api/summary:
+    get:
+      description: 'Returns aggregated dashboard stats: equity, P&L, win rate, engine
+        status'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Get summary
+      tags:
+      - trading
+  /api/users/me:
+    get:
+      description: Returns the authenticated user's profile information
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Get current user
+      tags:
+      - users
+  /api/users/me/notifications:
+    get:
+      description: Returns the current user's Telegram notification configuration
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Get notification settings
+      tags:
+      - users
+    put:
+      consumes:
+      - application/json
+      description: Save Telegram bot token and chat ID for notifications
+      parameters:
+      - description: Notification settings
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.msgResp'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Update notification settings
+      tags:
+      - users
+  /api/users/me/notifications/test:
+    post:
+      description: Send a test message through configured notification channels
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.msgResp'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Test notifications
+      tags:
+      - users
+  /api/users/me/password:
+    put:
+      consumes:
+      - application/json
+      description: Update the current user's password
+      parameters:
+      - description: Password change request
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.msgResp'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.errorResp'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.errorResp'
+      security:
+      - BearerAuth: []
+      summary: Change password
+      tags:
+      - users
+  /health:
+    get:
+      description: Returns API and database health status
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "503":
+          description: Service Unavailable
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Health check
+      tags:
+      - system
+securityDefinitions:
+  BearerAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
