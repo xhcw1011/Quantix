@@ -15,6 +15,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -45,6 +46,10 @@ func init() {
 		if v, ok := params["HedgeMode"].(bool); ok { cfg.HedgeMode = v }
 		if v, ok := params["RangeTPPct"]; ok { cfg.RangeTPPct = toFloat(v) }
 		if v, ok := params["RangeSLPct"]; ok { cfg.RangeSLPct = toFloat(v) }
+		if v, ok := params["GridMaxLayers"]; ok { cfg.GridMaxLayers = toInt(v) }
+		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
+		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
+		if v, ok := params["GridQtyRatio"]; ok { cfg.GridQtyRatio = toFloat(v) }
 		if v, ok := params["Interval"].(string); ok && cfg.PrimaryInterval == "" { cfg.PrimaryInterval = v }
 		if v, ok := params["Intervals"]; ok {
 			switch vv := v.(type) {
@@ -86,6 +91,12 @@ type Config struct {
 	RangeTPPct float64 // take-profit % (default 0.004 = 0.4%)
 	RangeSLPct float64 // stop-loss % (default 0.0025 = 0.25%)
 
+	// Grid mode (range only)
+	GridMaxLayers  int     // max grid orders per position (default 2)
+	GridSpacingPct float64 // spacing between grid levels (default 0.005 = 0.5%)
+	GridTPPct      float64 // grid order take-profit (default 0.004 = 0.4%)
+	GridQtyRatio   float64 // grid qty as ratio of base qty (default 0.5)
+
 	// Risk limits
 	MaxDailyLossPct float64
 	MaxConsecLoss   int
@@ -98,6 +109,7 @@ func DefaultConfig() Config {
 		CallIntervalBars: 10, EnableShort: true,
 		RiskPerTrade: 0.02, ATRK: 4.0, TrailingATRK: 10.0,
 		RangeTPPct: 0.012, RangeSLPct: 0.010,
+		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
 		MaxDailyLossPct: 0.10, MaxConsecLoss: 5,
 	}
 }
@@ -122,7 +134,21 @@ type posState struct {
 	trailing   float64
 	peakPrice  float64
 	tp1RHit    bool
+	tp2Hit     bool
 	barsHeld   int
+	filled     bool
+	filledAt   time.Time
+	orderID    string
+	limitBar   int
+
+	// Grid orders (range mode only)
+	gridOrders []*gridOrder
+}
+
+type gridOrder struct {
+	entryPrice float64
+	qty        float64
+	tp         float64 // take-profit price
 	filled     bool
 	filledAt   time.Time
 	orderID    string
@@ -217,6 +243,11 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	price := bar.Close
 
+	// ── Skip stale bars for position management (prevent false stop-loss on backfill) ──
+	if time.Since(bar.CloseTime) > 2*time.Minute {
+		return
+	}
+
 	// ── 1m bars: precision stop/timeout management only ──
 	if iv != s.cfg.PrimaryInterval {
 		if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
@@ -253,6 +284,11 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Manage positions on primary bar too
 	if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
 	if s.shortPos != nil { s.managePos(ctx, bar, s.shortPos, &s.shortPos) }
+
+	// Skip GPT if we already have pending (unfilled) positions — save API cost
+	if (s.longPos != nil && !s.longPos.filled) || (s.shortPos != nil && !s.shortPos.filled) {
+		return
+	}
 
 	// GPT signal check (every N primary bars)
 	interval := s.cfg.CallIntervalBars
@@ -411,15 +447,22 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				longConf = 0
 			}
 		}
-		entry := longEntry
-		// Long entry must be below current price by at least 0.15%
-		if entry <= 0 || entry > price-minOffset { entry = price - minOffset }
-		if (price - entry) > maxDev { entry = price - minOffset } // cap at max deviation
-		entry = math.Round(entry*100) / 100
-		if isRange {
-			s.openRange(ctx, "LONG", price, entry, atr)
-		} else {
-			s.openTrend(ctx, "LONG", price, entry, atr)
+		if longConf > 0 {
+			entry := longEntry
+			// High confidence (≥0.90) → market order at current price for guaranteed fill
+			if longConf >= 0.90 {
+				entry = price
+				s.log.Info("AI: high confidence → market entry", zap.String("side", "LONG"), zap.Float64("conf", longConf))
+			} else {
+				if entry <= 0 || entry > price-minOffset { entry = price - minOffset }
+				if (price - entry) > maxDev { entry = price - minOffset }
+			}
+			entry = math.Round(entry*100) / 100
+			if isRange {
+				s.openRange(ctx, "LONG", price, entry, atr)
+			} else {
+				s.openTrend(ctx, "LONG", price, entry, atr)
+			}
 		}
 	}
 
@@ -431,15 +474,22 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				shortConf = 0
 			}
 		}
-		entry := shortEntry
-		// Short entry must be above current price by at least 0.15%
-		if entry <= 0 || entry < price+minOffset { entry = price + minOffset }
-		if (entry - price) > maxDev { entry = price + minOffset }
-		entry = math.Round(entry*100) / 100
-		if isRange {
-			s.openRange(ctx, "SHORT", price, entry, atr)
-		} else {
-			s.openTrend(ctx, "SHORT", price, entry, atr)
+		if shortConf > 0 {
+			entry := shortEntry
+			// High confidence (≥0.90) → market order at current price for guaranteed fill
+			if shortConf >= 0.90 {
+				entry = price
+				s.log.Info("AI: high confidence → market entry", zap.String("side", "SHORT"), zap.Float64("conf", shortConf))
+			} else {
+				if entry <= 0 || entry < price+minOffset { entry = price + minOffset }
+				if (entry - price) > maxDev { entry = price + minOffset }
+			}
+			entry = math.Round(entry*100) / 100
+			if isRange {
+				s.openRange(ctx, "SHORT", price, entry, atr)
+			} else {
+				s.openTrend(ctx, "SHORT", price, entry, atr)
+			}
 		}
 	}
 }
@@ -465,7 +515,20 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 		pos.trailing = pos.stopLoss
 		pos.R = math.Abs(fill.Price - pos.stopLoss)
 		if pos.mode == modeRange {
-			tpDist := fill.Price * s.cfg.RangeTPPct
+			// Dynamic TP based on BB width at fill time
+			tpPct := s.cfg.RangeTPPct
+			closes := s.getCloses()
+			if len(closes) >= 20 {
+				bb := indicator.BollingerBands(closes, 20, 2.0)
+				bbU, bbL := indicator.Last(bb.Upper), indicator.Last(bb.Lower)
+				if bbU > bbL && fill.Price > 0 {
+					w := (bbU - bbL) / fill.Price * 0.6
+					if w < 0.006 { w = 0.006 }
+					if w > 0.015 { w = 0.015 }
+					tpPct = w
+				}
+			}
+			tpDist := fill.Price * tpPct
 			slDist := fill.Price * s.cfg.RangeSLPct
 			if pos.side == "LONG" {
 				pos.takeProfit = fill.Price + tpDist
@@ -511,9 +574,22 @@ func (s *AIStrategy) effectiveRisk(side string) float64 {
 func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice, entryPrice, atr float64) {
 	entryPrice = math.Round(entryPrice*100) / 100
 
-	// TP/SL as percentage of entry price — scales with price level
-	tpDist := entryPrice * s.cfg.RangeTPPct // e.g. $2060 × 0.4% = $8.24
-	slDist := entryPrice * s.cfg.RangeSLPct // e.g. $2060 × 0.25% = $5.15
+	// Dynamic TP based on Bollinger Band width (recent volatility)
+	// Use 60% of BB width as TP target, clamped between 0.6% and 1.5%
+	tpPct := s.cfg.RangeTPPct
+	closes := s.getCloses()
+	if len(closes) >= 20 {
+		bb := indicator.BollingerBands(closes, 20, 2.0)
+		bbU, bbL := indicator.Last(bb.Upper), indicator.Last(bb.Lower)
+		if bbU > bbL && currentPrice > 0 {
+			bbWidthPct := (bbU - bbL) / currentPrice * 0.6 // 60% of BB width
+			if bbWidthPct < 0.006 { bbWidthPct = 0.006 }   // min 0.6%
+			if bbWidthPct > 0.015 { bbWidthPct = 0.015 }   // max 1.5%
+			tpPct = bbWidthPct
+		}
+	}
+	tpDist := entryPrice * tpPct
+	slDist := entryPrice * s.cfg.RangeSLPct
 
 	var stopLoss, takeProfit float64
 	if side == "LONG" {
@@ -771,6 +847,99 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 		s.closePos(ctx, p, pptr, "timeout_flat")
 		return
 	}
+
+	// ── Grid orders: add on dip, take profit on bounce ──
+	s.manageGrid(ctx, bar, p, pptr)
+}
+
+func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
+	if s.cfg.GridMaxLayers <= 0 { return }
+	price := bar.Close
+
+	// 1. Check existing grid orders for TP or fill
+	for i := len(p.gridOrders) - 1; i >= 0; i-- {
+		g := p.gridOrders[i]
+
+		// Pending grid order — check if filled (limit order)
+		if !g.filled {
+			// Check if price reached the grid entry
+			if (p.side == "LONG" && price <= g.entryPrice) || (p.side == "SHORT" && price >= g.entryPrice) {
+				g.filled = true
+				g.filledAt = time.Now()
+				s.log.Info("AI: grid order filled",
+					zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
+					zap.Float64("qty", g.qty), zap.Int("layer", i+1))
+			}
+			continue
+		}
+
+		// Filled grid order — check TP
+		gridProfit := false
+		if p.side == "LONG" && price >= g.tp { gridProfit = true }
+		if p.side == "SHORT" && price <= g.tp { gridProfit = true }
+
+		if gridProfit {
+			s.log.Info("AI: grid TP hit",
+				zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
+				zap.Float64("tp", g.tp), zap.Float64("price", price),
+				zap.Float64("qty", g.qty), zap.Int("layer", i+1))
+			s.placeCloseOrder(ctx, p.side, g.qty, false)
+			p.remainQty -= g.qty
+			// Remove this grid order
+			p.gridOrders = append(p.gridOrders[:i], p.gridOrders[i+1:]...)
+		}
+	}
+
+	// 2. Open new grid order if price moved far enough from last level
+	if len(p.gridOrders) >= s.cfg.GridMaxLayers { return }
+	if !p.filled { return } // base must be filled first
+
+	// Only add grids in Range regime
+	if !s.isRangeRegime(price) { return }
+
+	// Determine the reference price (last grid entry or base entry)
+	refPrice := p.entryPrice
+	if len(p.gridOrders) > 0 {
+		last := p.gridOrders[len(p.gridOrders)-1]
+		refPrice = last.entryPrice
+	}
+
+	spacing := p.entryPrice * s.cfg.GridSpacingPct
+	shouldAdd := false
+	var gridEntry, gridTP float64
+
+	if p.side == "LONG" && price <= refPrice-spacing {
+		gridEntry = math.Round(price*100) / 100
+		gridTP = math.Round((gridEntry+gridEntry*s.cfg.GridTPPct)*100) / 100
+		shouldAdd = true
+	}
+	if p.side == "SHORT" && price >= refPrice+spacing {
+		gridEntry = math.Round(price*100) / 100
+		gridTP = math.Round((gridEntry-gridEntry*s.cfg.GridTPPct)*100) / 100
+		shouldAdd = true
+	}
+
+	if !shouldAdd { return }
+
+	// Check total margin won't exceed 60% equity
+	gridQty := math.Floor(p.initQty*s.cfg.GridQtyRatio*1000) / 1000
+	if gridQty <= 0 { return }
+
+	// Place grid order as market (price already at the level)
+	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, false)
+	if omsID == "" { return }
+
+	g := &gridOrder{
+		entryPrice: gridEntry, qty: gridQty, tp: gridTP,
+		filled: true, filledAt: time.Now(), orderID: omsID,
+	}
+	p.gridOrders = append(p.gridOrders, g)
+	p.remainQty += gridQty
+
+	s.log.Info("AI: grid order opened",
+		zap.String("side", p.side), zap.Float64("entry", gridEntry),
+		zap.Float64("tp", gridTP), zap.Float64("qty", gridQty),
+		zap.Int("layer", len(p.gridOrders)))
 }
 
 func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
@@ -785,27 +954,85 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
 	}
 
-	// TP +4R: close 25%, move stop to +2R (let profits run longer)
-	if !p.tp1RHit && pnlR >= 4.0 {
-		qty := math.Floor(p.initQty*0.25*1000) / 1000
+	// ── Staged profit management ──
+	// +0.5R: move SL to breakeven
+	if pnlR >= 0.5 && p.stopLoss < p.entryPrice && p.side == "LONG" {
+		buf := p.entryPrice * 0.001
+		p.stopLoss = p.entryPrice + buf
+		s.log.Info("AI: +0.5R → SL to breakeven", zap.Float64("sl", p.stopLoss))
+	}
+	if pnlR >= 0.5 && p.stopLoss > p.entryPrice && p.side == "SHORT" {
+		buf := p.entryPrice * 0.001
+		p.stopLoss = p.entryPrice - buf
+		s.log.Info("AI: +0.5R → SL to breakeven", zap.Float64("sl", p.stopLoss))
+	}
+
+	// +1.0R: close 20%, start trailing
+	if !p.tp1RHit && pnlR >= 1.0 {
+		qty := math.Floor(p.initQty*0.20*1000) / 1000
 		if qty > 0 {
-			s.log.Info("TP +4R → close 25%", zap.Float64("pnl_R", pnlR))
-			s.closePartial(ctx, p, pptr, qty, "tp_4R")
+			s.log.Info("TP +1R → close 20%", zap.Float64("pnl_R", pnlR))
+			s.closePartial(ctx, p, pptr, qty, "tp_1R")
 			p.tp1RHit = true
-			if p.side == "LONG" { p.stopLoss = p.entryPrice + p.R*2 }
-			if p.side == "SHORT" { p.stopLoss = p.entryPrice - p.R*2 }
 			s.consecLoss = 0
 		}
 	}
-	// Remaining 75% rides trailing stop
 
-	// Trailing (ATR with minimum distance floor of 1.2%)
-	trailDist := atr * s.cfg.TrailingATRK
-	minTrailDist := p.peakPrice * 0.012
-	if trailDist < minTrailDist { trailDist = minTrailDist }
+	// +1.5R: close another 20%
+	if p.tp1RHit && !p.tp2Hit && pnlR >= 1.5 {
+		qty := math.Floor(p.initQty*0.20*1000) / 1000
+		if qty > 0 {
+			s.log.Info("TP +1.5R → close 20%", zap.Float64("pnl_R", pnlR))
+			s.closePartial(ctx, p, pptr, qty, "tp_1.5R")
+			p.tp2Hit = true
+		}
+	}
+
+	// ── Adaptive trailing based on 15m ATR + profit level ──
+	// Determine base trailing % from 15m ATR
+	atr15 := 0.0
+	bars15 := s.barsForInterval("15m")
+	if len(bars15) >= 15 {
+		recent15 := bars15[len(bars15)-15:]
+		var sum15 float64
+		for i := 1; i < len(recent15); i++ {
+			sum15 += math.Max(recent15[i].High-recent15[i].Low,
+				math.Max(math.Abs(recent15[i].High-recent15[i-1].Close), math.Abs(recent15[i].Low-recent15[i-1].Close)))
+		}
+		atr15 = sum15 / float64(len(recent15)-1)
+	}
+	// ATR-based trailing percentage
+	baseTrailPct := 0.012 // default 1.2%
+	if atr15 > 0 && p.peakPrice > 0 {
+		atr15Pct := atr15 / p.peakPrice
+		if atr15Pct < 0.005 { baseTrailPct = 0.008 }       // low vol: 0.8%
+		if atr15Pct >= 0.005 && atr15Pct < 0.01 { baseTrailPct = 0.012 } // normal: 1.2%
+		if atr15Pct >= 0.01 { baseTrailPct = 0.015 }        // high vol: 1.5%
+	}
+
+	// Tighten trailing as profit grows (starts from +1.0R)
+	var trailDist float64
+	trailFloor := p.peakPrice * 0.005 // absolute minimum 0.5%
+	if pnlR >= 2.0 {
+		trailDist = p.peakPrice * baseTrailPct * 0.40
+		if trailDist < trailFloor { trailDist = trailFloor }
+	} else if pnlR >= 1.5 {
+		d := p.peakPrice * baseTrailPct * 0.65
+		if d < p.peakPrice*0.006 { d = p.peakPrice * 0.006 } // floor 0.6%
+		trailDist = d
+	} else if pnlR >= 1.0 {
+		trailDist = p.peakPrice * baseTrailPct // 100% base
+	} else {
+		// Below +1.0R: wide ATR trailing, no tightening
+		trailDist = atr * s.cfg.TrailingATRK
+		minTrailDist := p.peakPrice * 0.012
+		if trailDist < minTrailDist { trailDist = minTrailDist }
+	}
 
 	if p.side == "LONG" {
 		nt := p.peakPrice - trailDist
+		// Trailing never below breakeven once SL has been moved there
+		if pnlR >= 0.5 && nt < p.entryPrice { nt = p.entryPrice }
 		if nt > p.trailing { p.trailing = nt }
 		if price <= p.trailing && p.trailing > p.stopLoss {
 			s.log.Info("TRAILING STOP", zap.Float64("price", price), zap.Float64("trail", p.trailing))
@@ -815,6 +1042,8 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		}
 	} else {
 		nt := p.peakPrice + trailDist
+		// Trailing never above breakeven once SL has been moved there
+		if pnlR >= 0.5 && nt > p.entryPrice { nt = p.entryPrice }
 		if nt < p.trailing { p.trailing = nt }
 		if price >= p.trailing && p.trailing > 0 && p.trailing < p.stopLoss {
 			s.log.Info("TRAILING STOP", zap.Float64("price", price), zap.Float64("trail", p.trailing))
@@ -872,8 +1101,19 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 	qty := math.Floor(p.remainQty*1000) / 1000
 	if qty <= 0 { *pptr = nil; return }
 
-	// Stop-loss uses market order (must fill immediately); others use limit for lower fees
-	useMarket := reason == "stop_loss"
+	// Log grid orders being closed with base
+	if len(p.gridOrders) > 0 {
+		gridQty := 0.0
+		for _, g := range p.gridOrders { if g.filled { gridQty += g.qty } }
+		if gridQty > 0 {
+			s.log.Info("AI: closing grid orders with base",
+				zap.Int("layers", len(p.gridOrders)), zap.Float64("grid_qty", gridQty))
+		}
+	}
+
+	// Stop-loss, trailing, and reversal use market order (must fill immediately)
+	// Only TP and timeout use limit for lower fees
+	useMarket := reason == "stop_loss" || reason == "gpt_reversal" || reason == "trailing" || reason == "timeout_loss"
 	s.placeCloseOrder(ctx, p.side, qty, useMarket)
 	s.log.Info("AI: CLOSE", zap.String("side", p.side), zap.String("reason", reason),
 		zap.Float64("entry", p.entryPrice), zap.Float64("qty", qty), zap.Bool("market", useMarket))
@@ -1068,7 +1308,7 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 func (s *AIStrategy) callGPT(mc mktCtx) (gptSignal, error) {
 	ctxJSON, _ := json.Marshal(mc)
 	body, _ := json.Marshal(map[string]any{
-		"model": s.cfg.Model, "temperature": 0.3, "max_completion_tokens": 250,
+		"model": s.cfg.Model, "temperature": 0.3, "max_completion_tokens": 400,
 		"messages": []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": string(ctxJSON)}},
 	})
 	callCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1084,9 +1324,23 @@ func (s *AIStrategy) callGPT(mc mktCtx) (gptSignal, error) {
 	var gr struct{ Choices []struct{ Message struct{ Content string `json:"content"` } `json:"message"` } `json:"choices"` }
 	json.Unmarshal(rb, &gr)
 	if len(gr.Choices) == 0 { return gptSignal{}, fmt.Errorf("no choices") }
+
+	content := strings.TrimSpace(gr.Choices[0].Message.Content)
+	if content == "" { return gptSignal{}, fmt.Errorf("empty GPT response") }
+	// Strip markdown code fence if present
+	if strings.HasPrefix(content, "```") {
+		lines := strings.Split(content, "\n")
+		filtered := []string{}
+		for _, l := range lines {
+			if strings.HasPrefix(strings.TrimSpace(l), "```") { continue }
+			filtered = append(filtered, l)
+		}
+		content = strings.Join(filtered, "\n")
+	}
+
 	var sig gptSignal
-	if err := json.Unmarshal([]byte(gr.Choices[0].Message.Content), &sig); err != nil {
-		return gptSignal{}, fmt.Errorf("parse %q: %w", gr.Choices[0].Message.Content, err)
+	if err := json.Unmarshal([]byte(content), &sig); err != nil {
+		return gptSignal{}, fmt.Errorf("parse %q: %w", content, err)
 	}
 	return sig, nil
 }

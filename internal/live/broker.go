@@ -110,13 +110,19 @@ func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
 	// Soft idempotency: block duplicate orders for the same symbol+side to
 	// prevent double-position after network retries.
 	if existing := b.omsInst.FindPending(req.Symbol, req.Side); existing != nil {
-		b.log.Warn("duplicate order blocked — pending order already exists",
-			zap.String("symbol", req.Symbol),
-			zap.String("side", string(req.Side)),
-			zap.String("existing_id", existing.ID),
-			zap.String("existing_status", string(existing.Status)),
-		)
-		return existing.ID
+		// Stale pending orders (>5min) from DB recovery should not block new orders
+		if time.Since(existing.CreatedAt) > 5*time.Minute {
+			b.log.Info("clearing stale OMS order", zap.String("id", existing.ID))
+			b.omsInst.Cancel(existing.ID)
+		} else {
+			b.log.Warn("duplicate order blocked — pending order already exists",
+				zap.String("symbol", req.Symbol),
+				zap.String("side", string(req.Side)),
+				zap.String("existing_id", existing.ID),
+				zap.String("existing_status", string(existing.Status)),
+			)
+			return ""
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
