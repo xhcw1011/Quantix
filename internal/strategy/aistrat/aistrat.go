@@ -320,9 +320,10 @@ type AIStrategy struct {
 
 	longPos  *posState
 	shortPos *posState
-	syncer   *position.Syncer // Redis-backed, set at warmup from ctx.Extra
-	rdb      *redis.Client    // for signal caching
-	store    *data.Store       // for trade event logging
+	syncer    *position.Syncer          // Redis-backed, set at warmup from ctx.Extra
+	stagedEP  strategy.StagedExitPlacer // cached from ctx.Extra on first use
+	rdb       *redis.Client             // for signal caching
+	store     *data.Store               // for trade event logging
 	userID   int
 	engineID string
 
@@ -544,18 +545,28 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	minSpread := price * 0.0035 // ~$7 at ETH $2000
 
 	// ── Multi-timeframe scoring (must run before single-direction check and boost) (replaces hard block) ──
-	// Score: positive = bullish, negative = bearish. Range -4 to +4.
+	// Score: positive = bullish, negative = bearish. Range -5 to +5.
+	// Components: 15m return (±2) + 15m EMA structure (±1) + 5m momentum (±1) + 1m change (±1)
 	mtfScore := 0
 
-	// 15m trend score (±2)
+	// 15m trend score (±2): based on 8-bar return
 	bars15 := s.barsForInterval("15m")
+	var ema20_15, ema50_15 float64 // used below for structure confirmation
 	if len(bars15) >= 8 {
 		c15 := make([]float64, len(bars15))
 		for i, b := range bars15 { c15[i] = b.Close }
 		ret15 := (c15[len(c15)-1] - c15[len(c15)-8]) / c15[len(c15)-8]
 		if ret15 > s.cfg.MTFStrongTrend { mtfScore += 2 } else if ret15 > s.cfg.MTFWeakTrend { mtfScore += 1 }
 		if ret15 < -s.cfg.MTFStrongTrend { mtfScore -= 2 } else if ret15 < -s.cfg.MTFWeakTrend { mtfScore -= 1 }
-		// -0.2% ~ +0.2% = neutral (0 score)
+
+		// 15m EMA structure confirmation (±1): prevents bounces from flipping the score.
+		// If EMA20 < EMA50, the macro trend is bearish regardless of short-term return.
+		if len(c15) >= s.cfg.EMASlow {
+			ema20_15 = indicator.Last(indicator.EMA(c15, s.cfg.EMAFast))
+			ema50_15 = indicator.Last(indicator.EMA(c15, s.cfg.EMASlow))
+			if ema20_15 > ema50_15 { mtfScore++ }  // bullish structure
+			if ema20_15 < ema50_15 { mtfScore-- }  // bearish structure
+		}
 	}
 
 	// 5m momentum score (±1): MACD OR RSI, either is enough
@@ -670,16 +681,17 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 		if longConf > 0 {
 			var entry float64
-			if longConf >= s.cfg.MarketEntryConf {
-				// Very high confidence → market order at current price
+			// LONG wants to buy LOW. GPT entry (support) is typically below current price.
+			// Use GPT entry if it's below current price (better deal); otherwise market entry.
+			offsetEntry := price - entryOffset
+			entry = offsetEntry
+			if longEntry > 0 && longEntry < entry && (price-longEntry) <= maxDev {
+				entry = longEntry // GPT found a better support level
+			}
+			// High confidence + GPT entry is ABOVE current price (missed the dip) → use market
+			if longConf >= s.cfg.MarketEntryConf && entry >= price {
 				entry = price
-				s.log.Info("AI: high confidence → market entry", zap.String("side", "LONG"), zap.Float64("conf", longConf))
-			} else {
-				offsetEntry := price - entryOffset
-				entry = offsetEntry
-				if longEntry > 0 && longEntry < entry && (price-longEntry) <= maxDev {
-					entry = longEntry
-				}
+				s.log.Info("AI: high confidence + no better entry → market", zap.String("side", "LONG"), zap.Float64("conf", longConf))
 			}
 			entry = math.Round(entry*100) / 100
 			if isRange {
@@ -701,15 +713,17 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 		if shortConf > 0 {
 			var entry float64
-			if shortConf >= s.cfg.MarketEntryConf {
+			// SHORT wants to sell HIGH. GPT entry (resistance) is typically above current price.
+			// Use GPT entry if it's above current price (better deal); otherwise market entry.
+			offsetEntry := price + entryOffset
+			entry = offsetEntry
+			if shortEntry > 0 && shortEntry > entry && (shortEntry-price) <= maxDev {
+				entry = shortEntry // GPT found a better resistance level
+			}
+			// High confidence + GPT entry is BELOW current price (missed the rally) → use market
+			if shortConf >= s.cfg.MarketEntryConf && entry <= price {
 				entry = price
-				s.log.Info("AI: high confidence → market entry", zap.String("side", "SHORT"), zap.Float64("conf", shortConf))
-			} else {
-				offsetEntry := price + entryOffset
-				entry = offsetEntry
-				if shortEntry > 0 && shortEntry > entry && (shortEntry-price) <= maxDev {
-					entry = shortEntry
-				}
+				s.log.Info("AI: high confidence + no better entry → market", zap.String("side", "SHORT"), zap.Float64("conf", shortConf))
 			}
 			entry = math.Round(entry*100) / 100
 			if isRange {
@@ -801,6 +815,7 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 		s.log.Warn("staged exit placer not available (paper/backtest mode), using local management")
 		return
 	}
+	s.stagedEP = ep // cache for handleStagedTPFill (no ctx available there)
 
 	R := pos.R
 	if R <= 0 { return }
@@ -916,7 +931,7 @@ func (s *AIStrategy) checkBreakevenMove(ctx *strategy.Context, price float64, p 
 		newStop = math.Round((p.entryPrice - p.entryPrice*s.cfg.BreakevenBuf)*100) / 100
 	}
 
-	if ep.ReplaceSLOrder(s.cfg.Symbol, posSide, closeSide, p.initQty, newStop) {
+	if ep.ReplaceSLOrder(s.cfg.Symbol, posSide, closeSide, p.remainQty, newStop) {
 		p.breakevenMoved = true
 		p.stopLoss = newStop
 		s.log.Info("AI: SL moved to breakeven at +0.5R",
@@ -962,10 +977,17 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 		zap.Float64("est_pnl", pnl),
 	)
 
-	// Position fully closed by staged TPs
+	// Position fully closed (SL fired or all TPs filled) — cancel remaining orders on exchange.
 	if pos.remainQty <= 0 {
-		s.log.Info("AI: position fully closed by staged TPs",
+		s.log.Info("AI: position fully closed by exchange order",
 			zap.String("side", pos.side))
+		// Cancel any remaining protective orders (e.g., SL still active after all TPs filled,
+		// or TP orders still active after SL fired).
+		if s.stagedEP != nil {
+			posSide := "LONG"
+			if pos.side == "SHORT" { posSide = "SHORT" }
+			s.stagedEP.CancelAllProtective(s.cfg.Symbol, posSide)
+		}
 		s.consecLoss = 0
 		s.syncRemove(pos.side)
 		*pptr = nil
@@ -1724,22 +1746,32 @@ RESPONSE (strict JSON):
 {"long":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."},"short":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."}}
 
 MULTI-TIMEFRAME RULES:
-1. CHECK indicators_15m FIRST for trend direction (2-hour window):
-   - 15m return_8bar > +1%: UPTREND → favor long (0.80+), short < 0.30
-   - 15m return_8bar < -1%: DOWNTREND → favor short (0.80+), long < 0.30
-   - 15m between -1% and +1%: RANGE → both sides OK (0.65-0.85)
-2. USE 5m indicators for precise timing:
+1. CHECK indicators_15m FIRST for STRUCTURE (EMA20 vs EMA50) — this is the dominant trend:
+   - 15m EMA20 > EMA50: BULLISH STRUCTURE → favor long, short needs strong evidence
+   - 15m EMA20 < EMA50: BEARISH STRUCTURE → favor short, long needs strong evidence
+2. THEN check return_8bar for MOMENTUM:
+   - 15m return_8bar > +1%: strong upward momentum
+   - 15m return_8bar < -1%: strong downward momentum
+   - Between ±1%: weak/mixed momentum
+3. CRITICAL — distinguish BOUNCE from REVERSAL:
+   - If 15m EMA structure is BEARISH but return_8bar is temporarily positive:
+     this is an OVERSOLD BOUNCE, NOT a trend reversal. Keep long confidence < 0.50.
+   - If 15m EMA structure is BULLISH but return_8bar is temporarily negative:
+     this is an OVERBOUGHT PULLBACK, NOT a trend reversal. Keep short confidence < 0.50.
+   - True reversal requires BOTH structure change (EMA crossover) AND momentum alignment.
+4. USE 5m indicators for precise timing:
    - long entry_price: nearest SUPPORT (swing_low_10, bb_lower, ema20), below current price
    - short entry_price: nearest RESISTANCE (swing_high_10, bb_upper), above current price
    - entry_price within 0.5% of current price
 
 CONFIDENCE GUIDE:
-- Strong trend + aligned 5m signal: 0.85-0.95
-- Range + clear support/resistance: 0.75-0.85
+- Strong trend (structure + momentum aligned): 0.85-0.95
+- Range (EMA20 ≈ EMA50): 0.65-0.85 for both sides
+- Bounce against structure (counter-trend): < 0.50
 - Weak/conflicting signals: 0.30-0.60
-- Counter-trend: < 0.30
 
-Be decisive. When 15m trend is clear AND 5m timing aligns, give HIGH confidence (0.85+).`
+Be decisive. When 15m STRUCTURE and MOMENTUM both align, give HIGH confidence (0.85+).
+Never chase a bounce as if it were a reversal.`
 
 type mktCtx struct {
 	Symbol       string             `json:"symbol"`
@@ -1901,6 +1933,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		if s.longPos.peakPrice == 0 { s.longPos.peakPrice = currentPrice }
 		if s.longPos.trailing == 0 { s.longPos.trailing = sl }
 		if lp.Mode == "trend" { s.longPos.mode = modeTrend }
+		if lp.Mode == "range" { s.longPos.mode = modeRange }
 
 		s.log.Info("AI: recovered LONG from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", lp.Qty),
@@ -1934,6 +1967,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		if s.shortPos.peakPrice == 0 { s.shortPos.peakPrice = currentPrice }
 		if s.shortPos.trailing == 0 { s.shortPos.trailing = sl }
 		if sp.Mode == "trend" { s.shortPos.mode = modeTrend }
+		if sp.Mode == "range" { s.shortPos.mode = modeRange }
 
 		s.log.Info("AI: recovered SHORT from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", sp.Qty),

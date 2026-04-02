@@ -686,18 +686,44 @@ func (b *Broker) PlaceStagedTPOrders(ctx context.Context, symbol, posSide string
 	b.log.Info("staged TP: SL placed",
 		zap.String("sl_id", slID), zap.Float64("stop", stopPrice))
 
-	// Place each TP level as reduce-only limit order
+	// Place each TP level as reduce-only limit order, tracked through OMS for fill detection.
 	for i, tp := range tps {
-		tpID, tpErr := b.orderClient.PlaceReduceOnlyLimitOrder(ctx, symbol, closeSide, posSide, tp.Qty, tp.Price, "")
+		// Submit through OMS so fills are detected via pollOrderUntilFilled → processFills → strategy.OnFill.
+		tpReq := strategy.OrderRequest{
+			Symbol:       symbol,
+			Side:         strategy.Side(closeSide),
+			PositionSide: strategy.PositionSide(posSide),
+			Type:         strategy.OrderLimit,
+			Qty:          tp.Qty,
+			Price:        tp.Price,
+		}
+		tpOrd, omsErr := b.omsInst.Submit(tpReq, "staged_tp")
+		if omsErr != nil {
+			b.log.Error("staged TP: OMS submit failed", zap.Int("level", i+1), zap.Error(omsErr))
+			continue
+		}
+		b.omsInst.SetRole(tpOrd.ID, "staged_tp")
+
+		tpID, tpErr := b.orderClient.PlaceReduceOnlyLimitOrder(ctx, symbol, closeSide, posSide, tp.Qty, tp.Price, tpOrd.ClientOrderID)
 		if tpErr != nil {
+			b.omsInst.Reject(tpOrd.ID, tpErr.Error())
 			b.log.Error("staged TP: failed to place TP level",
 				zap.Int("level", i+1), zap.Float64("price", tp.Price),
 				zap.Float64("qty", tp.Qty), zap.Error(tpErr))
 			continue
 		}
+		b.omsInst.SetExchangeID(tpOrd.ID, tpID)
+		b.omsInst.Accept(tpOrd.ID)
 		ids.tpIDs = append(ids.tpIDs, tpID)
+
+		// Launch fill poller so processFills detects when this TP fires.
+		if sc, ok := b.orderClient.(exchange.OrderStatusChecker); ok {
+			go b.pollOrderUntilFilled(b.engineCtx, sc, tpID, tpOrd.ID, tpReq)
+		}
+
 		b.log.Info("staged TP: level placed",
 			zap.Int("level", i+1), zap.String("tp_id", tpID),
+			zap.String("oms_id", tpOrd.ID),
 			zap.Float64("price", tp.Price), zap.Float64("qty", tp.Qty))
 	}
 

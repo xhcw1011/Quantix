@@ -291,11 +291,17 @@ func (b *OrderBroker) CancelOrder(ctx context.Context, symbol, exchangeID string
 // Cancels all open orders for the given symbol on Binance USDM Futures.
 // Used by live.Engine on startup (clean-slate) to clear orphaned orders.
 func (b *OrderBroker) CancelAllOpenOrders(ctx context.Context, symbol string) error {
+	// Cancel normal orders (LIMIT, etc.)
 	err := b.client.NewCancelAllOpenOrdersService().Symbol(symbol).Do(ctx)
 	if err != nil {
-		return fmt.Errorf("binance futures cancel all open orders for %s: %w", symbol, err)
+		b.log.Warn("cancel normal open orders failed (may be none)", zap.String("symbol", symbol), zap.Error(err))
 	}
-	return nil
+	// Cancel algo orders (SL/TP stop-market, take-profit-market)
+	algoErr := b.client.NewCancelAllAlgoOpenOrdersService().Symbol(symbol).Do(ctx)
+	if algoErr != nil {
+		b.log.Warn("cancel algo open orders failed (may be none)", zap.String("symbol", symbol), zap.Error(algoErr))
+	}
+	return nil // best-effort: either or both may have no orders to cancel
 }
 
 // GetBalance returns the available balance for the given asset (e.g. "USDT").
@@ -444,29 +450,51 @@ func (b *OrderBroker) GetOrderStatus(ctx context.Context, symbol, orderID string
 		return "", exchange.OrderFill{}, fmt.Errorf("invalid order ID %q: %w", orderID, err)
 	}
 
+	// Try normal order first.
 	result, err := b.client.NewGetOrderService().
 		Symbol(symbol).
 		OrderID(xID).
 		Do(ctx)
-	if err != nil {
-		return "", exchange.OrderFill{}, fmt.Errorf("binance futures get order: %w", err)
+	if err == nil {
+		qty, _ := strconv.ParseFloat(result.ExecutedQuantity, 64)
+		avgPrice, _ := strconv.ParseFloat(result.AvgPrice, 64)
+		fill := exchange.OrderFill{
+			ExchangeID: orderID,
+			FilledQty:  qty,
+			AvgPrice:   avgPrice,
+			Status:     string(result.Status),
+		}
+		return string(result.Status), fill, nil
 	}
 
-	qty, err := strconv.ParseFloat(result.ExecutedQuantity, 64)
-	if err != nil {
-		return "", exchange.OrderFill{}, fmt.Errorf("parse order ExecutedQuantity %q: %w", result.ExecutedQuantity, err)
+	// Normal order not found — try algo order (SL/TP placed via Algo API).
+	algoResult, algoErr := b.client.NewGetAlgoOrderService().AlgoID(xID).Do(ctx)
+	if algoErr != nil {
+		return "", exchange.OrderFill{}, fmt.Errorf("binance futures get order: %w (algo: %v)", err, algoErr)
 	}
-	avgPrice, err := strconv.ParseFloat(result.AvgPrice, 64)
-	if err != nil {
-		return "", exchange.OrderFill{}, fmt.Errorf("parse order AvgPrice %q: %w", result.AvgPrice, err)
-	}
+
+	// Algo statuses: NEW (pending), CANCELED, REJECTED, EXPIRED (triggered → sub-order created)
+	algoStatus := string(algoResult.AlgoStatus)
 	fill := exchange.OrderFill{
 		ExchangeID: orderID,
-		FilledQty:  qty,
-		AvgPrice:   avgPrice,
-		Status:     string(result.Status),
+		Status:     algoStatus,
 	}
-	return string(result.Status), fill, nil
+
+	// When algo triggers, it creates a sub-order (actualOrderId).
+	// If the sub-order exists and is filled, treat the algo as FILLED.
+	if algoResult.ActualOrderId != "" && algoResult.ActualOrderId != "0" {
+		actualPrice, _ := strconv.ParseFloat(algoResult.ActualPrice, 64)
+		actualQty, _ := strconv.ParseFloat(algoResult.Quantity, 64)
+		fill.Status = "FILLED"
+		fill.AvgPrice = actualPrice
+		fill.FilledQty = actualQty
+	} else if algoStatus == string(goBinance.AlgoOrderStatusTypeNew) {
+		fill.Status = "NEW"
+	} else if algoStatus == string(goBinance.AlgoOrderStatusTypeCanceled) {
+		fill.Status = "CANCELED"
+	}
+
+	return fill.Status, fill, nil
 }
 
 // ─── User Data Stream (real-time order/fill notifications) ────────────────────
@@ -548,8 +576,12 @@ func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill e
 			}
 			o := event.OrderTradeUpdate
 
-			qty, _ := strconv.ParseFloat(o.AccumulatedFilledQty, 64)
+			// Use LastFilledQty (incremental for this event), NOT AccumulatedFilledQty
+			// which is cumulative and would cause double-counting on partial fills.
+			qty, _ := strconv.ParseFloat(o.LastFilledQty, 64)
+			lastPrice, _ := strconv.ParseFloat(o.LastFilledPrice, 64)
 			avgPrice, _ := strconv.ParseFloat(o.AveragePrice, 64)
+			if lastPrice > 0 { avgPrice = lastPrice } // prefer exact fill price for this event
 			commission, _ := strconv.ParseFloat(o.Commission, 64)
 			if commission < 0 {
 				commission = -commission

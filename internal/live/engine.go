@@ -3,8 +3,10 @@ package live
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -69,7 +71,7 @@ type Engine struct {
 	// Exchange equity cache (for futures — avoids self-calculating with margin)
 	equityQuerier   exchange.EquityQuerier
 	lastEquityQuery time.Time
-	cachedEquity    float64
+	cachedEquityBits atomic.Uint64 // float64 stored as bits for lock-free access
 
 	// Stale bar detection
 	lastBarTime  time.Time // last time a kline was received
@@ -258,7 +260,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	if uds, ok := e.broker.orderClient.(userDataSubscriber); ok {
 		onAccountUpdate := func(walletBalance, crossUnPnl float64) {
 			equity := walletBalance + crossUnPnl
-			e.cachedEquity = equity
+			e.cachedEquityBits.Store(math.Float64bits(equity))
 			e.lastEquityQuery = time.Now()
 			e.broker.equity.Store(equity)
 			// Also update syncer
@@ -277,8 +279,13 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			}
 			ord := e.omsInst.FindByClientOrderID(clientOrderID)
 			if ord == nil {
-				e.log.Warn("user data stream: unknown clientOrderID",
-					zap.String("client_order_id", clientOrderID))
+				// Staged TP/SL orders bypass OMS — clientOrderID won't match.
+				// This is expected; these fills are detected by pollOrderUntilFilled
+				// for limit orders, or by exchange position sync for algo orders.
+				if clientOrderID != "" {
+					e.log.Debug("user data stream: unmatched clientOrderID",
+						zap.String("client_order_id", clientOrderID))
+				}
 				return
 			}
 			// Set exchange ID if not yet set
@@ -389,8 +396,9 @@ func (e *Engine) onBar(bar exchange.Kline) {
 
 	// Equity from WS ACCOUNT_UPDATE push (futures) or local calc (spot).
 	var equity float64
-	if e.cachedEquity > 0 {
-		equity = e.cachedEquity
+	cachedEq := math.Float64frombits(e.cachedEquityBits.Load())
+	if cachedEq > 0 {
+		equity = cachedEq
 	} else {
 		prices := map[string]float64{bar.Symbol: bar.Close}
 		equity = e.broker.Cash() + e.positions.TotalUnrealizedPnL(prices)
@@ -462,15 +470,22 @@ func (e *Engine) processFills(ctx context.Context) {
 			ps := string(event.Fill.PositionSide)
 			isOpeningShort := ps == string(strategy.PositionSideShort) && event.Fill.Side == strategy.SideSell
 			isClosingShort := ps == string(strategy.PositionSideShort) && event.Fill.Side == strategy.SideBuy
+			isOpeningLong := ps == string(strategy.PositionSideLong) && event.Fill.Side == strategy.SideBuy
+			isClosingLong := ps == string(strategy.PositionSideLong) && event.Fill.Side == strategy.SideSell
+			notional := event.Fill.Qty * event.Fill.Price
 			switch {
 			case isOpeningShort:
-				e.broker.cash.Store(prevCash - event.Fill.Qty*event.Fill.Price*marginRate - event.Fill.Fee)
+				e.broker.cash.Store(prevCash - notional*marginRate - event.Fill.Fee)
 			case isClosingShort:
-				e.broker.cash.Store(prevCash + event.Fill.Qty*event.Fill.Price*marginRate + realized - event.Fill.Fee)
-			case event.Fill.Side == strategy.SideBuy:
-				e.broker.cash.Store(prevCash - event.Fill.Qty*event.Fill.Price - event.Fill.Fee)
+				e.broker.cash.Store(prevCash + notional*marginRate + realized - event.Fill.Fee)
+			case isOpeningLong:
+				e.broker.cash.Store(prevCash - notional*marginRate - event.Fill.Fee)
+			case isClosingLong:
+				e.broker.cash.Store(prevCash + notional*marginRate + realized - event.Fill.Fee)
+			case event.Fill.Side == strategy.SideBuy: // spot/one-way: full notional
+				e.broker.cash.Store(prevCash - notional - event.Fill.Fee)
 			case event.Fill.Side == strategy.SideSell:
-				e.broker.cash.Store(prevCash + event.Fill.Qty*event.Fill.Price - event.Fill.Fee)
+				e.broker.cash.Store(prevCash + notional - event.Fill.Fee)
 			}
 
 			prices := map[string]float64{event.Fill.Symbol: event.Fill.Price}
@@ -935,7 +950,7 @@ func (e *Engine) SetPositionSyncer(s *position.Syncer) {
 
 // SetCachedEquity seeds the exchange equity cache (called at startup).
 func (e *Engine) SetCachedEquity(eq float64) {
-	e.cachedEquity = eq
+	e.cachedEquityBits.Store(math.Float64bits(eq))
 	e.lastEquityQuery = time.Now()
 	e.broker.equity.Store(eq)
 }
