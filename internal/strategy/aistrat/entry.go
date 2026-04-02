@@ -92,6 +92,11 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 		}
 	}
 	tpDist := entryPrice * tpPct
+	// Cap TP by ATR (prevents TP being unreachable in wide-BB low-trend markets)
+	atrTP := atr * 1.0 // 1x ATR as absolute maximum for range TP
+	maxAbsTP := entryPrice * 0.008 // 0.8% absolute cap
+	if atrTP > 0 && atrTP < tpDist { tpDist = atrTP }
+	if maxAbsTP > 0 && maxAbsTP < tpDist { tpDist = maxAbsTP }
 	slDist := entryPrice * s.cfg.RangeSLPct
 
 	var stopLoss, takeProfit float64
@@ -143,6 +148,23 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	minDist := entryPrice * s.cfg.MinSLDistPct
 	atrDist := atr * s.cfg.ATRK
 	if atrDist < minDist { atrDist = minDist }
+
+	// Dynamic SL cap: tighter in oscillation, wider in confirmed trend.
+	// Compare current ATR to 20-bar average — if ATR is NOT expanding, market is oscillating.
+	bars5m := s.primaryBars()
+	if len(bars5m) >= 20 {
+		var atrSum float64
+		for i := len(bars5m) - 20; i < len(bars5m); i++ {
+			atrSum += bars5m[i].High - bars5m[i].Low
+		}
+		atrMean := atrSum / 20
+		if atr <= atrMean*1.2 {
+			// Oscillation: ATR not expanding → cap SL at 1.0%
+			maxDist := entryPrice * 0.01
+			if atrDist > maxDist { atrDist = maxDist }
+		}
+		// Trend: ATR expanding → no cap, let ATR×ATRK define SL
+	}
 
 	var stopLoss float64
 	if side == "LONG" {

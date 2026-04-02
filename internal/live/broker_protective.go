@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"go.uber.org/zap"
@@ -187,6 +188,10 @@ func (b *Broker) PlaceStagedTPOrders(ctx context.Context, symbol, posSide string
 	key := brokerPosKey(symbol, posSide)
 	ids := protectiveIDs{}
 
+	// Round price to 2 decimals and qty to 3 decimals (ETHUSDT tick/lot size).
+	stopPrice = math.Round(stopPrice*100) / 100
+	totalQty = math.Floor(totalQty*1000) / 1000
+
 	// Place SL first (most critical) — use totalQty so exchange knows exact qty to close.
 	slID, err := b.orderClient.PlaceStopMarketOrder(ctx, symbol, closeSide, posSide, totalQty, stopPrice, "")
 	if err != nil {
@@ -252,6 +257,8 @@ func (b *Broker) PlaceStagedTPOrders(ctx context.Context, symbol, posSide string
 // ReplaceSLOrder cancels the current SL and places a new one at newStopPrice.
 // Used for the +0.5R breakeven move. Qty=0 means close entire position.
 func (b *Broker) ReplaceSLOrder(ctx context.Context, symbol, posSide string, closeSide exchange.OrderSide, remainQty, newStopPrice float64) bool {
+	newStopPrice = math.Round(newStopPrice*100) / 100
+	remainQty = math.Floor(remainQty*1000) / 1000
 	key := brokerPosKey(symbol, posSide)
 
 	b.protMu.Lock()

@@ -190,13 +190,9 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 		}
 		return
 	}
-	// Floating loss → early timeout at 20min
-	if pnlPct < 0 && held >= s.cfg.RangeLossTimeout {
-		s.log.Info("RANGE TIMEOUT (floating loss)", zap.String("side", p.side),
-			zap.Float64("pnl_pct", pnlPct*100), zap.Duration("held", held))
-		s.closePos(ctx, p, pptr, "timeout_loss")
-		return
-	}
+	// Floating loss: NO timeout — let SL do its job.
+	// Premature timeout in oscillation causes random-price exits worse than SL.
+
 	// Sideways → timeout at 30min
 	if held >= s.cfg.RangeFlatTimeout {
 		s.log.Info("RANGE TIMEOUT (sideways)", zap.String("side", p.side),
@@ -418,8 +414,40 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 
 	// Reversal threshold lower than entry — exit faster when direction changes
 	if reverseConf >= s.cfg.ReversalConf {
-		s.log.Info("AI: reversal → close "+p.side, zap.Float64("conf", reverseConf))
+		closedSide := p.side
+		s.log.Info("AI: reversal → close "+closedSide, zap.Float64("conf", reverseConf))
 		s.closePos(ctx, p, pptr, "gpt_reversal")
-		s.stopBar = s.barCount // prevent immediate re-entry on same bar
+
+		// Verify position was actually closed before attempting flip.
+		if *pptr != nil {
+			s.log.Warn("AI: flip aborted — close order may have failed")
+			return
+		}
+
+		// Flip: immediately open the opposite direction using the GPT signal we already have.
+		// Flip threshold: halfway between ReversalConf and ConfidenceThreshold.
+		// Higher than reversal (not every close deserves a flip) but lower than normal entry
+		// (the reversal itself provides directional confirmation).
+		flipThreshold := (s.cfg.ReversalConf + s.cfg.ConfidenceThreshold) / 2 // e.g. (0.72+0.82)/2 = 0.77
+		atr := s.calcATR()
+		price := bar.Close
+		// Flip uses MARKET price — the whole point is immediate direction change.
+		// Don't wait for a limit fill that may never come.
+		if closedSide == "LONG" && signal.Short != nil && signal.Short.Confidence >= flipThreshold && s.shortPos == nil {
+			entry := math.Round(price*100) / 100 // market price
+			s.log.Info("AI: flip → open SHORT (market)",
+				zap.Float64("conf", signal.Short.Confidence),
+				zap.Float64("flip_threshold", flipThreshold),
+				zap.Float64("price", price))
+			s.openTrend(ctx, "SHORT", price, entry, atr)
+		}
+		if closedSide == "SHORT" && signal.Long != nil && signal.Long.Confidence >= flipThreshold && s.longPos == nil {
+			entry := math.Round(price*100) / 100 // market price
+			s.log.Info("AI: flip → open LONG (market)",
+				zap.Float64("conf", signal.Long.Confidence),
+				zap.Float64("flip_threshold", flipThreshold),
+				zap.Float64("price", price))
+			s.openTrend(ctx, "LONG", price, entry, atr)
+		}
 	}
 }

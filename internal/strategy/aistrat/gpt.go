@@ -40,9 +40,11 @@ RESPONSE (strict JSON):
 {"long":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."},"short":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."}}
 
 MULTI-TIMEFRAME RULES:
-1. CHECK indicators_15m FIRST for STRUCTURE (EMA20 vs EMA50) — this is the dominant trend:
-   - 15m EMA20 > EMA50: BULLISH STRUCTURE → favor long, short needs strong evidence
-   - 15m EMA20 < EMA50: BEARISH STRUCTURE → favor short, long needs strong evidence
+1. CHECK indicators_15m.structure FIRST — this is pre-computed and authoritative:
+   - structure = 1: BULLISH (EMA20 > EMA50) → favor long, short needs strong evidence
+   - structure = -1: BEARISH (EMA20 < EMA50) → favor short, long needs strong evidence
+   - structure = 0: RANGE → both sides OK
+   DO NOT re-interpret EMA values yourself — use the structure field directly.
 2. THEN check return_8bar for MOMENTUM:
    - 15m return_8bar > +1%: strong upward momentum
    - 15m return_8bar < -1%: strong downward momentum
@@ -52,7 +54,13 @@ MULTI-TIMEFRAME RULES:
      this is an OVERSOLD BOUNCE, NOT a trend reversal. Keep long confidence < 0.50.
    - If 15m EMA structure is BULLISH but return_8bar is temporarily negative:
      this is an OVERBOUGHT PULLBACK, NOT a trend reversal. Keep short confidence < 0.50.
-   - True reversal requires BOTH structure change (EMA crossover) AND momentum alignment.
+   - EXCEPTION — EARLY REVERSAL: If price has moved >2% against the EMA structure
+     (e.g., price far below EMA20 in bearish structure AND 5m shows strong momentum shift:
+     MACD turning positive, RSI rising from oversold, volume spike), this may be an
+     early reversal BEFORE the EMA crossover. In this case, allow confidence up to 0.70
+     for the counter-trend direction. EMA is a lagging indicator — don't wait for it
+     to cross if price action is already showing clear reversal signals.
+   - True confirmed reversal requires BOTH structure change AND momentum alignment.
 4. USE 5m indicators for precise timing:
    - long entry_price: nearest SUPPORT (swing_low_10, bb_lower, ema20), below current price
    - short entry_price: nearest RESISTANCE (swing_high_10, bb_upper), above current price
@@ -61,11 +69,13 @@ MULTI-TIMEFRAME RULES:
 CONFIDENCE GUIDE:
 - Strong trend (structure + momentum aligned): 0.85-0.95
 - Range (EMA20 ≈ EMA50): 0.65-0.85 for both sides
-- Bounce against structure (counter-trend): < 0.50
+- Early reversal (price >2% from structure, 5m momentum shifting): 0.55-0.70
+- Bounce against structure (no momentum shift): < 0.50
 - Weak/conflicting signals: 0.30-0.60
 
 Be decisive. When 15m STRUCTURE and MOMENTUM both align, give HIGH confidence (0.85+).
-Never chase a bounce as if it were a reversal.`
+Never chase a bounce as if it were a reversal.
+Keep each reasoning under 2 sentences. Be concise.`
 
 type mktCtx struct {
 	Symbol       string             `json:"symbol"`
@@ -118,7 +128,8 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 	}
 
 	// ── 15m trend indicators ──
-	var ind15 map[string]float64
+	// Default: structure=0 (range) when insufficient data, so GPT treats both directions equally.
+	ind15 := map[string]float64{"structure": 0}
 	bars15 := s.barsForInterval("15m")
 	if len(bars15) >= 20 {
 		closes15 := make([]float64, len(bars15))
@@ -133,10 +144,17 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 		trend := "range"
 		if ret8 > 1.0 { trend = "uptrend" } else if ret8 < -1.0 { trend = "downtrend" }
 		_ = trend
+		// structure: 1=bullish(EMA20>EMA50), -1=bearish, 0=range
+		structure := 0.0
+		if ema50_15 > 0 {
+			if ema20_15 > ema50_15 { structure = 1 }
+			if ema20_15 < ema50_15 { structure = -1 }
+		}
 		ind15 = map[string]float64{
 			"rsi":       r2(rsi15),
 			"ema20":     r2(ema20_15),
 			"ema50":     r2(ema50_15),
+			"structure":  structure, // 1=bullish, -1=bearish, 0=range
 			"macd_hist": r2(indicator.Last(macd15.Histogram)),
 			"return_8bar": r3(ret8),
 		}
