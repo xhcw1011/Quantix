@@ -189,11 +189,12 @@ func (b *OrderBroker) PlaceStopMarketOrder(ctx context.Context, symbol string, s
 		Side(toBinanceSide(side)).
 		Type("STOP_MARKET").
 		StopPrice(fmt.Sprintf("%.8f", stopPrice)).
-		Quantity(fmt.Sprintf("%.8f", qty)).
-		ReduceOnly(true)
+		Quantity(fmt.Sprintf("%.8f", qty))
 
 	if ps := toFuturesPositionSide(positionSide); ps != "" {
 		svc = svc.PositionSide(ps)
+	} else {
+		svc = svc.ReduceOnly(true)
 	}
 	if clientOrderID != "" {
 		svc = svc.NewClientOrderID(clientOrderID)
@@ -221,11 +222,12 @@ func (b *OrderBroker) PlaceTakeProfitMarketOrder(ctx context.Context, symbol str
 		Side(toBinanceSide(side)).
 		Type("TAKE_PROFIT_MARKET").
 		StopPrice(fmt.Sprintf("%.8f", triggerPrice)).
-		Quantity(fmt.Sprintf("%.8f", qty)).
-		ReduceOnly(true)
+		Quantity(fmt.Sprintf("%.8f", qty))
 
 	if ps := toFuturesPositionSide(positionSide); ps != "" {
 		svc = svc.PositionSide(ps)
+	} else {
+		svc = svc.ReduceOnly(true)
 	}
 	if clientOrderID != "" {
 		svc = svc.NewClientOrderID(clientOrderID)
