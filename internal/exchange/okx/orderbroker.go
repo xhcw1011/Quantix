@@ -622,6 +622,96 @@ func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side e
 	return ordID, nil
 }
 
+// PlaceReduceOnlyLimitOrder places a GTC limit order with reduceOnly=true on OKX.
+func (b *OrderBroker) PlaceReduceOnlyLimitOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error) {
+	instID := b.toInstID(symbol)
+
+	okxSide := "buy"
+	if side == exchange.OrderSideSell {
+		okxSide = "sell"
+	}
+
+	var sz string
+	if b.marketType == "swap" {
+		ctVal, err := b.fetchCtVal(ctx, instID)
+		if err != nil {
+			return "", fmt.Errorf("fetch ctVal: %w", err)
+		}
+		contracts := math.Floor(qty / ctVal)
+		if contracts < 1 {
+			return "", fmt.Errorf("qty %.8f too small for 1 contract (ctVal=%.8f)", qty, ctVal)
+		}
+		sz = strconv.FormatInt(int64(contracts), 10)
+	} else {
+		sz = fmt.Sprintf("%.8f", qty)
+	}
+
+	tdMode := "cash"
+	if b.marketType == "swap" {
+		tdMode = "cross"
+	}
+
+	type orderReq struct {
+		InstID     string `json:"instId"`
+		TdMode     string `json:"tdMode"`
+		Side       string `json:"side"`
+		PosSide    string `json:"posSide,omitempty"`
+		OrdType    string `json:"ordType"`
+		Sz         string `json:"sz"`
+		Px         string `json:"px"`
+		ClOrdId    string `json:"clOrdId,omitempty"`
+		ReduceOnly string `json:"reduceOnly"`
+	}
+
+	req := orderReq{
+		InstID:     instID,
+		TdMode:     tdMode,
+		Side:       okxSide,
+		OrdType:    "limit",
+		Sz:         sz,
+		Px:         fmt.Sprintf("%.8f", price),
+		ClOrdId:    clientOrderID,
+		ReduceOnly: "true",
+	}
+	if positionSide != "" {
+		req.PosSide = strings.ToLower(positionSide)
+	}
+
+	var resp struct {
+		Code string `json:"code"`
+		Msg  string `json:"msg"`
+		Data []struct {
+			OrdID string `json:"ordId"`
+			SCode string `json:"sCode"`
+			SMsg  string `json:"sMsg"`
+		} `json:"data"`
+	}
+
+	if err := b.post(ctx, "/api/v5/trade/order", req, &resp); err != nil {
+		return "", fmt.Errorf("OKX reduce-only limit order: %w", err)
+	}
+	if resp.Code != "0" {
+		return "", fmt.Errorf("OKX reduce-only limit order API error %s: %s", resp.Code, resp.Msg)
+	}
+	if len(resp.Data) == 0 || resp.Data[0].SCode != "0" {
+		sMsg := ""
+		if len(resp.Data) > 0 {
+			sMsg = resp.Data[0].SMsg
+		}
+		return "", fmt.Errorf("OKX reduce-only limit order rejected: %s", sMsg)
+	}
+
+	ordID := resp.Data[0].OrdID
+	b.log.Info("OKX reduce-only limit order placed",
+		zap.String("ord_id", ordID),
+		zap.String("inst_id", instID),
+		zap.String("side", okxSide),
+		zap.Float64("price", price),
+		zap.Float64("qty", qty),
+	)
+	return ordID, nil
+}
+
 // PlaceStopMarketOrder places a stop-loss conditional order on OKX.
 // When stopPrice is triggered, executes at market price (slOrdPx = "-1").
 func (b *OrderBroker) PlaceStopMarketOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, stopPrice float64, clientOrderID string) (string, error) {

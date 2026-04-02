@@ -71,7 +71,7 @@ func NewOrderClient(cfg config.ExchangeConfig, log *zap.Logger) (exchange.OrderC
 
 // NewWSClient creates a WSClient for the configured exchange.
 // For Binance, market_type "futures" uses the USDM Futures WS streams; otherwise Spot.
-func NewWSClient(cfg config.ExchangeConfig, log *zap.Logger) (exchange.WSClient, error) {
+func NewWSClient(cfg config.ExchangeConfig, wsCfg config.WSConfig, log *zap.Logger) (exchange.WSClient, error) {
 	switch cfg.Active {
 	case "okx":
 		return okx.NewWSClient(log, cfg.OKX.MarketType), nil
@@ -79,9 +79,9 @@ func NewWSClient(cfg config.ExchangeConfig, log *zap.Logger) (exchange.WSClient,
 		return bybit.NewWSClient(log), nil
 	case "binance", "":
 		if cfg.Binance.MarketType == "futures" {
-			return exchange.NewBinanceFuturesWSClient(cfg.Binance, log), nil
+			return exchange.NewBinanceFuturesWSClient(cfg.Binance, wsCfg, log), nil
 		}
-		return exchange.NewBinanceWSClient(cfg.Binance, log), nil
+		return exchange.NewBinanceWSClient(cfg.Binance, wsCfg, log), nil
 	default:
 		return nil, fmt.Errorf("unknown exchange %q; supported: binance, okx, bybit", cfg.Active)
 	}

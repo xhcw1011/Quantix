@@ -51,6 +51,70 @@ func init() {
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
 		if v, ok := params["GridQtyRatio"]; ok { cfg.GridQtyRatio = toFloat(v) }
+		if v, ok := params["TPLevels"]; ok {
+			switch vv := v.(type) {
+			case []float64: cfg.TPLevels = vv
+			case []any:
+				var sl []float64
+				for _, item := range vv { if f, ok := item.(float64); ok { sl = append(sl, f) } }
+				if len(sl) > 0 { cfg.TPLevels = sl }
+			}
+		}
+		if v, ok := params["TPQtySplits"]; ok {
+			switch vv := v.(type) {
+			case []float64: cfg.TPQtySplits = vv
+			case []any:
+				var sl []float64
+				for _, item := range vv { if f, ok := item.(float64); ok { sl = append(sl, f) } }
+				if len(sl) > 0 { cfg.TPQtySplits = sl }
+			}
+		}
+		if v, ok := params["BreakevenR"]; ok { cfg.BreakevenR = toFloat(v) }
+		if v, ok := params["BreakevenBuf"]; ok { cfg.BreakevenBuf = toFloat(v) }
+		if v, ok := params["TrailBasePct"]; ok { cfg.TrailBasePct = toFloat(v) }
+		if v, ok := params["TrailLowVolPct"]; ok { cfg.TrailLowVolPct = toFloat(v) }
+		if v, ok := params["TrailHighVolPct"]; ok { cfg.TrailHighVolPct = toFloat(v) }
+		if v, ok := params["TrailFloorPct"]; ok { cfg.TrailFloorPct = toFloat(v) }
+		if v, ok := params["MinSLDistPct"]; ok { cfg.MinSLDistPct = toFloat(v) }
+		if v, ok := params["ReversalConf"]; ok { cfg.ReversalConf = toFloat(v) }
+		if v, ok := params["MarketEntryConf"]; ok { cfg.MarketEntryConf = toFloat(v) }
+		if v, ok := params["RangeBEPct"]; ok { cfg.RangeBEPct = toFloat(v) }
+		if v, ok := params["RangeLockPct"]; ok { cfg.RangeLockPct = toFloat(v) }
+		if v, ok := params["RangeLockOffset"]; ok { cfg.RangeLockOffset = toFloat(v) }
+		if v, ok := params["RangeTrailPct"]; ok { cfg.RangeTrailPct = toFloat(v) }
+		if v, ok := params["RangeTrailDist"]; ok { cfg.RangeTrailDist = toFloat(v) }
+		if v, ok := params["RangeProfitTimeout"]; ok { cfg.RangeProfitTimeout = time.Duration(toFloat(v)) * time.Minute }
+		if v, ok := params["RangeLossTimeout"]; ok { cfg.RangeLossTimeout = time.Duration(toFloat(v)) * time.Minute }
+		if v, ok := params["RangeFlatTimeout"]; ok { cfg.RangeFlatTimeout = time.Duration(toFloat(v)) * time.Minute }
+		if v, ok := params["BBWidthMin"]; ok { cfg.BBWidthMin = toFloat(v) }
+		if v, ok := params["BBWidthMax"]; ok { cfg.BBWidthMax = toFloat(v) }
+		if v, ok := params["RangeEMAConv"]; ok { cfg.RangeEMAConv = toFloat(v) }
+		if v, ok := params["MTFStrongTrend"]; ok { cfg.MTFStrongTrend = toFloat(v) }
+		if v, ok := params["MTFWeakTrend"]; ok { cfg.MTFWeakTrend = toFloat(v) }
+		if v, ok := params["MTFBullRSI"]; ok { cfg.MTFBullRSI = toFloat(v) }
+		if v, ok := params["MTFBearRSI"]; ok { cfg.MTFBearRSI = toFloat(v) }
+		if v, ok := params["MTF1mThreshold"]; ok { cfg.MTF1mThreshold = toFloat(v) }
+		if v, ok := params["MTFQtyScaleHard"]; ok { cfg.MTFQtyScaleHard = toFloat(v) }
+		if v, ok := params["MTFQtyScaleSoft"]; ok { cfg.MTFQtyScaleSoft = toFloat(v) }
+		if v, ok := params["SwingProximity"]; ok { cfg.SwingProximity = toFloat(v) }
+		if v, ok := params["RSIPeriod"]; ok { cfg.RSIPeriod = toInt(v) }
+		if v, ok := params["MACDFast"]; ok { cfg.MACDFast = toInt(v) }
+		if v, ok := params["MACDSlow"]; ok { cfg.MACDSlow = toInt(v) }
+		if v, ok := params["MACDSignal"]; ok { cfg.MACDSignal = toInt(v) }
+		if v, ok := params["EMAFast"]; ok { cfg.EMAFast = toInt(v) }
+		if v, ok := params["EMASlow"]; ok { cfg.EMASlow = toInt(v) }
+		if v, ok := params["BBPeriod"]; ok { cfg.BBPeriod = toInt(v) }
+		if v, ok := params["BBStdDev"]; ok { cfg.BBStdDev = toFloat(v) }
+		if v, ok := params["ATRPeriod"]; ok { cfg.ATRPeriod = toInt(v) }
+		if v, ok := params["VolMAPeriod"]; ok { cfg.VolMAPeriod = toInt(v) }
+		if v, ok := params["EntryOffsetPct"]; ok { cfg.EntryOffsetPct = toFloat(v) }
+		if v, ok := params["MaxEntryDevPct"]; ok { cfg.MaxEntryDevPct = toFloat(v) }
+		if v, ok := params["LimitTimeoutBars"]; ok { cfg.LimitTimeoutBars = toInt(v) }
+		if v, ok := params["MinHoldBars"]; ok { cfg.MinHoldBars = toInt(v) }
+		if v, ok := params["MinTrendBars"]; ok { cfg.MinTrendBars = toInt(v) }
+		if v, ok := params["GPTTemperature"]; ok { cfg.GPTTemperature = toFloat(v) }
+		if v, ok := params["GPTMaxTokens"]; ok { cfg.GPTMaxTokens = toInt(v) }
+		if v, ok := params["GPTTimeout"]; ok { cfg.GPTTimeout = time.Duration(toFloat(v)) * time.Second }
 		if v, ok := params["Interval"].(string); ok && cfg.PrimaryInterval == "" { cfg.PrimaryInterval = v }
 		if v, ok := params["Intervals"]; ok {
 			switch vv := v.(type) {
@@ -98,6 +162,68 @@ type Config struct {
 	GridTPPct      float64 // grid order take-profit (default 0.004 = 0.4%)
 	GridQtyRatio   float64 // grid qty as ratio of base qty (default 0.5)
 
+	// Staged TP (trend mode) — exchange-native limit orders
+	TPLevels     []float64 // R-multiples for each TP level (default [1.0, 1.5, 2.5, 4.0])
+	TPQtySplits  []float64 // fraction of qty for each level (default [0.40, 0.30, 0.20, 0.10])
+	BreakevenR   float64   // R threshold to move SL to breakeven (default 0.5)
+	BreakevenBuf float64   // buffer above/below entry for breakeven SL (default 0.001 = 0.1%)
+
+	// Trailing stop (trend fallback when staged orders unavailable)
+	TrailBasePct    float64 // base trailing % (default 0.012 = 1.2%)
+	TrailLowVolPct  float64 // trailing % for low volatility (default 0.008)
+	TrailHighVolPct float64 // trailing % for high volatility (default 0.015)
+	TrailFloorPct   float64 // absolute minimum trailing distance % (default 0.005)
+	MinSLDistPct    float64 // minimum SL distance from entry (default 0.008 = 0.8%)
+	ReversalConf    float64 // confidence threshold for GPT reversal exit (default 0.72)
+	MarketEntryConf float64 // confidence threshold for immediate market entry (default 0.90)
+
+	// Range position management
+	RangeBEPct         float64       // PnL % to move SL to breakeven (default 0.003)
+	RangeLockPct       float64       // PnL % to lock in partial profit (default 0.006)
+	RangeLockOffset    float64       // profit lock offset % (default 0.003)
+	RangeTrailPct      float64       // PnL % to start trailing (default 0.008)
+	RangeTrailDist     float64       // trailing distance % (default 0.003)
+	RangeProfitTimeout time.Duration // timeout for profitable range pos (default 60m)
+	RangeLossTimeout   time.Duration // timeout for losing range pos (default 20m)
+	RangeFlatTimeout   time.Duration // timeout for flat range pos (default 30m)
+	BBWidthMin         float64       // min BB width for range TP (default 0.006)
+	BBWidthMax         float64       // max BB width for range TP (default 0.015)
+	RangeEMAConv       float64       // EMA convergence threshold for regime detection (default 0.003)
+
+	// MTF scoring
+	MTFStrongTrend  float64 // 15m return threshold for strong trend (default 0.01)
+	MTFWeakTrend    float64 // 15m return threshold for weak trend (default 0.002)
+	MTFBullRSI      float64 // RSI threshold for bullish signal (default 60)
+	MTFBearRSI      float64 // RSI threshold for bearish signal (default 40)
+	MTF1mThreshold  float64 // 1m return threshold (default 0.001)
+	MTFQtyScaleHard float64 // qty scale for strong headwind (default 0.70)
+	MTFQtyScaleSoft float64 // qty scale for mild headwind (default 0.85)
+	SwingProximity  float64 // swing high/low proximity % (default 0.0015)
+
+	// Technical indicator periods
+	RSIPeriod   int     // RSI lookback (default 14)
+	MACDFast    int     // MACD fast EMA (default 12)
+	MACDSlow    int     // MACD slow EMA (default 26)
+	MACDSignal  int     // MACD signal line (default 9)
+	EMAFast     int     // fast EMA period (default 20)
+	EMASlow     int     // slow EMA period (default 50)
+	BBPeriod    int     // Bollinger Bands period (default 20)
+	BBStdDev    float64 // BB standard deviation multiplier (default 2.0)
+	ATRPeriod   int     // ATR lookback for position sizing (default 60)
+	VolMAPeriod int     // Volume MA period (default 20)
+
+	// Entry/exit tuning
+	EntryOffsetPct   float64       // limit entry offset from current price (default 0.0013)
+	MaxEntryDevPct   float64       // max GPT entry deviation from spot (default 0.005)
+	LimitTimeoutBars int           // bars to wait for limit fill (default 2)
+	MinHoldBars      int           // minimum bars before TP/SL checks (default 3)
+	MinTrendBars     int           // minimum bars before trend management (default 5)
+
+	// GPT tuning
+	GPTTemperature float64       // GPT temperature (default 0.3)
+	GPTMaxTokens   int           // GPT max completion tokens (default 400)
+	GPTTimeout     time.Duration // GPT API call timeout (default 15s)
+
 	// Risk limits
 	MaxDailyLossPct float64
 	MaxConsecLoss   int
@@ -111,6 +237,25 @@ func DefaultConfig() Config {
 		RiskPerTrade: 0.02, ATRK: 4.0, TrailingATRK: 10.0,
 		RangeTPPct: 0.012, RangeSLPct: 0.010,
 		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
+		TPLevels: []float64{1.0, 1.5, 2.5, 4.0},
+		TPQtySplits: []float64{0.40, 0.30, 0.20, 0.10},
+		BreakevenR: 0.5, BreakevenBuf: 0.001,
+		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015,
+		TrailFloorPct: 0.005, MinSLDistPct: 0.008,
+		ReversalConf: 0.72, MarketEntryConf: 0.90,
+		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
+		RangeTrailPct: 0.008, RangeTrailDist: 0.003,
+		RangeProfitTimeout: 60 * time.Minute, RangeLossTimeout: 20 * time.Minute, RangeFlatTimeout: 30 * time.Minute,
+		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
+		MTFStrongTrend: 0.01, MTFWeakTrend: 0.002,
+		MTFBullRSI: 60, MTFBearRSI: 40, MTF1mThreshold: 0.001,
+		MTFQtyScaleHard: 0.70, MTFQtyScaleSoft: 0.85, SwingProximity: 0.0015,
+		RSIPeriod: 14, MACDFast: 12, MACDSlow: 26, MACDSignal: 9,
+		EMAFast: 20, EMASlow: 50, BBPeriod: 20, BBStdDev: 2.0,
+		ATRPeriod: 60, VolMAPeriod: 20,
+		EntryOffsetPct: 0.0013, MaxEntryDevPct: 0.005,
+		LimitTimeoutBars: 2, MinHoldBars: 3, MinTrendBars: 5,
+		GPTTemperature: 0.3, GPTMaxTokens: 400, GPTTimeout: 15 * time.Second,
 		MaxDailyLossPct: 0.10, MaxConsecLoss: 5,
 	}
 }
@@ -135,12 +280,15 @@ type posState struct {
 	trailing   float64
 	peakPrice  float64
 	tp1RHit    bool
-	tp2Hit     bool
 	barsHeld   int
 	filled     bool
 	filledAt   time.Time
 	orderID    string
 	limitBar   int
+
+	// Staged TP (trend mode): exchange-native limit orders
+	stagedTPPlaced bool // true once SL + TP orders are on the exchange
+	breakevenMoved bool // true once SL has been moved to breakeven at +0.5R
 
 	// Grid orders (range mode only)
 	gridOrders []*gridOrder
@@ -196,7 +344,7 @@ func New(cfg Config, log *zap.Logger) *AIStrategy {
 	return &AIStrategy{
 		cfg:            cfg,
 		log:            log,
-		client:         &http.Client{Timeout: 15 * time.Second},
+		client:         &http.Client{Timeout: cfg.GPTTimeout},
 		barsByInterval: make(map[string][]exchange.Kline),
 	}
 }
@@ -405,19 +553,19 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		c15 := make([]float64, len(bars15))
 		for i, b := range bars15 { c15[i] = b.Close }
 		ret15 := (c15[len(c15)-1] - c15[len(c15)-8]) / c15[len(c15)-8]
-		if ret15 > 0.01 { mtfScore += 2 } else if ret15 > 0.002 { mtfScore += 1 }
-		if ret15 < -0.01 { mtfScore -= 2 } else if ret15 < -0.002 { mtfScore -= 1 }
+		if ret15 > s.cfg.MTFStrongTrend { mtfScore += 2 } else if ret15 > s.cfg.MTFWeakTrend { mtfScore += 1 }
+		if ret15 < -s.cfg.MTFStrongTrend { mtfScore -= 2 } else if ret15 < -s.cfg.MTFWeakTrend { mtfScore -= 1 }
 		// -0.2% ~ +0.2% = neutral (0 score)
 	}
 
 	// 5m momentum score (±1): MACD OR RSI, either is enough
 	closes5m := s.getCloses()
 	if len(closes5m) >= 14 {
-		rsi5m := indicator.Last(indicator.RSI(closes5m, 14))
-		macd5m := indicator.MACD(closes5m, 12, 26, 9)
+		rsi5m := indicator.Last(indicator.RSI(closes5m, s.cfg.RSIPeriod))
+		macd5m := indicator.MACD(closes5m, s.cfg.MACDFast, s.cfg.MACDSlow, s.cfg.MACDSignal)
 		macdHist5m := indicator.Last(macd5m.Histogram)
-		if macdHist5m > 0 || rsi5m > 60 { mtfScore++ }
-		if macdHist5m < 0 || rsi5m < 40 { mtfScore-- }
+		if macdHist5m > 0 || rsi5m > s.cfg.MTFBullRSI { mtfScore++ }
+		if macdHist5m < 0 || rsi5m < s.cfg.MTFBearRSI { mtfScore-- }
 	}
 
 	// 1m short-term score (±1): net change over last 3 bars
@@ -425,8 +573,8 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if len(bars1m) >= 3 {
 		last3 := bars1m[len(bars1m)-3:]
 		netChange := (last3[2].Close - last3[0].Close) / last3[0].Close
-		if netChange > 0.001 { mtfScore++ }   // > +0.1%
-		if netChange < -0.001 { mtfScore-- }  // < -0.1%
+		if netChange > s.cfg.MTF1mThreshold { mtfScore++ }   // > +0.1%
+		if netChange < -s.cfg.MTF1mThreshold { mtfScore-- }  // < -0.1%
 	}
 
 	s.lastMTFScore = mtfScore
@@ -444,9 +592,9 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			longConf = 0
 		}
 	case mtfScore == -2:
-		longQtyScale = 0.70
+		longQtyScale = s.cfg.MTFQtyScaleHard
 	case mtfScore == -1:
-		longQtyScale = 0.85
+		longQtyScale = s.cfg.MTFQtyScaleSoft
 	}
 
 	// For SHORT: positive score = headwind
@@ -457,9 +605,9 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			shortConf = 0
 		}
 	case mtfScore == 2:
-		shortQtyScale = 0.70
+		shortQtyScale = s.cfg.MTFQtyScaleHard
 	case mtfScore == 1:
-		shortQtyScale = 0.85
+		shortQtyScale = s.cfg.MTFQtyScaleSoft
 	}
 
 	s.mtfLongScale = longQtyScale
@@ -468,13 +616,13 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// ── Rule-based boost (after MTF scoring, respects MTF direction) ──
 	swLow := s.findSwingLow(10)
 	swHigh := s.findSwingHigh(10)
-	if price > 0 && swLow > 0 && (price-swLow)/price < 0.0015 && longConf < 0.82 && s.longPos == nil && mtfScore >= -1 {
+	if price > 0 && swLow > 0 && (price-swLow)/price < s.cfg.SwingProximity && longConf < 0.82 && s.longPos == nil && mtfScore >= -1 {
 		s.log.Info("AI: boost long — price near swing low",
 			zap.Float64("price", price), zap.Float64("swing_low", swLow), zap.Int("mtf", mtfScore))
 		longConf = 0.82
 		if longEntry <= 0 { longEntry = swLow }
 	}
-	if price > 0 && swHigh > 0 && (swHigh-price)/price < 0.0015 && shortConf < 0.82 && s.shortPos == nil && mtfScore <= 1 {
+	if price > 0 && swHigh > 0 && (swHigh-price)/price < s.cfg.SwingProximity && shortConf < 0.82 && s.shortPos == nil && mtfScore <= 1 {
 		s.log.Info("AI: boost short — price near swing high",
 			zap.Float64("price", price), zap.Float64("swing_high", swHigh), zap.Int("mtf", mtfScore))
 		shortConf = 0.82
@@ -482,12 +630,12 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 
 	// ── Cancel pending orders if GPT signal reversed ──
-	if hasPendingLong && shortConf >= 0.72 {
+	if hasPendingLong && shortConf >= s.cfg.ReversalConf {
 		s.log.Info("AI: cancelling pending LONG — signal reversed to SHORT")
 		if s.longPos.orderID != "" { ctx.CancelOrder(s.longPos.orderID) }
 		s.longPos = nil
 	}
-	if hasPendingShort && longConf >= 0.72 {
+	if hasPendingShort && longConf >= s.cfg.ReversalConf {
 		s.log.Info("AI: cancelling pending SHORT — signal reversed to LONG")
 		if s.shortPos.orderID != "" { ctx.CancelOrder(s.shortPos.orderID) }
 		s.shortPos = nil
@@ -512,8 +660,8 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	// Entry: pick the better of GPT price vs 0.10% offset
 	// LONG: lower is better; SHORT: higher is better
-	entryOffset := price * 0.0013
-	maxDev := price * 0.005 // cap GPT entry within 0.5% of current price
+	entryOffset := price * s.cfg.EntryOffsetPct
+	maxDev := price * s.cfg.MaxEntryDevPct // cap GPT entry within configured % of current price
 
 	// ── Open LONG if confident ──
 	if longConf >= s.cfg.ConfidenceThreshold && s.longPos == nil {
@@ -522,7 +670,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 		if longConf > 0 {
 			var entry float64
-			if longConf >= 0.90 {
+			if longConf >= s.cfg.MarketEntryConf {
 				// Very high confidence → market order at current price
 				entry = price
 				s.log.Info("AI: high confidence → market entry", zap.String("side", "LONG"), zap.Float64("conf", longConf))
@@ -553,7 +701,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 		if shortConf > 0 {
 			var entry float64
-			if shortConf >= 0.90 {
+			if shortConf >= s.cfg.MarketEntryConf {
 				entry = price
 				s.log.Info("AI: high confidence → market entry", zap.String("side", "SHORT"), zap.Float64("conf", shortConf))
 			} else {
@@ -578,7 +726,13 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 }
 
 func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
-	// Match fill to the correct position
+	// Detect staged TP closing fills: opposite side to the position.
+	// LONG position closes via SELL; SHORT position closes via BUY.
+	if s.handleStagedTPFill(fill) {
+		return
+	}
+
+	// Match fill to the correct position (opening fill)
 	pos := s.longPos
 	if fill.Side == strategy.SideSell && fill.PositionSide == strategy.PositionSideShort {
 		pos = s.shortPos // opening short
@@ -602,12 +756,12 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 			tpPct := s.cfg.RangeTPPct
 			closes := s.getCloses()
 			if len(closes) >= 20 {
-				bb := indicator.BollingerBands(closes, 20, 2.0)
+				bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
 				bbU, bbL := indicator.Last(bb.Upper), indicator.Last(bb.Lower)
 				if bbU > bbL && fill.Price > 0 {
 					w := (bbU - bbL) / fill.Price * 0.6
-					if w < 0.006 { w = 0.006 }
-					if w > 0.015 { w = 0.015 }
+					if w < s.cfg.BBWidthMin { w = s.cfg.BBWidthMin }
+					if w > s.cfg.BBWidthMax { w = s.cfg.BBWidthMax }
 					tpPct = w
 				}
 			}
@@ -625,6 +779,200 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	s.log.Info("AI: fill confirmed",
 		zap.String("side", pos.side), zap.Float64("fill", fill.Price),
 		zap.Float64("stop", pos.stopLoss), zap.Float64("tp", pos.takeProfit))
+
+	// Trend mode: place staged TP orders on exchange immediately after fill.
+	if pos.mode == modeTrend && !pos.stagedTPPlaced {
+		s.placeStagedExitOrders(ctx, pos)
+	}
+}
+
+// placeStagedExitOrders places exchange-native SL + 4 staged TP limit orders for trend mode.
+//
+// TP plan (based on R = |entry - stopLoss|):
+//   +1.0R → close 40%  (recover ~2x risk → "free position")
+//   +1.5R → close 30%  (lock profit, 70% total closed)
+//   +2.5R → close 20%  (trend confirmed)
+//   +4.0R → close 10%  ("lottery ticket" — surprise if it runs)
+//
+// +0.5R breakeven SL move is handled separately in OnTick.
+func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState) {
+	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
+	if !ok {
+		s.log.Warn("staged exit placer not available (paper/backtest mode), using local management")
+		return
+	}
+
+	R := pos.R
+	if R <= 0 { return }
+	entry := pos.entryPrice
+	qty := pos.initQty
+
+	// Determine close side
+	closeSide := "SELL"
+	posSide := "LONG"
+	if pos.side == "SHORT" {
+		closeSide = "BUY"
+		posSide = "SHORT"
+	}
+
+	levels := s.cfg.TPLevels
+	splits := s.cfg.TPQtySplits
+	if len(levels) == 0 || len(splits) == 0 || len(levels) != len(splits) {
+		s.log.Error("staged TP: invalid TPLevels/TPQtySplits config")
+		return
+	}
+
+	tps := make([]strategy.StagedTP, 0, len(levels))
+	usedQty := 0.0
+	for i, lvl := range levels {
+		var tpPrice float64
+		if pos.side == "LONG" {
+			tpPrice = math.Round((entry+lvl*R)*100) / 100
+		} else {
+			tpPrice = math.Round((entry-lvl*R)*100) / 100
+		}
+		var q float64
+		if i == len(levels)-1 {
+			q = qty - usedQty
+			q = math.Floor(q*1000) / 1000
+			if q <= 0 { q = 0.001 }
+		} else {
+			q = math.Floor(qty*splits[i]*1000) / 1000
+		}
+		usedQty += q
+		tps = append(tps, strategy.StagedTP{Price: tpPrice, Qty: q})
+	}
+
+	ok = ep.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, pos.stopLoss, qty, tps)
+	if ok {
+		pos.stagedTPPlaced = true
+		s.log.Info("AI: staged TP orders placed on exchange",
+			zap.String("side", pos.side),
+			zap.Float64("entry", entry), zap.Float64("R", R),
+			zap.Float64("sl", pos.stopLoss),
+			zap.Any("levels", levels), zap.Any("splits", splits),
+		)
+	}
+}
+
+// OnTick receives real-time price for precise TP/SL management.
+// Implements strategy.TickReceiver.
+func (s *AIStrategy) OnTick(ctx *strategy.Context, price float64) {
+	if !s.warmedUp { return }
+	if s.longPos != nil && s.longPos.filled {
+		s.tickManage(ctx, price, s.longPos, &s.longPos)
+	}
+	if s.shortPos != nil && s.shortPos.filled {
+		s.tickManage(ctx, price, s.shortPos, &s.shortPos)
+	}
+}
+
+func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posState, pptr **posState) {
+	// Trend mode with staged exchange orders: only do +0.5R breakeven SL move.
+	// All TP/SL execution is handled by exchange-native limit/stop orders.
+	if p.mode == modeTrend && p.stagedTPPlaced {
+		s.checkBreakevenMove(ctx, price, p)
+		return
+	}
+
+	// Range mode (or trend without staged orders): keep old tick-level SL check.
+	if p.mode == modeRange {
+		if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
+			s.log.Warn("TICK STOP-LOSS", zap.String("side", p.side),
+				zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+			s.closePos(ctx, p, pptr, "stop_loss")
+			s.consecLoss++
+			s.stopBar = s.barCount
+		}
+	}
+}
+
+// checkBreakevenMove moves the SL to breakeven when price reaches +0.5R.
+// This is the only tick-level action for trend mode; everything else is on the exchange.
+func (s *AIStrategy) checkBreakevenMove(ctx *strategy.Context, price float64, p *posState) {
+	if p.breakevenMoved || p.R <= 0 { return }
+
+	pnlR := 0.0
+	if p.side == "LONG" { pnlR = (price - p.entryPrice) / p.R }
+	if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
+
+	if pnlR < s.cfg.BreakevenR { return }
+
+	// Price has reached +0.5R — move SL to breakeven (+0.1% buffer above/below entry)
+	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
+	if !ok { return }
+
+	closeSide := "SELL"
+	posSide := "LONG"
+	if p.side == "SHORT" {
+		closeSide = "BUY"
+		posSide = "SHORT"
+	}
+
+	var newStop float64
+	if p.side == "LONG" {
+		newStop = math.Round((p.entryPrice + p.entryPrice*s.cfg.BreakevenBuf)*100) / 100
+	} else {
+		newStop = math.Round((p.entryPrice - p.entryPrice*s.cfg.BreakevenBuf)*100) / 100
+	}
+
+	if ep.ReplaceSLOrder(s.cfg.Symbol, posSide, closeSide, p.initQty, newStop) {
+		p.breakevenMoved = true
+		p.stopLoss = newStop
+		s.log.Info("AI: SL moved to breakeven at +0.5R",
+			zap.String("side", p.side),
+			zap.Float64("price", price),
+			zap.Float64("new_stop", newStop),
+			zap.Float64("pnl_r", pnlR),
+		)
+	}
+}
+
+// handleStagedTPFill detects closing fills from staged TP orders and updates remainQty.
+// Returns true if the fill was consumed (closing fill for a staged position).
+func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
+	// LONG closes via SELL on LONG side; SHORT closes via BUY on SHORT side.
+	var pos *posState
+	var pptr **posState
+
+	if fill.Side == strategy.SideSell && fill.PositionSide == strategy.PositionSideLong && s.longPos != nil && s.longPos.filled && s.longPos.stagedTPPlaced {
+		pos = s.longPos
+		pptr = &s.longPos
+	} else if fill.Side == strategy.SideBuy && fill.PositionSide == strategy.PositionSideShort && s.shortPos != nil && s.shortPos.filled && s.shortPos.stagedTPPlaced {
+		pos = s.shortPos
+		pptr = &s.shortPos
+	}
+
+	if pos == nil {
+		return false
+	}
+
+	pos.remainQty -= fill.Qty
+	if pos.remainQty < 1e-10 { pos.remainQty = 0 }
+
+	pnl := 0.0
+	if pos.side == "LONG" { pnl = (fill.Price - pos.entryPrice) * fill.Qty }
+	if pos.side == "SHORT" { pnl = (pos.entryPrice - fill.Price) * fill.Qty }
+
+	s.log.Info("AI: staged TP fill",
+		zap.String("side", pos.side),
+		zap.Float64("fill_price", fill.Price),
+		zap.Float64("fill_qty", fill.Qty),
+		zap.Float64("remain_qty", pos.remainQty),
+		zap.Float64("est_pnl", pnl),
+	)
+
+	// Position fully closed by staged TPs
+	if pos.remainQty <= 0 {
+		s.log.Info("AI: position fully closed by staged TPs",
+			zap.String("side", pos.side))
+		s.consecLoss = 0
+		s.syncRemove(pos.side)
+		*pptr = nil
+	} else {
+		s.syncToRedis(pos)
+	}
+	return true
 }
 
 // ─── Regime Detection ────────────────────────────────────────────────────────
@@ -632,9 +980,9 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 func (s *AIStrategy) isRangeRegime(price float64) bool {
 	closes := s.getCloses()
 	if len(closes) < 50 { return true }
-	ema20 := indicator.Last(indicator.EMA(closes, 20))
-	ema50 := indicator.Last(indicator.EMA(closes, 50))
-	if price > 0 && math.Abs(ema20-ema50)/price < 0.003 {
+	ema20 := indicator.Last(indicator.EMA(closes, s.cfg.EMAFast))
+	ema50 := indicator.Last(indicator.EMA(closes, s.cfg.EMASlow))
+	if price > 0 && math.Abs(ema20-ema50)/price < s.cfg.RangeEMAConv {
 		return true // EMAs converged = range
 	}
 	return false
@@ -686,12 +1034,12 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 	tpPct := s.cfg.RangeTPPct
 	closes := s.getCloses()
 	if len(closes) >= 20 {
-		bb := indicator.BollingerBands(closes, 20, 2.0)
+		bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
 		bbU, bbL := indicator.Last(bb.Upper), indicator.Last(bb.Lower)
 		if bbU > bbL && currentPrice > 0 {
 			bbWidthPct := (bbU - bbL) / currentPrice * 0.6 // 60% of BB width
-			if bbWidthPct < 0.006 { bbWidthPct = 0.006 }   // min 0.6%
-			if bbWidthPct > 0.015 { bbWidthPct = 0.015 }   // max 1.5%
+			if bbWidthPct < s.cfg.BBWidthMin { bbWidthPct = s.cfg.BBWidthMin }
+			if bbWidthPct > s.cfg.BBWidthMax { bbWidthPct = s.cfg.BBWidthMax }
 			tpPct = bbWidthPct
 		}
 	}
@@ -744,7 +1092,7 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 
 func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice, entryPrice, atr float64) {
 	entryPrice = math.Round(entryPrice*100) / 100
-	minDist := entryPrice * 0.008
+	minDist := entryPrice * s.cfg.MinSLDistPct
 	atrDist := atr * s.cfg.ATRK
 	if atrDist < minDist { atrDist = minDist }
 
@@ -846,7 +1194,7 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 
 	// Limit order pending (check on primary bars only)
 	if !p.filled {
-		if isPrimary && s.barCount-p.limitBar > 2 {
+		if isPrimary && s.barCount-p.limitBar > s.cfg.LimitTimeoutBars {
 			s.log.Warn("AI: limit timeout", zap.String("side", p.side), zap.String("id", p.orderID))
 			if p.orderID != "" { ctx.CancelOrder(p.orderID) }
 			*pptr = nil
@@ -859,17 +1207,19 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price }
 	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price }
 
-	// ── Stop-loss (both modes) ──
-	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
-		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
-		s.closePos(ctx, p, pptr, "stop_loss")
-		s.consecLoss++
-		s.stopBar = s.barCount
-		s.log.Info("AI: stop-loss hit")
-		return
+	// ── Stop-loss (skip for trend with staged orders — exchange handles it) ──
+	if !(p.mode == modeTrend && p.stagedTPPlaced) {
+		if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
+			s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+			s.closePos(ctx, p, pptr, "stop_loss")
+			s.consecLoss++
+			s.stopBar = s.barCount
+			s.log.Info("AI: stop-loss hit")
+			return
+		}
 	}
 
-	if p.barsHeld < 3 { return } // minimum hold
+	if p.barsHeld < s.cfg.MinHoldBars { return } // minimum hold
 
 	if p.mode == modeRange {
 		s.manageRange(ctx, bar, p, pptr)
@@ -888,8 +1238,8 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 	if tpHit && !p.tp1RHit {
 		// Check momentum: is the move continuing?
 		closes := s.getCloses()
-		rsi := indicator.Last(indicator.RSI(closes, 14))
-		macd := indicator.MACD(closes, 12, 26, 9)
+		rsi := indicator.Last(indicator.RSI(closes, s.cfg.RSIPeriod))
+		macd := indicator.MACD(closes, s.cfg.MACDFast, s.cfg.MACDSlow, s.cfg.MACDSignal)
 		macdHist := indicator.Last(macd.Histogram)
 
 		strongMomentum := false
@@ -916,7 +1266,7 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 			p.tp1RHit = true // treat the range TP as the 1R event
 			atr := s.calcATR()
 			// Move stop to breakeven
-			buf := p.entryPrice * 0.001
+			buf := p.entryPrice * s.cfg.BreakevenBuf
 			if p.side == "LONG" {
 				p.stopLoss = p.entryPrice - buf
 				p.trailing = p.peakPrice - atr*s.cfg.TrailingATRK
@@ -943,28 +1293,28 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 	if p.side == "SHORT" { rangePnlPct = (p.entryPrice - price) / p.entryPrice }
 
 	// +0.3%: move SL to breakeven
-	if rangePnlPct >= 0.003 && p.side == "LONG" && p.stopLoss < p.entryPrice {
-		p.stopLoss = p.entryPrice + p.entryPrice*0.001
+	if rangePnlPct >= s.cfg.RangeBEPct && p.side == "LONG" && p.stopLoss < p.entryPrice {
+		p.stopLoss = p.entryPrice + p.entryPrice*s.cfg.BreakevenBuf
 		s.log.Info("AI: Range +0.3% → SL to breakeven", zap.Float64("sl", p.stopLoss))
 	}
-	if rangePnlPct >= 0.003 && p.side == "SHORT" && p.stopLoss > p.entryPrice {
-		p.stopLoss = p.entryPrice - p.entryPrice*0.001
+	if rangePnlPct >= s.cfg.RangeBEPct && p.side == "SHORT" && p.stopLoss > p.entryPrice {
+		p.stopLoss = p.entryPrice - p.entryPrice*s.cfg.BreakevenBuf
 		s.log.Info("AI: Range +0.3% → SL to breakeven", zap.Float64("sl", p.stopLoss))
 	}
 	// +0.6%: lock in +0.3% profit
-	if rangePnlPct >= 0.006 {
+	if rangePnlPct >= s.cfg.RangeLockPct {
 		lockPrice := 0.0
 		if p.side == "LONG" {
-			lockPrice = p.entryPrice + p.entryPrice*0.003
+			lockPrice = p.entryPrice + p.entryPrice*s.cfg.RangeLockOffset
 			if p.stopLoss < lockPrice { p.stopLoss = lockPrice }
 		} else {
-			lockPrice = p.entryPrice - p.entryPrice*0.003
+			lockPrice = p.entryPrice - p.entryPrice*s.cfg.RangeLockOffset
 			if p.stopLoss > lockPrice { p.stopLoss = lockPrice }
 		}
 	}
 	// +0.8%: trailing 0.3% from peak
-	if rangePnlPct >= 0.008 {
-		trailDist := p.peakPrice * 0.003
+	if rangePnlPct >= s.cfg.RangeTrailPct {
+		trailDist := p.peakPrice * s.cfg.RangeTrailDist
 		if p.side == "LONG" {
 			nt := p.peakPrice - trailDist
 			if nt > p.stopLoss { p.stopLoss = nt }
@@ -998,13 +1348,13 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 	if pnlPct > 0.005 {
 		// Move SL to breakeven if not already
 		if p.side == "LONG" && p.stopLoss < p.entryPrice {
-			p.stopLoss = p.entryPrice + p.entryPrice*0.001
+			p.stopLoss = p.entryPrice + p.entryPrice*s.cfg.BreakevenBuf
 		}
 		if p.side == "SHORT" && p.stopLoss > p.entryPrice {
-			p.stopLoss = p.entryPrice - p.entryPrice*0.001
+			p.stopLoss = p.entryPrice - p.entryPrice*s.cfg.BreakevenBuf
 		}
 		// Extended timeout: 60min even with profit (prevent stale positions)
-		if held >= 60*time.Minute {
+		if held >= s.cfg.RangeProfitTimeout {
 			s.log.Info("RANGE TIMEOUT (profitable but stale)", zap.String("side", p.side),
 				zap.Float64("pnl_pct", pnlPct*100), zap.Duration("held", held))
 			s.closePos(ctx, p, pptr, "timeout_profit")
@@ -1014,14 +1364,14 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 		return
 	}
 	// Floating loss → early timeout at 20min
-	if pnlPct < 0 && held >= 20*time.Minute {
+	if pnlPct < 0 && held >= s.cfg.RangeLossTimeout {
 		s.log.Info("RANGE TIMEOUT (floating loss)", zap.String("side", p.side),
 			zap.Float64("pnl_pct", pnlPct*100), zap.Duration("held", held))
 		s.closePos(ctx, p, pptr, "timeout_loss")
 		return
 	}
 	// Sideways → timeout at 30min
-	if held >= 30*time.Minute {
+	if held >= s.cfg.RangeFlatTimeout {
 		s.log.Info("RANGE TIMEOUT (sideways)", zap.String("side", p.side),
 			zap.Float64("pnl_pct", pnlPct*100), zap.Duration("held", held))
 		s.closePos(ctx, p, pptr, "timeout_flat")
@@ -1126,10 +1476,20 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 }
 
 func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
+	if p.barsHeld < s.cfg.MinTrendBars { return }
+
+	// When staged TP orders are on the exchange, the exchange handles all exits.
+	// Only run GPT reversal check (to cancel all orders and reverse if market flips).
+	if p.stagedTPPlaced {
+		if s.barCount-s.lastCallBar >= s.cfg.CallIntervalBars {
+			s.checkReversal(ctx, bar, p, pptr)
+		}
+		return
+	}
+
+	// Fallback: local trailing for paper/backtest mode (no staged orders).
 	price := bar.Close
 	atr := s.calcATR()
-
-	if p.barsHeld < 5 { return }
 
 	pnlR := 0.0
 	if p.R > 0 {
@@ -1137,42 +1497,7 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
 	}
 
-	// ── Staged profit management ──
-	// +0.5R: move SL to breakeven
-	if pnlR >= 0.5 && p.stopLoss < p.entryPrice && p.side == "LONG" {
-		buf := p.entryPrice * 0.001
-		p.stopLoss = p.entryPrice + buf
-		s.log.Info("AI: +0.5R → SL to breakeven", zap.Float64("sl", p.stopLoss))
-	}
-	if pnlR >= 0.5 && p.stopLoss > p.entryPrice && p.side == "SHORT" {
-		buf := p.entryPrice * 0.001
-		p.stopLoss = p.entryPrice - buf
-		s.log.Info("AI: +0.5R → SL to breakeven", zap.Float64("sl", p.stopLoss))
-	}
-
-	// +1.0R: close 20%, start trailing
-	if !p.tp1RHit && pnlR >= 1.0 {
-		qty := math.Floor(p.initQty*0.20*1000) / 1000
-		if qty > 0 {
-			s.log.Info("TP +1R → close 20%", zap.Float64("pnl_R", pnlR))
-			s.closePartial(ctx, p, pptr, qty, "tp_1R")
-			p.tp1RHit = true
-			s.consecLoss = 0
-		}
-	}
-
-	// +1.5R: close another 20%
-	if p.tp1RHit && !p.tp2Hit && pnlR >= 1.5 {
-		qty := math.Floor(p.initQty*0.20*1000) / 1000
-		if qty > 0 {
-			s.log.Info("TP +1.5R → close 20%", zap.Float64("pnl_R", pnlR))
-			s.closePartial(ctx, p, pptr, qty, "tp_1.5R")
-			p.tp2Hit = true
-		}
-	}
-
-	// ── Adaptive trailing based on 15m ATR + profit level ──
-	// Determine base trailing % from 15m ATR
+	// Adaptive trailing based on 15m ATR + profit level
 	atr15 := 0.0
 	bars15 := s.barsForInterval("15m")
 	if len(bars15) >= 15 {
@@ -1184,60 +1509,52 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		}
 		atr15 = sum15 / float64(len(recent15)-1)
 	}
-	// ATR-based trailing percentage
-	baseTrailPct := 0.012 // default 1.2%
+	baseTrailPct := s.cfg.TrailBasePct
 	if atr15 > 0 && p.peakPrice > 0 {
 		atr15Pct := atr15 / p.peakPrice
-		if atr15Pct < 0.005 { baseTrailPct = 0.008 }       // low vol: 0.8%
-		if atr15Pct >= 0.005 && atr15Pct < 0.01 { baseTrailPct = 0.012 } // normal: 1.2%
-		if atr15Pct >= 0.01 { baseTrailPct = 0.015 }        // high vol: 1.5%
+		if atr15Pct < 0.005 { baseTrailPct = s.cfg.TrailLowVolPct }
+		if atr15Pct >= 0.005 && atr15Pct < 0.01 { baseTrailPct = s.cfg.TrailBasePct }
+		if atr15Pct >= 0.01 { baseTrailPct = s.cfg.TrailHighVolPct }
 	}
 
-	// Tighten trailing as profit grows (starts from +1.0R)
 	var trailDist float64
-	trailFloor := p.peakPrice * 0.005 // absolute minimum 0.5%
+	trailFloor := p.peakPrice * s.cfg.TrailFloorPct
 	if pnlR >= 2.0 {
 		trailDist = p.peakPrice * baseTrailPct * 0.40
 		if trailDist < trailFloor { trailDist = trailFloor }
 	} else if pnlR >= 1.5 {
 		d := p.peakPrice * baseTrailPct * 0.65
-		if d < p.peakPrice*0.006 { d = p.peakPrice * 0.006 } // floor 0.6%
+		if d < p.peakPrice*0.006 { d = p.peakPrice * 0.006 }
 		trailDist = d
 	} else if pnlR >= 1.0 {
-		trailDist = p.peakPrice * baseTrailPct // 100% base
+		trailDist = p.peakPrice * baseTrailPct
 	} else {
-		// Below +1.0R: wide ATR trailing, no tightening
 		trailDist = atr * s.cfg.TrailingATRK
-		minTrailDist := p.peakPrice * 0.012
+		minTrailDist := p.peakPrice * s.cfg.TrailBasePct
 		if trailDist < minTrailDist { trailDist = minTrailDist }
 	}
 
 	if p.side == "LONG" {
 		nt := p.peakPrice - trailDist
-		// Trailing never below breakeven once SL has been moved there
 		if pnlR >= 0.5 && nt < p.entryPrice { nt = p.entryPrice }
 		if nt > p.trailing { p.trailing = nt }
 		if price <= p.trailing && p.trailing > p.stopLoss {
-			s.log.Info("TRAILING STOP", zap.Float64("price", price), zap.Float64("trail", p.trailing))
 			s.closePos(ctx, p, pptr, "trailing")
 			if pnlR > 0 { s.consecLoss = 0 }
 			return
 		}
 	} else {
 		nt := p.peakPrice + trailDist
-		// Trailing never above breakeven once SL has been moved there
 		if pnlR >= 0.5 && nt > p.entryPrice { nt = p.entryPrice }
 		if nt < p.trailing { p.trailing = nt }
 		if price >= p.trailing && p.trailing > 0 && p.trailing < p.stopLoss {
-			s.log.Info("TRAILING STOP", zap.Float64("price", price), zap.Float64("trail", p.trailing))
 			s.closePos(ctx, p, pptr, "trailing")
 			if pnlR > 0 { s.consecLoss = 0 }
 			return
 		}
 	}
 
-	// GPT reversal check
-	if s.barCount-s.lastCallBar >= s.cfg.CallIntervalBars && p.barsHeld >= 5 {
+	if s.barCount-s.lastCallBar >= s.cfg.CallIntervalBars && p.barsHeld >= s.cfg.MinTrendBars {
 		s.checkReversal(ctx, bar, p, pptr)
 	}
 }
@@ -1272,8 +1589,8 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 		zap.Float64("reverse_conf", reverseConf),
 		zap.String("reasoning", reverseReason))
 
-	// Reversal threshold lower than entry (0.72 vs 0.82) — exit faster when direction changes
-	if reverseConf >= 0.72 {
+	// Reversal threshold lower than entry — exit faster when direction changes
+	if reverseConf >= s.cfg.ReversalConf {
 		s.log.Info("AI: reversal → close "+p.side, zap.Float64("conf", reverseConf))
 		s.closePos(ctx, p, pptr, "gpt_reversal")
 		s.stopBar = s.barCount // prevent immediate re-entry on same bar
@@ -1285,6 +1602,16 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posState, reason string) {
 	qty := math.Floor(p.remainQty*1000) / 1000
 	if qty <= 0 { *pptr = nil; return }
+
+	// If staged TP orders are on exchange, cancel them first (GPT reversal / manual close).
+	if p.stagedTPPlaced {
+		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+			posSide := "LONG"
+			if p.side == "SHORT" { posSide = "SHORT" }
+			ep.CancelAllProtective(s.cfg.Symbol, posSide)
+		}
+		p.stagedTPPlaced = false
+	}
 
 	// Log grid orders being closed with base
 	if len(p.gridOrders) > 0 {
@@ -1362,7 +1689,7 @@ func (s *AIStrategy) getCloses() []float64 {
 }
 
 func (s *AIStrategy) calcATR() float64 {
-	n := 60
+	n := s.cfg.ATRPeriod
 	if len(s.primaryBars()) < n+1 { n = len(s.primaryBars()) - 1; if n < 5 { return 0 } }
 	recent := s.primaryBars()[len(s.primaryBars())-n-1:]
 	var sum float64
@@ -1428,16 +1755,16 @@ type barData struct {
 
 func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mktCtx {
 	closes := s.getCloses()
-	rsi := indicator.Last(indicator.RSI(closes, 14))
-	macd := indicator.MACD(closes, 12, 26, 9)
-	bb := indicator.BollingerBands(closes, 20, 2.0)
-	ema20 := indicator.Last(indicator.EMA(closes, 20))
-	ema50 := indicator.Last(indicator.EMA(closes, 50))
+	rsi := indicator.Last(indicator.RSI(closes, s.cfg.RSIPeriod))
+	macd := indicator.MACD(closes, s.cfg.MACDFast, s.cfg.MACDSlow, s.cfg.MACDSignal)
+	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
+	ema20 := indicator.Last(indicator.EMA(closes, s.cfg.EMAFast))
+	ema50 := indicator.Last(indicator.EMA(closes, s.cfg.EMASlow))
 	atr := s.calcATR()
 	bbU, bbL := indicator.Last(bb.Upper), indicator.Last(bb.Lower)
 	bbPos := 0.5; if bbU-bbL > 0 { bbPos = (bar.Close - bbL) / (bbU - bbL) }
 	vols := make([]float64, len(s.primaryBars())); for i, b := range s.primaryBars() { vols[i] = b.Volume }
-	volMA := indicator.Last(indicator.SMA(vols, 20)); vr := 1.0; if volMA > 0 { vr = bar.Volume / volMA }
+	volMA := indicator.Last(indicator.SMA(vols, s.cfg.VolMAPeriod)); vr := 1.0; if volMA > 0 { vr = bar.Volume / volMA }
 
 	ind := map[string]float64{
 		"rsi": r2(rsi), "macd_hist": r2(indicator.Last(macd.Histogram)),
@@ -1470,11 +1797,11 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 	if len(bars15) >= 20 {
 		closes15 := make([]float64, len(bars15))
 		for i, b := range bars15 { closes15[i] = b.Close }
-		rsi15 := indicator.Last(indicator.RSI(closes15, 14))
-		ema20_15 := indicator.Last(indicator.EMA(closes15, 20))
+		rsi15 := indicator.Last(indicator.RSI(closes15, s.cfg.RSIPeriod))
+		ema20_15 := indicator.Last(indicator.EMA(closes15, s.cfg.EMAFast))
 		ema50_15 := 0.0
-		if len(closes15) >= 50 { ema50_15 = indicator.Last(indicator.EMA(closes15, 50)) }
-		macd15 := indicator.MACD(closes15, 12, 26, 9)
+		if len(closes15) >= 50 { ema50_15 = indicator.Last(indicator.EMA(closes15, s.cfg.EMASlow)) }
+		macd15 := indicator.MACD(closes15, s.cfg.MACDFast, s.cfg.MACDSlow, s.cfg.MACDSignal)
 		ret8 := 0.0
 		if len(closes15) >= 8 { ret8 = (closes15[len(closes15)-1] - closes15[len(closes15)-8]) / closes15[len(closes15)-8] * 100 }
 		trend := "range"
@@ -1501,10 +1828,10 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 func (s *AIStrategy) callGPT(mc mktCtx) (gptSignal, error) {
 	ctxJSON, _ := json.Marshal(mc)
 	body, _ := json.Marshal(map[string]any{
-		"model": s.cfg.Model, "temperature": 0.3, "max_completion_tokens": 400,
+		"model": s.cfg.Model, "temperature": s.cfg.GPTTemperature, "max_completion_tokens": s.cfg.GPTMaxTokens,
 		"messages": []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": string(ctxJSON)}},
 	})
-	callCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	callCtx, cancel := context.WithTimeout(context.Background(), s.cfg.GPTTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(callCtx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
 	if err != nil { return gptSignal{}, err }
@@ -1555,7 +1882,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		sl := lp.StopLoss
 		if sl == 0 {
 			slDist := atr * s.cfg.ATRK
-			minDist := entry * 0.008
+			minDist := entry * s.cfg.MinSLDistPct
 			if slDist < minDist { slDist = minDist }
 			sl = entry - slDist
 		}
@@ -1567,7 +1894,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			initQty: lp.InitQty, remainQty: lp.Qty,
 			R: lp.R, stopLoss: sl, takeProfit: tp,
 			trailing: lp.Trailing, peakPrice: lp.PeakPrice,
-			tp1RHit: lp.TP1Hit, tp2Hit: lp.TP2Hit, barsHeld: max(lp.BarsHeld, 10), filled: true, filledAt: time.Now(),
+			tp1RHit: lp.TP1Hit, barsHeld: max(lp.BarsHeld, 10), filled: true, filledAt: time.Now(),
 		}
 		if s.longPos.initQty == 0 { s.longPos.initQty = lp.Qty }
 		if s.longPos.R == 0 { s.longPos.R = math.Abs(entry - sl) }
@@ -1588,7 +1915,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		sl := sp.StopLoss
 		if sl == 0 {
 			slDist := atr * s.cfg.ATRK
-			minDist := entry * 0.008
+			minDist := entry * s.cfg.MinSLDistPct
 			if slDist < minDist { slDist = minDist }
 			sl = entry + slDist
 		}
@@ -1600,7 +1927,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			initQty: sp.InitQty, remainQty: sp.Qty,
 			R: sp.R, stopLoss: sl, takeProfit: tp,
 			trailing: sp.Trailing, peakPrice: sp.PeakPrice,
-			tp1RHit: sp.TP1Hit, tp2Hit: sp.TP2Hit, barsHeld: max(sp.BarsHeld, 10), filled: true, filledAt: time.Now(),
+			tp1RHit: sp.TP1Hit, barsHeld: max(sp.BarsHeld, 10), filled: true, filledAt: time.Now(),
 		}
 		if s.shortPos.initQty == 0 { s.shortPos.initQty = sp.Qty }
 		if s.shortPos.R == 0 { s.shortPos.R = math.Abs(entry - sl) }
@@ -1630,7 +1957,7 @@ func (s *AIStrategy) syncToRedis(pos *posState) {
 		Mode: modeStr, StopLoss: pos.stopLoss, TakeProfit: pos.takeProfit,
 		Trailing: pos.trailing, PeakPrice: pos.peakPrice,
 		R: pos.R, InitQty: pos.initQty,
-		TP1Hit: pos.tp1RHit, TP2Hit: pos.tp2Hit, BarsHeld: pos.barsHeld,
+		TP1Hit: pos.tp1RHit, BarsHeld: pos.barsHeld,
 		OrderID: pos.orderID, Filled: pos.filled,
 	}
 	s.syncer.UpdatePosition(context.Background(), sp)

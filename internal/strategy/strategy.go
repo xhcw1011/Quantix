@@ -164,3 +164,30 @@ type Strategy interface {
 	// OnFill is called when an order submitted by this strategy is filled.
 	OnFill(ctx *Context, fill Fill)
 }
+
+// TickReceiver is an optional interface strategies can implement to receive
+// real-time price updates (from WS ticker stream). Used for precise TP/SL.
+type TickReceiver interface {
+	OnTick(ctx *Context, price float64)
+}
+
+// StagedTP describes one level in a staged take-profit plan.
+type StagedTP struct {
+	Price float64
+	Qty   float64
+}
+
+// StagedExitPlacer places exchange-native orders for staged TP and SL management.
+// Injected into Context.Extra["staged_exit"] by the live engine when available.
+type StagedExitPlacer interface {
+	// PlaceStagedTPOrders places an initial SL + multiple reduce-only limit TP orders.
+	// closeSide is the side to close (SELL for LONG, BUY for SHORT).
+	// totalQty is the full position size (used for the SL order).
+	// Returns true if at least the SL was placed.
+	PlaceStagedTPOrders(symbol, posSide, closeSide string, stopPrice, totalQty float64, tps []StagedTP) bool
+	// ReplaceSLOrder cancels the current SL and places a new one.
+	// remainQty is the current remaining position size.
+	ReplaceSLOrder(symbol, posSide, closeSide string, remainQty, newStopPrice float64) bool
+	// CancelAllProtective cancels all protective orders for a position.
+	CancelAllProtective(symbol, posSide string)
+}

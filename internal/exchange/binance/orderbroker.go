@@ -199,6 +199,11 @@ func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side e
 	return ordID, nil
 }
 
+// PlaceReduceOnlyLimitOrder on spot is identical to PlaceLimitOrder (spot has no reduce-only concept).
+func (b *OrderBroker) PlaceReduceOnlyLimitOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error) {
+	return b.PlaceLimitOrder(ctx, symbol, side, positionSide, qty, price, clientOrderID)
+}
+
 // PlaceStopMarketOrder places a STOP_LOSS_LIMIT order on Binance Spot.
 // Binance Spot has no STOP_MARKET type; STOP_LOSS_LIMIT with limit == stop
 // provides market-like execution at the trigger price.

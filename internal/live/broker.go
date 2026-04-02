@@ -27,6 +27,7 @@ const filledEps = 1e-9
 type protectiveIDs struct {
 	stopID string
 	tpID   string
+	tpIDs  []string // staged TP: multiple reduce-only limit orders
 }
 
 // Broker submits real orders via an exchange.OrderClient and tracks fills via the OMS.
@@ -596,6 +597,8 @@ func (b *Broker) RebuildProtectiveOrders(orders []*data.OrderRecord) {
 		ids := b.protectiveOrders[key]
 		if rec.OrderRole == "stop_loss" {
 			ids.stopID = rec.ExchangeID
+		} else if rec.OrderRole == "staged_tp" {
+			ids.tpIDs = append(ids.tpIDs, rec.ExchangeID)
 		} else {
 			ids.tpID = rec.ExchangeID
 		}
@@ -642,6 +645,111 @@ func (b *Broker) cancelProtectiveOrders(ctx context.Context, symbol, posSide str
 			b.log.Info("take-profit order cancelled", zap.String("tp_id", ids.tpID))
 		}
 	}
+	for _, tpID := range ids.tpIDs {
+		if err := b.orderClient.CancelOrder(ctx, symbol, tpID); err != nil {
+			b.log.Warn("cancel staged TP order failed",
+				zap.String("symbol", symbol),
+				zap.String("tp_id", tpID),
+				zap.Error(err))
+		} else {
+			b.log.Info("staged TP order cancelled", zap.String("tp_id", tpID))
+		}
+	}
+}
+
+// StagedTP describes one level in a staged take-profit plan.
+type StagedTP struct {
+	Price float64
+	Qty   float64
+}
+
+// PlaceStagedTPOrders places multiple reduce-only limit orders on the exchange
+// for staged take-profit exits. Also places the initial stop-loss.
+// totalQty is the full position size (used for the SL order).
+// Returns true if at least the SL was placed successfully.
+func (b *Broker) PlaceStagedTPOrders(ctx context.Context, symbol, posSide string, closeSide exchange.OrderSide, stopPrice, totalQty float64, tps []StagedTP) bool {
+	key := brokerPosKey(symbol, posSide)
+	ids := protectiveIDs{}
+
+	// Place SL first (most critical) — use totalQty so exchange knows exact qty to close.
+	slID, err := b.orderClient.PlaceStopMarketOrder(ctx, symbol, closeSide, posSide, totalQty, stopPrice, "")
+	if err != nil {
+		b.log.Error("staged TP: failed to place initial SL",
+			zap.String("symbol", symbol), zap.Error(err))
+		if b.notifier != nil {
+			b.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
+				"Failed to place SL for %s %s @ %.2f: %v", symbol, posSide, stopPrice, err))
+		}
+		return false
+	}
+	ids.stopID = slID
+	b.log.Info("staged TP: SL placed",
+		zap.String("sl_id", slID), zap.Float64("stop", stopPrice))
+
+	// Place each TP level as reduce-only limit order
+	for i, tp := range tps {
+		tpID, tpErr := b.orderClient.PlaceReduceOnlyLimitOrder(ctx, symbol, closeSide, posSide, tp.Qty, tp.Price, "")
+		if tpErr != nil {
+			b.log.Error("staged TP: failed to place TP level",
+				zap.Int("level", i+1), zap.Float64("price", tp.Price),
+				zap.Float64("qty", tp.Qty), zap.Error(tpErr))
+			continue
+		}
+		ids.tpIDs = append(ids.tpIDs, tpID)
+		b.log.Info("staged TP: level placed",
+			zap.Int("level", i+1), zap.String("tp_id", tpID),
+			zap.Float64("price", tp.Price), zap.Float64("qty", tp.Qty))
+	}
+
+	b.protMu.Lock()
+	b.protectiveOrders[key] = ids
+	b.protMu.Unlock()
+	return true
+}
+
+// ReplaceSLOrder cancels the current SL and places a new one at newStopPrice.
+// Used for the +0.5R breakeven move. Qty=0 means close entire position.
+func (b *Broker) ReplaceSLOrder(ctx context.Context, symbol, posSide string, closeSide exchange.OrderSide, remainQty, newStopPrice float64) bool {
+	key := brokerPosKey(symbol, posSide)
+
+	b.protMu.Lock()
+	ids, ok := b.protectiveOrders[key]
+	b.protMu.Unlock()
+	if !ok {
+		return false
+	}
+
+	// Cancel old SL
+	if ids.stopID != "" {
+		if err := b.orderClient.CancelOrder(ctx, symbol, ids.stopID); err != nil {
+			b.log.Warn("ReplaceSL: cancel old SL failed",
+				zap.String("stop_id", ids.stopID), zap.Error(err))
+			// Don't return — try to place new one anyway (old might already be filled/cancelled)
+		} else {
+			b.log.Info("ReplaceSL: old SL cancelled", zap.String("stop_id", ids.stopID))
+		}
+	}
+
+	// Place new SL
+	newID, err := b.orderClient.PlaceStopMarketOrder(ctx, symbol, closeSide, posSide, remainQty, newStopPrice, "")
+	if err != nil {
+		b.log.Error("ReplaceSL: failed to place new SL",
+			zap.Float64("new_stop", newStopPrice), zap.Error(err))
+		if b.notifier != nil {
+			b.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
+				"Failed to replace SL for %s %s @ %.2f: %v", symbol, posSide, newStopPrice, err))
+		}
+		return false
+	}
+
+	b.protMu.Lock()
+	ids.stopID = newID
+	b.protectiveOrders[key] = ids
+	b.protMu.Unlock()
+
+	b.log.Info("ReplaceSL: new SL placed",
+		zap.String("sl_id", newID), zap.Float64("stop", newStopPrice))
+	return true
 }
 
 // CancelAllPendingOrders cancels all non-terminal OMS orders that have been acknowledged

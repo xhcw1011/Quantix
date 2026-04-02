@@ -27,6 +27,15 @@ type Config struct {
 	Live      LiveConfig      `mapstructure:"live"`
 	Portfolio PortfolioConfig `mapstructure:"portfolio"`
 	OpenAI    OpenAIConfig    `mapstructure:"openai"`
+	WS        WSConfig        `mapstructure:"ws"`
+}
+
+// WSConfig holds WebSocket connection management parameters.
+type WSConfig struct {
+	StaleTimeout       time.Duration `mapstructure:"stale_timeout"`        // no data for this long = reconnect (default 30s)
+	StaleCheckInterval time.Duration `mapstructure:"stale_check_interval"` // how often to check (default 3s)
+	ReconnectDelay     time.Duration `mapstructure:"reconnect_delay"`      // delay before reconnecting (default 2s)
+	OpenErrorDelay     time.Duration `mapstructure:"open_error_delay"`     // delay after open failure (default 5s)
 }
 
 // OpenAIConfig holds settings for GPT-powered AI strategies.
@@ -294,5 +303,19 @@ func applyDefaults(cfg *Config) {
 	// SMTP
 	if cfg.SMTP.Port <= 0 {
 		cfg.SMTP.Port = 587
+	}
+
+	// WS
+	if cfg.WS.StaleTimeout == 0 {
+		cfg.WS.StaleTimeout = 30 * time.Second
+	}
+	if cfg.WS.StaleCheckInterval == 0 {
+		cfg.WS.StaleCheckInterval = 3 * time.Second
+	}
+	if cfg.WS.ReconnectDelay == 0 {
+		cfg.WS.ReconnectDelay = 2 * time.Second
+	}
+	if cfg.WS.OpenErrorDelay == 0 {
+		cfg.WS.OpenErrorDelay = 5 * time.Second
 	}
 }

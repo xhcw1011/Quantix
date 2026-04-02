@@ -14,7 +14,7 @@ echo "重置 session（保留订单历史）..."
 psql -U quantix -d quantix -c "DELETE FROM engine_sessions WHERE user_id=4;" 2>/dev/null
 
 echo "启动..."
-nohup /tmp/start-quantix.sh > /tmp/quantix-live.log 2>&1 &
+nohup ./scripts/start-quantix.sh > /dev/null 2>&1 &
 sleep 6
 
 echo "健康检查..."

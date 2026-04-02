@@ -144,6 +144,43 @@ func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side e
 	return ordID, nil
 }
 
+// PlaceReduceOnlyLimitOrder places a GTC limit order with ReduceOnly=true.
+// Used for staged take-profit orders that close an existing position.
+func (b *OrderBroker) PlaceReduceOnlyLimitOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error) {
+	svc := b.client.NewCreateOrderService().
+		Symbol(symbol).
+		Side(toBinanceSide(side)).
+		Type(goBinance.OrderTypeLimit).
+		TimeInForce(goBinance.TimeInForceTypeGTC).
+		Quantity(fmt.Sprintf("%.8f", qty)).
+		Price(fmt.Sprintf("%.8f", price))
+
+	// Hedge mode: positionSide implies the side to reduce; reduceOnly conflicts with it.
+	// One-way mode: no positionSide, use reduceOnly to prevent accidental position opening.
+	if ps := toFuturesPositionSide(positionSide); ps != "" {
+		svc = svc.PositionSide(ps)
+	} else {
+		svc = svc.ReduceOnly(true)
+	}
+	if clientOrderID != "" {
+		svc = svc.NewClientOrderID(clientOrderID)
+	}
+
+	result, err := svc.Do(ctx)
+	if err != nil {
+		return "", fmt.Errorf("binance futures reduce-only limit order: %w", err)
+	}
+
+	ordID := strconv.FormatInt(result.OrderID, 10)
+	b.log.Info("Binance Futures reduce-only limit order placed",
+		zap.String("order_id", ordID),
+		zap.String("symbol", symbol),
+		zap.Float64("price", price),
+		zap.Float64("qty", qty),
+	)
+	return ordID, nil
+}
+
 // PlaceStopMarketOrder places a STOP_MARKET order that fires when stopPrice is reached.
 // ReduceOnly=true ensures it only closes existing positions (no new position opened).
 func (b *OrderBroker) PlaceStopMarketOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, stopPrice float64, clientOrderID string) (string, error) {

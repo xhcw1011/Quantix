@@ -28,7 +28,6 @@ type StrategyPosition struct {
 	R          float64 `json:"r"`
 	InitQty    float64 `json:"init_qty"`
 	TP1Hit     bool    `json:"tp1_hit"`
-	TP2Hit     bool    `json:"tp2_hit"`
 	BarsHeld   int     `json:"bars_held"`
 	OrderID    string  `json:"order_id"`
 	Filled     bool    `json:"filled"`

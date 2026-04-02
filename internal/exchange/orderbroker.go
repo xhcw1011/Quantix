@@ -88,6 +88,12 @@ type OrderClient interface {
 	// Spot brokers return an error or no-op.
 	SetLeverage(ctx context.Context, symbol string, leverage int) error
 
+	// PlaceReduceOnlyLimitOrder places a reduce-only GTC limit order.
+	// Used for staged take-profit orders that close (not open) positions.
+	// positionSide: "LONG", "SHORT", or "".
+	// clientOrderID: 32-char idempotency key (pass "" to skip).
+	PlaceReduceOnlyLimitOrder(ctx context.Context, symbol string, side OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error)
+
 	// CancelOrder cancels a live order by exchange order ID.
 	CancelOrder(ctx context.Context, symbol, exchangeID string) error
 

@@ -100,6 +100,10 @@ func (m *mockOrderClient) PlaceTakeProfitMarketOrder(_ context.Context, _ string
 	return m.tpID, m.tpErr
 }
 
+func (m *mockOrderClient) PlaceReduceOnlyLimitOrder(_ context.Context, _ string, _ exchange.OrderSide, _ string, _, _ float64, _ string) (string, error) {
+	return m.PlaceLimitOrder(nil, "", "", "", 0, 0, "")
+}
+
 func (m *mockOrderClient) SetLeverage(_ context.Context, _ string, _ int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -153,6 +157,9 @@ func (c *capturingOrderClient) PlaceStopMarketOrder(context.Context, string, exc
 	return "", nil
 }
 func (c *capturingOrderClient) PlaceTakeProfitMarketOrder(context.Context, string, exchange.OrderSide, string, float64, float64, string) (string, error) {
+	return "", nil
+}
+func (c *capturingOrderClient) PlaceReduceOnlyLimitOrder(context.Context, string, exchange.OrderSide, string, float64, float64, string) (string, error) {
 	return "", nil
 }
 func (c *capturingOrderClient) SetLeverage(context.Context, string, int) error { return nil }

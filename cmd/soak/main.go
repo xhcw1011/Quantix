@@ -115,7 +115,7 @@ func main() {
 	eng := paper.New(engineCfg, strat, rm, nil, tm, nil, log)
 
 	// ── WebSocket client ──────────────────────────────────────────────────────
-	wsClient, err := factory.NewWSClient(cfg.Exchange, log)
+	wsClient, err := factory.NewWSClient(cfg.Exchange, cfg.WS, log)
 	if err != nil {
 		log.Fatal("failed to create WS client", zap.Error(err))
 	}

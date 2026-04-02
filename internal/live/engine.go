@@ -57,6 +57,7 @@ type Engine struct {
 	metrics    *monitor.TradingMetrics // may be nil
 	notifier   *notify.Notifier        // may be nil
 	marginMon  *MarginMonitor          // may be nil; active only for futures/swap exchanges
+	tickCh     chan float64            // real-time price from ticker WS
 	log        *zap.Logger
 
 	fillMu      sync.Mutex // protects realizedPnL, wins, total
@@ -66,9 +67,13 @@ type Engine struct {
 	dbWg        sync.WaitGroup // tracks in-flight DB write goroutines for clean shutdown
 
 	// Exchange equity cache (for futures — avoids self-calculating with margin)
-	equityQuerier exchange.EquityQuerier
+	equityQuerier   exchange.EquityQuerier
 	lastEquityQuery time.Time
 	cachedEquity    float64
+
+	// Stale bar detection
+	lastBarTime  time.Time // last time a kline was received
+	staleAlerted bool      // avoid repeated stale alerts
 
 	// Position syncer (Redis-backed, exchange is source of truth)
 	posSyncer *position.Syncer // nil if not configured
@@ -120,6 +125,9 @@ func NewEngine(
 		log.Info("exchange equity query enabled (futures)")
 	}
 
+	// Inject staged exit placer so strategies can place exchange-native TP/SL orders.
+	stratCtx.Extra["staged_exit"] = &stagedExitAdapter{broker: broker}
+
 	return &Engine{
 		cfg:           cfg,
 		broker:        broker,
@@ -133,8 +141,32 @@ func NewEngine(
 		notifier:      notif,
 		marginMon:     mm,
 		equityQuerier: eq,
+		tickCh:        make(chan float64, 64),
 		log:           log,
 	}, nil
+}
+
+// stagedExitAdapter wraps *Broker to implement strategy.StagedExitPlacer
+// without exposing the full broker to strategies.
+type stagedExitAdapter struct {
+	broker *Broker
+	ctx    context.Context // engine lifecycle context, set in Run()
+}
+
+func (a *stagedExitAdapter) PlaceStagedTPOrders(symbol, posSide, closeSide string, stopPrice, totalQty float64, tps []strategy.StagedTP) bool {
+	liveTPs := make([]StagedTP, len(tps))
+	for i, tp := range tps {
+		liveTPs[i] = StagedTP{Price: tp.Price, Qty: tp.Qty}
+	}
+	return a.broker.PlaceStagedTPOrders(a.ctx, symbol, posSide, exchange.OrderSide(closeSide), stopPrice, totalQty, liveTPs)
+}
+
+func (a *stagedExitAdapter) ReplaceSLOrder(symbol, posSide, closeSide string, remainQty, newStopPrice float64) bool {
+	return a.broker.ReplaceSLOrder(a.ctx, symbol, posSide, exchange.OrderSide(closeSide), remainQty, newStopPrice)
+}
+
+func (a *stagedExitAdapter) CancelAllProtective(symbol, posSide string) {
+	a.broker.cancelProtectiveOrders(a.ctx, symbol, posSide)
 }
 
 // SyncBalance fetches live account balance and seeds the risk manager equity.
@@ -150,7 +182,13 @@ func (e *Engine) SyncBalance(ctx context.Context, baseCurrency string) error {
 // Run starts the live trading loop. Reads closed klines from klineCh.
 func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	e.startTime = time.Now()
+	e.lastBarTime = time.Now()
 	e.broker.SetEngineCtx(ctx) // allow async order-fill pollers to use engine lifecycle ctx
+
+	// Wire engine context into the staged exit adapter.
+	if adapter, ok := e.stratCtx.Extra["staged_exit"].(*stagedExitAdapter); ok {
+		adapter.ctx = ctx
+	}
 	e.omsInst.SetContext(ctx)  // enable backpressure on fills/orders channels
 
 	// Extract symbol from strategy ID (format: SYMBOL-INTERVAL-STRATEGY or SYMBOL-...)
@@ -316,13 +354,21 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 
 		case kline, ok := <-klineCh:
 			if !ok {
-				// klineCh closed (WS disconnect) — nil-ify so select no longer polls
-				// this case (prevents CPU busy loop). Engine stays alive on ctx/ticker.
 				e.log.Warn("kline channel closed, disabling kline select case")
 				klineCh = nil
 				continue
 			}
 			e.onBar(kline)
+
+		case tickPrice, ok := <-e.tickCh:
+			if !ok {
+				e.tickCh = nil
+				continue
+			}
+			e.broker.SetLastPrice(tickPrice)
+			if tr, ok := e.strategy.(strategy.TickReceiver); ok {
+				tr.OnTick(e.stratCtx, tickPrice)
+			}
 
 		case <-statusTicker.C:
 			e.printStatus()
@@ -337,6 +383,8 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 }
 
 func (e *Engine) onBar(bar exchange.Kline) {
+	e.lastBarTime = time.Now()
+	e.staleAlerted = false
 	e.broker.SetLastPrice(bar.Close)
 
 	// Equity from WS ACCOUNT_UPDATE push (futures) or local calc (spot).
@@ -817,6 +865,22 @@ func (e *Engine) printStatus() {
 		zap.Int("open_positions", len(positions)),
 		zap.Bool("risk_halted", e.risk.Halted()),
 	)
+
+	// Stale bar detection: warn if no kline data for > 2 minutes (should arrive every ~1m for 1m bars).
+	staleSince := time.Since(e.lastBarTime)
+	if staleSince > 2*time.Minute && !e.staleAlerted {
+		e.staleAlerted = true
+		e.log.Error("no kline data received — possible WS disconnect",
+			zap.Duration("silent_for", staleSince.Truncate(time.Second)),
+			zap.String("strategy", e.cfg.StrategyID),
+		)
+		if e.notifier != nil {
+			e.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
+				"⚠️ No kline data for %s\nStrategy %s may be stalled — check WS connection",
+				staleSince.Truncate(time.Second), e.cfg.StrategyID,
+			))
+		}
+	}
 }
 
 func (e *Engine) sendDailySummary() {
@@ -847,6 +911,11 @@ func (e *Engine) Cash() float64 { return e.broker.Cash() }
 
 // Equity returns the current total equity.
 func (e *Engine) Equity() float64 { return e.broker.Equity() }
+
+// GetTickCh returns the real-time ticker price channel.
+func (e *Engine) GetTickCh() chan float64 {
+	return e.tickCh
+}
 
 // SetExtra injects arbitrary data into the strategy context.
 func (e *Engine) SetExtra(key string, val any) {

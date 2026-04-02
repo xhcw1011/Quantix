@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	futures "github.com/adshao/go-binance/v2/futures"
@@ -14,13 +16,23 @@ import (
 
 // BinanceFuturesWSClient subscribes to Binance USDM Futures WebSocket streams.
 type BinanceFuturesWSClient struct {
-	log *zap.Logger
+	log            *zap.Logger
+	staleTimeout   time.Duration
+	staleCheck     time.Duration
+	reconnectDelay time.Duration
+	openErrorDelay time.Duration
 }
 
 // NewBinanceFuturesWSClient creates a new Futures WebSocket client.
-func NewBinanceFuturesWSClient(cfg config.BinanceConfig, log *zap.Logger) *BinanceFuturesWSClient {
+func NewBinanceFuturesWSClient(cfg config.BinanceConfig, wsCfg config.WSConfig, log *zap.Logger) *BinanceFuturesWSClient {
 	ApplyBinanceNetworkMode(cfg)
-	return &BinanceFuturesWSClient{log: log}
+	return &BinanceFuturesWSClient{
+		log:            log,
+		staleTimeout:   wsCfg.StaleTimeout,
+		staleCheck:     wsCfg.StaleCheckInterval,
+		reconnectDelay: wsCfg.ReconnectDelay,
+		openErrorDelay: wsCfg.OpenErrorDelay,
+	}
 }
 
 // SubscribeKlines opens a combined kline stream for Futures symbols/intervals.
@@ -35,7 +47,7 @@ func (w *BinanceFuturesWSClient) SubscribeKlines(ctx context.Context, symbols []
 		stopC, err := w.openKlineStreams(ctx, symbols, intervals, handler)
 		if err != nil {
 			w.log.Error("failed to open futures kline streams", zap.Error(err))
-			w.sleep(ctx, 5*time.Second)
+			w.sleep(ctx, w.openErrorDelay)
 			continue
 		}
 
@@ -49,7 +61,7 @@ func (w *BinanceFuturesWSClient) SubscribeKlines(ctx context.Context, symbols []
 			return
 		case <-stopC:
 			w.log.Warn("futures kline websocket disconnected, reconnecting...")
-			w.sleep(ctx, 2*time.Second)
+			w.sleep(ctx, w.reconnectDelay)
 		}
 	}
 }
@@ -66,7 +78,7 @@ func (w *BinanceFuturesWSClient) SubscribeTickers(ctx context.Context, symbols [
 		stopC, err := w.openTickerStreams(ctx, symbols, handler)
 		if err != nil {
 			w.log.Error("failed to open futures ticker streams", zap.Error(err))
-			w.sleep(ctx, 5*time.Second)
+			w.sleep(ctx, w.openErrorDelay)
 			continue
 		}
 
@@ -78,8 +90,24 @@ func (w *BinanceFuturesWSClient) SubscribeTickers(ctx context.Context, symbols [
 			return
 		case <-stopC:
 			w.log.Warn("futures ticker websocket disconnected, reconnecting...")
-			w.sleep(ctx, 2*time.Second)
+			w.sleep(ctx, w.reconnectDelay)
 		}
+	}
+}
+
+// closeAllStopCs safely closes all stop channels and the combined channel.
+func closeAllStopCs(stopCs []chan struct{}, doneCombined chan struct{}) {
+	for _, sc := range stopCs {
+		select {
+		case <-sc:
+		default:
+			close(sc)
+		}
+	}
+	select {
+	case <-doneCombined:
+	default:
+		close(doneCombined)
 	}
 }
 
@@ -91,7 +119,17 @@ func (w *BinanceFuturesWSClient) openKlineStreams(ctx context.Context, symbols, 
 	}
 
 	doneCombined := make(chan struct{})
-	var firstDone chan struct{}
+	var stopCs []chan struct{}
+	var lastDataTime atomic.Int64
+	lastDataTime.Store(time.Now().UnixNano())
+
+	var teardownOnce sync.Once
+	teardown := func(reason string) {
+		teardownOnce.Do(func() {
+			w.log.Warn("futures kline: tearing down all streams", zap.String("reason", reason))
+			closeAllStopCs(stopCs, doneCombined)
+		})
+	}
 
 	for _, symbol := range symbols {
 		for _, interval := range intervals {
@@ -102,6 +140,7 @@ func (w *BinanceFuturesWSClient) openKlineStreams(ctx context.Context, symbols, 
 				if event == nil {
 					return
 				}
+				lastDataTime.Store(time.Now().UnixNano())
 				k, err := convertFuturesWSKline(sym, event)
 				if err != nil {
 					w.log.Warn("failed to convert futures ws kline", zap.Error(err))
@@ -115,28 +154,47 @@ func (w *BinanceFuturesWSClient) openKlineStreams(ctx context.Context, symbols, 
 					zap.String("symbol", sym), zap.String("interval", itv), zap.Error(err))
 			}
 
-			doneC, _, err := futures.WsKlineServe(sym, itv, wsHandler, errHandler)
+			doneC, stopC, err := futures.WsKlineServe(sym, itv, wsHandler, errHandler)
 			if err != nil {
+				for _, sc := range stopCs {
+					close(sc)
+				}
 				close(doneCombined)
 				return nil, err
 			}
+			stopCs = append(stopCs, stopC)
 
-			if firstDone == nil {
-				firstDone = doneC
-				go func() {
-					select {
-					case <-firstDone:
-						select {
-						case <-doneCombined:
-						default:
-							close(doneCombined)
-						}
-					case <-ctx.Done():
-					}
-				}()
-			}
+			// Any single stream disconnect → tear down all.
+			go func(done <-chan struct{}, sym, itv string) {
+				select {
+				case <-done:
+					teardown(fmt.Sprintf("stream %s/%s died", sym, itv))
+				case <-doneCombined:
+				case <-ctx.Done():
+				}
+			}(doneC, sym, itv)
 		}
 	}
+
+	// Stale data watchdog: if no data received for staleTimeout, force reconnect.
+	go func() {
+		ticker := time.NewTicker(w.staleCheck)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				last := time.Unix(0, lastDataTime.Load())
+				if time.Since(last) > w.staleTimeout {
+					teardown(fmt.Sprintf("no kline data for %s", time.Since(last).Round(time.Second)))
+					return
+				}
+			case <-doneCombined:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	return doneCombined, nil
 }
@@ -149,7 +207,17 @@ func (w *BinanceFuturesWSClient) openTickerStreams(ctx context.Context, symbols 
 	}
 
 	doneCombined := make(chan struct{})
-	var firstDone chan struct{}
+	var stopCs []chan struct{}
+	var lastDataTime atomic.Int64
+	lastDataTime.Store(time.Now().UnixNano())
+
+	var teardownOnce sync.Once
+	teardown := func(reason string) {
+		teardownOnce.Do(func() {
+			w.log.Warn("futures ticker: tearing down all streams", zap.String("reason", reason))
+			closeAllStopCs(stopCs, doneCombined)
+		})
+	}
 
 	for _, symbol := range symbols {
 		sym := symbol
@@ -158,6 +226,7 @@ func (w *BinanceFuturesWSClient) openTickerStreams(ctx context.Context, symbols 
 			if event == nil {
 				return
 			}
+			lastDataTime.Store(time.Now().UnixNano())
 			t, err := convertFuturesWSBookTicker(sym, event)
 			if err != nil {
 				w.log.Warn("failed to convert futures book ticker", zap.Error(err))
@@ -170,27 +239,45 @@ func (w *BinanceFuturesWSClient) openTickerStreams(ctx context.Context, symbols 
 			w.log.Error("futures ticker websocket error", zap.String("symbol", sym), zap.Error(err))
 		}
 
-		doneC, _, err := futures.WsBookTickerServe(sym, wsHandler, errHandler)
+		doneC, stopC, err := futures.WsBookTickerServe(sym, wsHandler, errHandler)
 		if err != nil {
+			for _, sc := range stopCs {
+				close(sc)
+			}
 			close(doneCombined)
 			return nil, err
 		}
+		stopCs = append(stopCs, stopC)
 
-		if firstDone == nil {
-			firstDone = doneC
-			go func() {
-				select {
-				case <-firstDone:
-					select {
-					case <-doneCombined:
-					default:
-						close(doneCombined)
-					}
-				case <-ctx.Done():
-				}
-			}()
-		}
+		go func(done <-chan struct{}, sym string) {
+			select {
+			case <-done:
+				teardown(fmt.Sprintf("stream %s died", sym))
+			case <-doneCombined:
+			case <-ctx.Done():
+			}
+		}(doneC, sym)
 	}
+
+	// Stale data watchdog.
+	go func() {
+		ticker := time.NewTicker(w.staleCheck)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				last := time.Unix(0, lastDataTime.Load())
+				if time.Since(last) > w.staleTimeout {
+					teardown(fmt.Sprintf("no ticker data for %s", time.Since(last).Round(time.Second)))
+					return
+				}
+			case <-doneCombined:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	return doneCombined, nil
 }
