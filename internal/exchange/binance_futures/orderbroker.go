@@ -181,14 +181,14 @@ func (b *OrderBroker) PlaceReduceOnlyLimitOrder(ctx context.Context, symbol stri
 	return ordID, nil
 }
 
-// PlaceStopMarketOrder places a STOP_MARKET order that fires when stopPrice is reached.
-// ReduceOnly=true ensures it only closes existing positions (no new position opened).
+// PlaceStopMarketOrder places a STOP_MARKET algo order that fires when stopPrice is reached.
+// Uses the Algo Order API (/fapi/v1/algoOrder) which Binance requires for conditional orders.
 func (b *OrderBroker) PlaceStopMarketOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, stopPrice float64, clientOrderID string) (string, error) {
-	svc := b.client.NewCreateOrderService().
+	svc := b.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(toBinanceSide(side)).
-		Type("STOP_MARKET").
-		StopPrice(fmt.Sprintf("%.8f", stopPrice)).
+		Type(goBinance.AlgoOrderTypeStopMarket).
+		TriggerPrice(fmt.Sprintf("%.8f", stopPrice)).
 		Quantity(fmt.Sprintf("%.8f", qty))
 
 	if ps := toFuturesPositionSide(positionSide); ps != "" {
@@ -197,7 +197,7 @@ func (b *OrderBroker) PlaceStopMarketOrder(ctx context.Context, symbol string, s
 		svc = svc.ReduceOnly(true)
 	}
 	if clientOrderID != "" {
-		svc = svc.NewClientOrderID(clientOrderID)
+		svc = svc.ClientAlgoId(clientOrderID)
 	}
 
 	result, err := svc.Do(ctx)
@@ -205,23 +205,23 @@ func (b *OrderBroker) PlaceStopMarketOrder(ctx context.Context, symbol string, s
 		return "", fmt.Errorf("binance futures stop-market order: %w", err)
 	}
 
-	ordID := strconv.FormatInt(result.OrderID, 10)
-	b.log.Info("Binance Futures stop-market order placed",
-		zap.String("order_id", ordID),
+	ordID := strconv.FormatInt(result.AlgoId, 10)
+	b.log.Info("Binance Futures stop-market algo order placed",
+		zap.String("algo_id", ordID),
 		zap.String("symbol", symbol),
 		zap.Float64("stop_price", stopPrice),
 	)
 	return ordID, nil
 }
 
-// PlaceTakeProfitMarketOrder places a TAKE_PROFIT_MARKET order that fires when triggerPrice is reached.
-// ReduceOnly=true ensures it only closes existing positions.
+// PlaceTakeProfitMarketOrder places a TAKE_PROFIT_MARKET algo order that fires when triggerPrice is reached.
+// Uses the Algo Order API (/fapi/v1/algoOrder).
 func (b *OrderBroker) PlaceTakeProfitMarketOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, triggerPrice float64, clientOrderID string) (string, error) {
-	svc := b.client.NewCreateOrderService().
+	svc := b.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(toBinanceSide(side)).
-		Type("TAKE_PROFIT_MARKET").
-		StopPrice(fmt.Sprintf("%.8f", triggerPrice)).
+		Type(goBinance.AlgoOrderTypeTakeProfitMarket).
+		TriggerPrice(fmt.Sprintf("%.8f", triggerPrice)).
 		Quantity(fmt.Sprintf("%.8f", qty))
 
 	if ps := toFuturesPositionSide(positionSide); ps != "" {
@@ -230,7 +230,7 @@ func (b *OrderBroker) PlaceTakeProfitMarketOrder(ctx context.Context, symbol str
 		svc = svc.ReduceOnly(true)
 	}
 	if clientOrderID != "" {
-		svc = svc.NewClientOrderID(clientOrderID)
+		svc = svc.ClientAlgoId(clientOrderID)
 	}
 
 	result, err := svc.Do(ctx)
@@ -238,9 +238,9 @@ func (b *OrderBroker) PlaceTakeProfitMarketOrder(ctx context.Context, symbol str
 		return "", fmt.Errorf("binance futures take-profit-market order: %w", err)
 	}
 
-	ordID := strconv.FormatInt(result.OrderID, 10)
-	b.log.Info("Binance Futures take-profit order placed",
-		zap.String("order_id", ordID),
+	ordID := strconv.FormatInt(result.AlgoId, 10)
+	b.log.Info("Binance Futures take-profit algo order placed",
+		zap.String("algo_id", ordID),
 		zap.String("symbol", symbol),
 		zap.Float64("trigger_price", triggerPrice),
 	)
@@ -264,19 +264,27 @@ func (b *OrderBroker) SetLeverage(ctx context.Context, symbol string, leverage i
 }
 
 // CancelOrder cancels a live futures order by exchange order ID (numeric string).
+// Tries normal order cancel first; on failure tries algo order cancel (SL/TP are algo orders).
 func (b *OrderBroker) CancelOrder(ctx context.Context, symbol, exchangeID string) error {
 	xID, err := strconv.ParseInt(exchangeID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid exchange order ID %q: %w", exchangeID, err)
 	}
+	// Try normal order cancel first.
 	_, err = b.client.NewCancelOrderService().
 		Symbol(symbol).
 		OrderID(xID).
 		Do(ctx)
-	if err != nil {
-		return fmt.Errorf("binance futures cancel order: %w", err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// If normal cancel fails, try algo order cancel (SL/TP placed via algo API).
+	_, algoErr := b.client.NewCancelAlgoOrderService().AlgoID(xID).Do(ctx)
+	if algoErr == nil {
+		return nil
+	}
+	// Return original error (more informative).
+	return fmt.Errorf("binance futures cancel order: %w (algo cancel also failed: %v)", err, algoErr)
 }
 
 // CancelAllOpenOrders implements exchange.OpenOrdersCanceller.

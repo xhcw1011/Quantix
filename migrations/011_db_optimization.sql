@@ -13,13 +13,14 @@ DROP INDEX IF EXISTS idx_backtest_user_id;
 -- ============================================================
 -- 2. Add missing foreign keys
 -- ============================================================
-ALTER TABLE trade_events
-    ADD CONSTRAINT trade_events_user_id_fkey
-    FOREIGN KEY (user_id) REFERENCES users(id);
-
-ALTER TABLE strategy_positions
-    ADD CONSTRAINT strategy_positions_user_id_fkey
-    FOREIGN KEY (user_id) REFERENCES users(id);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'trade_events_user_id_fkey') THEN
+        ALTER TABLE trade_events ADD CONSTRAINT trade_events_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'strategy_positions_user_id_fkey') THEN
+        ALTER TABLE strategy_positions ADD CONSTRAINT strategy_positions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id);
+    END IF;
+END $$;
 
 -- ============================================================
 -- 3. Strategy configs — per-user per-strategy parameter persistence
@@ -39,7 +40,7 @@ CREATE TABLE IF NOT EXISTS strategy_configs (
     UNIQUE (user_id, strategy_id, name)
 );
 
-CREATE INDEX idx_strategy_configs_user ON strategy_configs (user_id);
+CREATE INDEX IF NOT EXISTS idx_strategy_configs_user ON strategy_configs (user_id);
 
 -- ============================================================
 -- 4. User preferences — UI settings, notification preferences
@@ -72,7 +73,7 @@ CREATE TABLE IF NOT EXISTS notification_log (
     error       TEXT
 );
 
-CREATE INDEX idx_notification_log_user ON notification_log (user_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notification_log_user ON notification_log (user_id, sent_at DESC);
 
 -- ============================================================
 -- 6. Convert equity_snapshots to hypertable for scalability
