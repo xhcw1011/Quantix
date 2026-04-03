@@ -115,13 +115,16 @@ func (b *OrderBroker) PlaceMarketOrder(ctx context.Context, symbol string, side 
 // PlaceLimitOrder submits a limit order with GTC time-in-force.
 // positionSide: "LONG", "SHORT", or "" (BOTH for one-way mode).
 func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error) {
+	qtyStr := fmt.Sprintf("%.3f", qty)   // ETHUSDT: 3 decimal precision
+	priceStr := fmt.Sprintf("%.2f", price) // ETHUSDT: 2 decimal precision
+
 	svc := b.client.NewCreateOrderService().
 		Symbol(symbol).
 		Side(toBinanceSide(side)).
 		Type(goBinance.OrderTypeLimit).
 		TimeInForce(goBinance.TimeInForceTypeGTC).
-		Quantity(fmt.Sprintf("%.8f", qty)).
-		Price(fmt.Sprintf("%.8f", price))
+		Quantity(qtyStr).
+		Price(priceStr)
 
 	if ps := toFuturesPositionSide(positionSide); ps != "" {
 		svc = svc.PositionSide(ps)
@@ -129,6 +132,11 @@ func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side e
 	if clientOrderID != "" {
 		svc = svc.NewClientOrderID(clientOrderID)
 	}
+
+	b.log.Info("Binance Futures limit order attempt",
+		zap.String("symbol", symbol), zap.String("side", string(side)),
+		zap.String("position_side", positionSide),
+		zap.String("qty", qtyStr), zap.String("price", priceStr))
 
 	result, err := svc.Do(ctx)
 	if err != nil {
@@ -503,13 +511,8 @@ func (b *OrderBroker) GetOrderStatus(ctx context.Context, symbol, orderID string
 // It creates a listenKey, connects the WebSocket, and pushes ORDER_TRADE_UPDATE
 // events to the handler. Auto-renews the listenKey every 30 minutes.
 // Blocks until ctx is cancelled.
-// AccountUpdateHandler is called when account balance changes.
-type AccountUpdateHandler func(walletBalance float64, crossUnPnl float64)
-
-// PositionUpdateHandler is called when a position changes (open/close/modify).
-type PositionUpdateHandler func(symbol, side string, qty, entryPrice float64)
-
-func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill exchange.OrderFill, clientOrderID string, status string), accountHandler AccountUpdateHandler, positionHandler PositionUpdateHandler) {
+// SubscribeUserData implements exchange.UserDataSubscriber.
+func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill exchange.OrderFill, clientOrderID string, status string), accountHandler func(walletBalance float64, crossUnPnl float64), positionHandler func(symbol, side string, qty, entryPrice float64)) {
 	for {
 		select {
 		case <-ctx.Done():

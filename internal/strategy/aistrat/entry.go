@@ -23,18 +23,19 @@ func (s *AIStrategy) openHedgeScalp(ctx *strategy.Context, side string, currentP
 	qty := math.Floor(mainPos.initQty*s.cfg.HedgeQtyRatio*1000) / 1000
 	if qty <= 0 { return }
 
-	// SL: tight, use range SL
-	slDist := entryPrice * s.cfg.RangeSLPct
+	// SL: ATR-based, same as Range (1.5× TP distance, capped)
+	slDist := atr * 1.5
+	if maxSL := entryPrice * s.cfg.RangeSLPct; slDist > maxSL { slDist = maxSL }
 	if slDist <= 0 { return }
 
-	// TP: min(1U equivalent, mainSL_distance * HedgeTPRatio)
-	// 1U equivalent at this qty: 1.0 / qty = price distance for 1U profit
-	oneUDist := 1.0 / qty
-	// Distance from main entry to main SL
-	mainSLDist := math.Abs(mainPos.entryPrice - mainPos.stopLoss)
-	// TP capped by mainSL distance
-	tpDist := mainSLDist * s.cfg.HedgeTPRatio
-	if oneUDist < tpDist { tpDist = oneUDist }
+	// TP: min(1U price distance, main SL DISTANCE * HedgeTPRatio)
+	// oneUPriceDist = price movement needed to make $1 profit at this qty
+	oneUPriceDist := 1.0 / qty
+	// mainSLPriceDist = absolute price distance from main entry to main SL (NOT the SL price itself)
+	mainSLPriceDist := math.Abs(mainPos.entryPrice - mainPos.stopLoss)
+	// TP capped so hedge doesn't overshoot main position's SL zone
+	tpDist := mainSLPriceDist * s.cfg.HedgeTPRatio
+	if oneUPriceDist < tpDist { tpDist = oneUPriceDist }
 	// Also cap by BB width for range
 	tpDist = math.Max(tpDist, entryPrice*0.003) // minimum 0.3% to avoid dust
 
@@ -97,7 +98,10 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 	maxAbsTP := entryPrice * 0.008 // 0.8% absolute cap
 	if atrTP > 0 && atrTP < tpDist { tpDist = atrTP }
 	if maxAbsTP > 0 && maxAbsTP < tpDist { tpDist = maxAbsTP }
-	slDist := entryPrice * s.cfg.RangeSLPct
+	// Range SL: always 1.5× the ACTUAL TP distance, so R:R stays 1:1.5 regardless of ATR.
+	// Capped by config percentage (default 1%) as absolute safety limit.
+	slDist := tpDist * 1.5
+	if maxSL := entryPrice * s.cfg.RangeSLPct; slDist > maxSL { slDist = maxSL }
 
 	var stopLoss, takeProfit float64
 	if side == "LONG" {
@@ -117,6 +121,9 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 	qty := math.Floor(equity*risk/slDist*1000) / 1000
 	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
 	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
+	// Cap qty so margin needed (notional/leverage) doesn't exceed 80% of equity
+	maxQty := math.Floor(equity*0.8*10/entryPrice*1000) / 1000 // 80% of equity × leverage / price
+	if qty > maxQty { qty = maxQty }
 	if qty <= 0 { return }
 
 	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
@@ -185,6 +192,9 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	qty := math.Floor(equity*risk/R*1000) / 1000
 	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
 	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
+	// Cap qty so margin needed doesn't exceed 80% of equity
+	maxQty := math.Floor(equity*0.8*10/entryPrice*1000) / 1000
+	if qty > maxQty { qty = maxQty }
 	if qty <= 0 { return }
 
 	useLimit := math.Abs(entryPrice-currentPrice) > 0.01

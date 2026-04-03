@@ -50,7 +50,6 @@ type AIStrategy struct {
 	dayStartEquity float64
 	consecLoss     int
 	dayHalted      bool
-	cooldownUntil  int // bar index — no new entries until barCount >= this
 	stopBar        int // bar index when last stop-loss fired — skip opening same bar
 	lastMTFScore    int     // multi-timeframe score from latest signal check
 	mtfLongScale    float64 // position size multiplier for LONG (0.7-1.0)

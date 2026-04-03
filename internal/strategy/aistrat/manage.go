@@ -48,6 +48,26 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 
 	if p.barsHeld < s.cfg.MinHoldBars { return } // minimum hold
 
+	// Dynamic mode switch: re-evaluate regime every bar.
+	// Range → Trend: if ATR is now expanding and MTF strongly directional
+	// Trend → Range: if ATR contracted and position is small profit/loss
+	if p.mode == modeRange && (s.lastMTFScore >= 2 || s.lastMTFScore <= -2) {
+		atrNow := s.calcATR()
+		bars5m := s.primaryBars()
+		if len(bars5m) >= 20 {
+			var atrSum float64
+			for i := len(bars5m) - 20; i < len(bars5m); i++ {
+				atrSum += bars5m[i].High - bars5m[i].Low
+			}
+			if atrNow > atrSum/20*1.2 {
+				p.mode = modeTrend
+				s.log.Info("AI: mode upgrade Range → Trend (ATR expanding + strong MTF)",
+					zap.String("side", p.side), zap.Int("mtf", s.lastMTFScore))
+				s.syncToRedis(p)
+			}
+		}
+	}
+
 	if p.mode == modeRange {
 		s.manageRange(ctx, bar, p, pptr)
 	} else {
@@ -163,41 +183,14 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 		}
 	}
 
-	// ── Smart timeout (time-based, independent of bar interval) ──
-	pnlPct := 0.0
-	if p.side == "LONG" { pnlPct = (price - p.entryPrice) / p.entryPrice }
-	if p.side == "SHORT" { pnlPct = (p.entryPrice - price) / p.entryPrice }
-
+	// Safety timeout: 4 hours max hold for Range positions.
+	// Prevents overnight holds (funding rate), stale capital lock.
+	// This is a last resort — SL/trailing should exit first in normal conditions.
 	held := time.Since(p.filledAt)
-	if p.filledAt.IsZero() { held = 0 }
-
-	// Floating profit > 0.5% → skip normal timeout but add protection
-	if pnlPct > 0.005 {
-		// Move SL to breakeven if not already
-		if p.side == "LONG" && p.stopLoss < p.entryPrice {
-			p.stopLoss = p.entryPrice + p.entryPrice*s.cfg.BreakevenBuf
-		}
-		if p.side == "SHORT" && p.stopLoss > p.entryPrice {
-			p.stopLoss = p.entryPrice - p.entryPrice*s.cfg.BreakevenBuf
-		}
-		// Extended timeout: 60min even with profit (prevent stale positions)
-		if held >= s.cfg.RangeProfitTimeout {
-			s.log.Info("RANGE TIMEOUT (profitable but stale)", zap.String("side", p.side),
-				zap.Float64("pnl_pct", pnlPct*100), zap.Duration("held", held))
-			s.closePos(ctx, p, pptr, "timeout_profit")
-			s.consecLoss = 0
-			return
-		}
-		return
-	}
-	// Floating loss: NO timeout — let SL do its job.
-	// Premature timeout in oscillation causes random-price exits worse than SL.
-
-	// Sideways → timeout at 30min
-	if held >= s.cfg.RangeFlatTimeout {
-		s.log.Info("RANGE TIMEOUT (sideways)", zap.String("side", p.side),
-			zap.Float64("pnl_pct", pnlPct*100), zap.Duration("held", held))
-		s.closePos(ctx, p, pptr, "timeout_flat")
+	if !p.filledAt.IsZero() && held >= 4*time.Hour {
+		s.log.Info("AI: Range safety timeout (4h)",
+			zap.String("side", p.side), zap.Duration("held", held))
+		s.closePos(ctx, p, pptr, "timeout_safety")
 		return
 	}
 

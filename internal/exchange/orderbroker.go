@@ -100,3 +100,12 @@ type OrderClient interface {
 	// GetBalance returns the free balance for a given asset (e.g. "USDT", "BTC").
 	GetBalance(ctx context.Context, asset string) (float64, error)
 }
+
+// UserDataSubscriber subscribes to real-time order/account/position updates from the exchange.
+// Implemented by futures/swap brokers that support User Data Streams.
+type UserDataSubscriber interface {
+	SubscribeUserData(ctx context.Context,
+		handler func(fill OrderFill, clientOrderID string, status string),
+		accountHandler func(walletBalance float64, crossUnPnl float64),
+		positionHandler func(symbol, side string, qty, entryPrice float64))
+}

@@ -258,7 +258,6 @@ func (b *Broker) placeLimitOrderAsync(ctx context.Context, ordID string, req str
 		b.omsInst.Reject(ordID, err.Error()) //nolint:errcheck
 		return ""
 	}
-	b.omsInst.Accept(ordID) //nolint:errcheck
 
 	clientOrderID := ""
 	if ord := b.omsInst.Get(ordID); ord != nil {
@@ -283,6 +282,7 @@ func (b *Broker) placeLimitOrderAsync(ctx context.Context, ordID string, req str
 		b.log.Error("exchange limit order failed", zap.String("order_id", ordID), zap.Error(err))
 		return ""
 	}
+	b.omsInst.Accept(ordID) //nolint:errcheck
 	if exchangeID != "" {
 		if err := b.omsInst.SetExchangeID(ordID, exchangeID); err != nil {
 			b.log.Warn("SetExchangeID failed", zap.String("order_id", ordID), zap.Error(err))

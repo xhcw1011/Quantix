@@ -64,11 +64,11 @@ func (e *Engine) recoverFromDB(ctx context.Context, symbol string) bool {
 		}
 
 		if ord.ExchangeID == "" {
-			// Never reached exchange — treat as rejected
-			e.log.Warn("DB recovery: PENDING order never reached exchange, marking rejected",
+			// Never reached exchange — skip restoring to OMS entirely.
+			// Previously we Restore+Reject, but if DB status was OPEN (not PENDING),
+			// the OMS state machine rejects the transition and the order stays OPEN → blocks new orders.
+			e.log.Warn("DB recovery: PENDING order never reached exchange, skipping",
 				zap.String("order_id", ord.ID), zap.String("db_id", rec.ID))
-			e.omsInst.Restore(ord) //nolint:errcheck
-			e.omsInst.Reject(ord.ID, "recovered: never reached exchange") //nolint:errcheck
 			// Cancel only THIS specific order in the DB (not all active orders).
 			dbCtx, dbCancel := context.WithTimeout(ctx, 10*time.Second)
 			if err := e.cfg.Store.CancelOrderByID(dbCtx, rec.ID); err != nil {

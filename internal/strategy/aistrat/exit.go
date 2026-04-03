@@ -80,45 +80,11 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 	}
 }
 
-// checkBreakevenMove moves the SL to breakeven when price reaches +0.5R.
-// This is the only tick-level action for trend mode; everything else is on the exchange.
+// checkBreakevenMove is disabled — SL stays at original position.
+// Moving SL to breakeven causes premature exits in oscillation (small retrace hits the tighter SL).
+// Staged TP handles profit-taking, original SL handles loss protection.
 func (s *AIStrategy) checkBreakevenMove(ctx *strategy.Context, price float64, p *posState) {
-	if p.breakevenMoved || p.R <= 0 { return }
-
-	pnlR := 0.0
-	if p.side == "LONG" { pnlR = (price - p.entryPrice) / p.R }
-	if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
-
-	if pnlR < s.cfg.BreakevenR { return }
-
-	// Price has reached +0.5R — move SL to breakeven (+0.1% buffer above/below entry)
-	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
-	if !ok { return }
-
-	closeSide := "SELL"
-	posSide := "LONG"
-	if p.side == "SHORT" {
-		closeSide = "BUY"
-		posSide = "SHORT"
-	}
-
-	var newStop float64
-	if p.side == "LONG" {
-		newStop = math.Round((p.entryPrice + p.entryPrice*s.cfg.BreakevenBuf)*100) / 100
-	} else {
-		newStop = math.Round((p.entryPrice - p.entryPrice*s.cfg.BreakevenBuf)*100) / 100
-	}
-
-	if ep.ReplaceSLOrder(s.cfg.Symbol, posSide, closeSide, p.remainQty, newStop) {
-		p.breakevenMoved = true
-		p.stopLoss = newStop
-		s.log.Info("AI: SL moved to breakeven at +0.5R",
-			zap.String("side", p.side),
-			zap.Float64("price", price),
-			zap.Float64("new_stop", newStop),
-			zap.Float64("pnl_r", pnlR),
-		)
-	}
+	// No-op: let SL stay where it was placed.
 }
 
 // ─── Close Helpers ───────────────────────────────────────────────────────────

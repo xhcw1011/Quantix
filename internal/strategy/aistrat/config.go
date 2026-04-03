@@ -64,9 +64,7 @@ func init() {
 		if v, ok := params["RangeLockOffset"]; ok { cfg.RangeLockOffset = toFloat(v) }
 		if v, ok := params["RangeTrailPct"]; ok { cfg.RangeTrailPct = toFloat(v) }
 		if v, ok := params["RangeTrailDist"]; ok { cfg.RangeTrailDist = toFloat(v) }
-		if v, ok := params["RangeProfitTimeout"]; ok { cfg.RangeProfitTimeout = time.Duration(toFloat(v)) * time.Minute }
-		if v, ok := params["RangeLossTimeout"]; ok { cfg.RangeLossTimeout = time.Duration(toFloat(v)) * time.Minute }
-		if v, ok := params["RangeFlatTimeout"]; ok { cfg.RangeFlatTimeout = time.Duration(toFloat(v)) * time.Minute }
+		// Timeout configs removed — SL/trailing handle exits, timeouts cause random-price closes.
 		if v, ok := params["BBWidthMin"]; ok { cfg.BBWidthMin = toFloat(v) }
 		if v, ok := params["BBWidthMax"]; ok { cfg.BBWidthMax = toFloat(v) }
 		if v, ok := params["RangeEMAConv"]; ok { cfg.RangeEMAConv = toFloat(v) }
@@ -174,9 +172,6 @@ type Config struct {
 	RangeLockOffset    float64       // profit lock offset % (default 0.003)
 	RangeTrailPct      float64       // PnL % to start trailing (default 0.008)
 	RangeTrailDist     float64       // trailing distance % (default 0.003)
-	RangeProfitTimeout time.Duration // timeout for profitable range pos (default 60m)
-	RangeLossTimeout   time.Duration // timeout for losing range pos (default 20m)
-	RangeFlatTimeout   time.Duration // timeout for flat range pos (default 30m)
 	BBWidthMin         float64       // min BB width for range TP (default 0.006)
 	BBWidthMax         float64       // max BB width for range TP (default 0.015)
 	RangeEMAConv       float64       // EMA convergence threshold for regime detection (default 0.003)
@@ -236,7 +231,6 @@ func DefaultConfig() Config {
 		ReversalConf: 0.72, MarketEntryConf: 0.90,
 		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
-		RangeProfitTimeout: 60 * time.Minute, RangeLossTimeout: 20 * time.Minute, RangeFlatTimeout: 30 * time.Minute,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
 		MTFStrongTrend: 0.01, MTFWeakTrend: 0.002,
 		MTFBullRSI: 60, MTFBearRSI: 40, MTF1mThreshold: 0.001,

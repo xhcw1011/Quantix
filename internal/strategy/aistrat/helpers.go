@@ -86,6 +86,11 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		}
 		if s.longPos.initQty == 0 { s.longPos.initQty = lp.Qty }
 		if s.longPos.R == 0 { s.longPos.R = math.Abs(entry - sl) }
+		// Cap R by current ATR×2 — prevents stale R from inflating staged TP distances
+		if atr > 0 && s.longPos.R > atr*2 {
+			s.longPos.R = atr * 1.5
+			s.log.Info("AI: capped recovered LONG R to ATR×1.5", zap.Float64("R", s.longPos.R), zap.Float64("atr", atr))
+		}
 		if s.longPos.peakPrice == 0 { s.longPos.peakPrice = currentPrice }
 		if s.longPos.trailing == 0 { s.longPos.trailing = sl }
 		if lp.Mode == "trend" { s.longPos.mode = modeTrend }
@@ -93,7 +98,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 
 		s.log.Info("AI: recovered LONG from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", lp.Qty),
-			zap.Float64("stop", sl))
+			zap.Float64("stop", sl), zap.Float64("R", s.longPos.R))
 	}
 
 	// Recover SHORT
@@ -120,6 +125,10 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		}
 		if s.shortPos.initQty == 0 { s.shortPos.initQty = sp.Qty }
 		if s.shortPos.R == 0 { s.shortPos.R = math.Abs(entry - sl) }
+		if atr > 0 && s.shortPos.R > atr*2 {
+			s.shortPos.R = atr * 1.5
+			s.log.Info("AI: capped recovered SHORT R to ATR×1.5", zap.Float64("R", s.shortPos.R), zap.Float64("atr", atr))
+		}
 		if s.shortPos.peakPrice == 0 { s.shortPos.peakPrice = currentPrice }
 		if s.shortPos.trailing == 0 { s.shortPos.trailing = sl }
 		if sp.Mode == "trend" { s.shortPos.mode = modeTrend }
@@ -127,7 +136,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 
 		s.log.Info("AI: recovered SHORT from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", sp.Qty),
-			zap.Float64("stop", sl))
+			zap.Float64("stop", sl), zap.Float64("R", s.shortPos.R))
 	}
 }
 

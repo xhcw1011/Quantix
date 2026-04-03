@@ -68,7 +68,8 @@ type Engine struct {
 	startTime   time.Time
 	dbWg        sync.WaitGroup // tracks in-flight DB write goroutines for clean shutdown
 
-	// Exchange equity cache (for futures — avoids self-calculating with margin)
+	// Exchange interfaces (for futures — margin query and equity cache)
+	marginQuerier   exchange.MarginQuerier
 	equityQuerier   exchange.EquityQuerier
 	lastEquityQuery time.Time
 	cachedEquityBits atomic.Uint64 // float64 stored as bits for lock-free access
@@ -111,7 +112,9 @@ func NewEngine(
 	// (OKX SWAP and Binance USDM Futures implement exchange.MarginQuerier).
 	// Threshold/interval values come from EngineConfig; zero values use package defaults.
 	var mm *MarginMonitor
-	if mq, ok := orderClient.(exchange.MarginQuerier); ok {
+	var mq exchange.MarginQuerier
+	if mqImpl, ok := orderClient.(exchange.MarginQuerier); ok {
+		mq = mqImpl
 		mm = NewMarginMonitor(cfg.StrategyID, mq, notif, log,
 			cfg.MarginCheckInterval,
 			cfg.MarginWarnThreshold,
@@ -142,6 +145,7 @@ func NewEngine(
 		metrics:       tm,
 		notifier:      notif,
 		marginMon:     mm,
+		marginQuerier: mq,
 		equityQuerier: eq,
 		tickCh:        make(chan float64, 64),
 		log:           log,
@@ -252,12 +256,8 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	}
 
 	// Start User Data Stream for real-time fill + account + position updates.
-	type accountUpdateHandler = func(walletBalance float64, crossUnPnl float64)
-	type positionUpdateHandler = func(symbol, side string, qty, entryPrice float64)
-	type userDataSubscriber interface {
-		SubscribeUserData(ctx context.Context, handler func(fill exchange.OrderFill, clientOrderID string, status string), accountHandler accountUpdateHandler, positionHandler positionUpdateHandler)
-	}
-	if uds, ok := e.broker.orderClient.(userDataSubscriber); ok {
+	if uds, ok := e.broker.orderClient.(exchange.UserDataSubscriber); ok {
+		e.log.Info("user data stream: starting subscription")
 		onAccountUpdate := func(walletBalance, crossUnPnl float64) {
 			equity := walletBalance + crossUnPnl
 			e.cachedEquityBits.Store(math.Float64bits(equity))
@@ -274,17 +274,27 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			}
 		}
 		go uds.SubscribeUserData(ctx, func(fill exchange.OrderFill, clientOrderID, status string) {
+			// Sync position state on ANY order event (fill, cancel, new) — not just fills.
+			// This catches manual opens, manual closes, manual cancels, SL/TP triggers.
 			if status != "FILLED" && status != "PARTIALLY_FILLED" {
+				// Non-fill event (NEW, CANCELED, EXPIRED) — trigger position sync to stay in sync.
+				if e.posSyncer != nil && e.marginQuerier != nil {
+					e.log.Info("user data stream: order event → syncing position",
+						zap.String("status", status), zap.String("exchange_id", fill.ExchangeID))
+					go e.posSyncer.SyncFromExchange(context.Background(), e.marginQuerier)
+				}
 				return
 			}
 			ord := e.omsInst.FindByClientOrderID(clientOrderID)
 			if ord == nil {
-				// Staged TP/SL orders bypass OMS — clientOrderID won't match.
-				// This is expected; these fills are detected by pollOrderUntilFilled
-				// for limit orders, or by exchange position sync for algo orders.
-				if clientOrderID != "" {
-					e.log.Debug("user data stream: unmatched clientOrderID",
-						zap.String("client_order_id", clientOrderID))
+				// Unmatched fill — staged TP/SL, manual close, or external trade.
+				e.log.Info("user data stream: unmatched fill → triggering position sync",
+					zap.String("exchange_id", fill.ExchangeID),
+					zap.Float64("qty", fill.FilledQty),
+					zap.Float64("price", fill.AvgPrice),
+					zap.String("status", status))
+				if e.posSyncer != nil && e.marginQuerier != nil {
+					go e.posSyncer.SyncFromExchange(context.Background(), e.marginQuerier)
 				}
 				return
 			}

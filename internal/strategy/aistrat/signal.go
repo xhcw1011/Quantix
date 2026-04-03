@@ -108,6 +108,14 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 
+	// Auto-place staged TP for recovered Trend positions that don't have them yet.
+	if s.longPos != nil && s.longPos.filled && s.longPos.mode == modeTrend && !s.longPos.stagedTPPlaced {
+		s.placeStagedExitOrders(ctx, s.longPos)
+	}
+	if s.shortPos != nil && s.shortPos.filled && s.shortPos.mode == modeTrend && !s.shortPos.stagedTPPlaced {
+		s.placeStagedExitOrders(ctx, s.shortPos)
+	}
+
 	// Manage positions on primary bar too
 	if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
 	if s.shortPos != nil { s.managePos(ctx, bar, s.shortPos, &s.shortPos) }
@@ -119,10 +127,18 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Don't open new positions on the same bar as a stop-loss
 	if s.stopBar == s.barCount { return }
 
-	// GPT signal check (every N primary bars)
+	// Force immediate GPT check if a position was closed externally (SL hit, manual close).
+	// This allows the strategy to react quickly to direction changes.
+	forceCheck := false
+	if s.syncer != nil && s.syncer.PositionClosedExternally.CompareAndSwap(true, false) {
+		forceCheck = true
+		s.log.Info("AI: position closed externally — forcing immediate signal check")
+	}
+
+	// GPT signal check (every N primary bars, or immediately if forced)
 	interval := s.cfg.CallIntervalBars
 	if interval < 1 { interval = 1 }
-	if s.barCount-s.lastCallBar < interval { return }
+	if !forceCheck && s.barCount-s.lastCallBar < interval { return }
 
 	atr := s.calcATR()
 	if price > 0 && atr/price > 0.05 {

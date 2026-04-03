@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -29,6 +30,10 @@ type Syncer struct {
 	userID   int
 	engineID string
 	symbol   string
+
+	// PositionClosedExternally is set when SyncFromExchange detects a position was closed
+	// on the exchange (SL hit, manual close, etc.). Strategy reads and clears this flag.
+	PositionClosedExternally atomic.Bool
 }
 
 // SyncerConfig holds dependencies for creating a Syncer.
@@ -90,6 +95,12 @@ func (s *Syncer) loadFromRedis(ctx context.Context) {
 		s.log.Info("syncer: loaded from Redis",
 			zap.Bool("long", s.long != nil), zap.Bool("short", s.short != nil))
 	}
+}
+
+// SyncFromExchange re-queries exchange positions and updates local state.
+// Called when an unmatched fill is detected (manual close, external trade, etc.)
+func (s *Syncer) SyncFromExchange(ctx context.Context, querier exchange.MarginQuerier) {
+	s.loadFromExchange(ctx, querier)
 }
 
 func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQuerier) {
@@ -175,20 +186,33 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 		}
 	}
 
-	// Check for phantom positions (we think we have it but exchange doesn't)
+	// Check for phantom positions (we think we have it but exchange doesn't).
+	// Only clear if the exchange query returned at least one result (proving the API worked).
+	// If the API returned zero results, it might be a transient error — keep Redis data.
+	hasAnyExchangeData := exchangeLong || exchangeShort || len(ratios) > 0
 	s.mu.Lock()
 	if s.long != nil && !exchangeLong {
-		s.log.Warn("syncer: phantom LONG — exchange has no position, clearing")
-		s.long = nil
-		if s.redis != nil {
-			s.redis.DeletePosition(ctx, s.symbol, "LONG")
+		if hasAnyExchangeData {
+			s.log.Warn("syncer: phantom LONG — exchange has no position, clearing")
+			s.long = nil
+			s.PositionClosedExternally.Store(true)
+			if s.redis != nil {
+				s.redis.DeletePosition(ctx, s.symbol, "LONG")
+			}
+		} else {
+			s.log.Warn("syncer: LONG in Redis but exchange returned empty — keeping (may be API lag)")
 		}
 	}
 	if s.short != nil && !exchangeShort {
-		s.log.Warn("syncer: phantom SHORT — exchange has no position, clearing")
-		s.short = nil
-		if s.redis != nil {
-			s.redis.DeletePosition(ctx, s.symbol, "SHORT")
+		if hasAnyExchangeData {
+			s.log.Warn("syncer: phantom SHORT — exchange has no position, clearing")
+			s.short = nil
+			s.PositionClosedExternally.Store(true)
+			if s.redis != nil {
+				s.redis.DeletePosition(ctx, s.symbol, "SHORT")
+			}
+		} else {
+			s.log.Warn("syncer: SHORT in Redis but exchange returned empty — keeping (may be API lag)")
 		}
 	}
 	s.mu.Unlock()
