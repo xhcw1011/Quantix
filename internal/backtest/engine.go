@@ -58,6 +58,11 @@ func New(cfg Config, store *data.Store, strat strategy.Strategy, log *zap.Logger
 	}
 }
 
+// SetExtra sets additional strategy context dependencies (e.g. Redis for signal replay).
+func (e *Engine) SetExtra(key string, val any) {
+	e.stratCtx.Extra[key] = val
+}
+
 // Run executes the backtest and returns a performance report.
 func (e *Engine) Run(ctx context.Context) (Report, error) {
 	klines, err := e.loadKlines(ctx)

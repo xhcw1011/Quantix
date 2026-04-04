@@ -591,11 +591,15 @@ func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill e
 			}
 
 			fill := exchange.OrderFill{
-				ExchangeID: strconv.FormatInt(o.ID, 10),
-				FilledQty:  qty,
-				AvgPrice:   avgPrice,
-				Fee:        commission,
-				Status:     string(o.Status),
+				ExchangeID:   strconv.FormatInt(o.ID, 10),
+				FilledQty:    qty,
+				AvgPrice:     avgPrice,
+				Fee:          commission,
+				Status:       string(o.Status),
+				Symbol:       o.Symbol,
+				Side:         string(o.Side),
+				PositionSide: string(o.PositionSide),
+				IsReduceOnly: o.IsReduceOnly,
 			}
 
 			handler(fill, o.ClientOrderID, string(o.Status))

@@ -31,9 +31,19 @@ type posState struct {
 	// Staged TP (trend mode): exchange-native limit orders
 	stagedTPPlaced bool // true once SL + TP orders are on the exchange
 	breakevenMoved bool // true once SL has been moved to breakeven at +0.5R
+	stagedTPs      []stagedTPRecord // tracks each TP level for dynamic adjustment
 
 	// Grid orders (range mode only)
 	gridOrders []*gridOrder
+}
+
+// stagedTPRecord tracks a single TP level for dynamic adjustment and Redis persistence.
+type stagedTPRecord struct {
+	Level      int     `json:"level"`
+	Price      float64 `json:"price"`
+	Qty        float64 `json:"qty"`
+	ExchangeID string  `json:"exchange_id"`
+	Status     string  `json:"status"` // "pending" or "filled"
 }
 
 type gridOrder struct {

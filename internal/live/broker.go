@@ -160,8 +160,6 @@ func (b *Broker) placeMarketOrder(ctx context.Context, ordID string, req strateg
 		return ""
 	}
 
-	b.omsInst.Accept(ordID) //nolint:errcheck
-
 	clientOrderID := ""
 	if ord := b.omsInst.Get(ordID); ord != nil {
 		clientOrderID = ord.ClientOrderID
@@ -186,6 +184,8 @@ func (b *Broker) placeMarketOrder(ctx context.Context, ordID string, req strateg
 			zap.String("order_id", ordID), zap.Error(err))
 		return ""
 	}
+
+	b.omsInst.Accept(ordID) //nolint:errcheck
 
 	if fill.ExchangeID != "" {
 		if err := b.omsInst.SetExchangeID(ordID, fill.ExchangeID); err != nil {
@@ -311,8 +311,6 @@ func (b *Broker) placeStopOrderAsync(ctx context.Context, ordID string, req stra
 		b.omsInst.Reject(ordID, err.Error()) //nolint:errcheck
 		return ""
 	}
-	b.omsInst.Accept(ordID) //nolint:errcheck
-
 	clientOrderID := ""
 	if ord := b.omsInst.Get(ordID); ord != nil {
 		clientOrderID = ord.ClientOrderID
@@ -324,6 +322,7 @@ func (b *Broker) placeStopOrderAsync(ctx context.Context, ordID string, req stra
 		b.log.Error("exchange stop order failed", zap.String("order_id", ordID), zap.Error(err))
 		return ""
 	}
+	b.omsInst.Accept(ordID) //nolint:errcheck
 	if exchangeID != "" {
 		if err := b.omsInst.SetExchangeID(ordID, exchangeID); err != nil {
 			b.log.Warn("SetExchangeID failed", zap.String("order_id", ordID), zap.Error(err))

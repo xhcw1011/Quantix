@@ -186,8 +186,10 @@ func (s *AIStrategy) callGPT(mc mktCtx) (gptSignal, error) {
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 { return gptSignal{}, fmt.Errorf("GPT %d: %s", resp.StatusCode, string(rb)) }
 	var gr struct{ Choices []struct{ Message struct{ Content string `json:"content"` } `json:"message"` } `json:"choices"` }
-	json.Unmarshal(rb, &gr)
-	if len(gr.Choices) == 0 { return gptSignal{}, fmt.Errorf("no choices") }
+	if err := json.Unmarshal(rb, &gr); err != nil {
+		return gptSignal{}, fmt.Errorf("GPT response parse: %w (body: %.200s)", err, string(rb))
+	}
+	if len(gr.Choices) == 0 { return gptSignal{}, fmt.Errorf("no choices (body: %.200s)", string(rb)) }
 
 	content := strings.TrimSpace(gr.Choices[0].Message.Content)
 	if content == "" { return gptSignal{}, fmt.Errorf("empty GPT response") }
@@ -243,4 +245,50 @@ func (s *AIStrategy) cacheSignal(bar exchange.Kline, sig gptSignal) {
 	if err := s.rdb.RPush(context.Background(), key, string(data)).Err(); err != nil {
 		s.log.Warn("AI: signal cache failed", zap.Error(err))
 	}
+}
+
+// hasCachedSignals checks if Redis has cached GPT signals for backtest replay.
+func (s *AIStrategy) hasCachedSignals() bool {
+	if s.rdb == nil { return false }
+	key := fmt.Sprintf("quantix:signals:%s:%s", s.cfg.Symbol, s.cfg.PrimaryInterval)
+	n, err := s.rdb.LLen(context.Background(), key).Result()
+	return err == nil && n > 0
+}
+
+// loadReplaySignals loads all cached signals from Redis into memory for backtest replay.
+func (s *AIStrategy) loadReplaySignals() {
+	if s.rdb == nil { return }
+	key := fmt.Sprintf("quantix:signals:%s:%s", s.cfg.Symbol, s.cfg.PrimaryInterval)
+	items, err := s.rdb.LRange(context.Background(), key, 0, -1).Result()
+	if err != nil {
+		s.log.Warn("AI: failed to load replay signals", zap.Error(err))
+		return
+	}
+	for _, item := range items {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(item), &raw); err != nil { continue }
+		sig := gptSignal{}
+		if lc, ok := raw["long_conf"].(float64); ok && lc > 0 {
+			le, _ := raw["long_entry"].(float64)
+			lr, _ := raw["long_reason"].(string)
+			sig.Long = &subSignal{Confidence: lc, EntryPrice: le, Reasoning: lr}
+		}
+		if sc, ok := raw["short_conf"].(float64); ok && sc > 0 {
+			se, _ := raw["short_entry"].(float64)
+			sr, _ := raw["short_reason"].(string)
+			sig.Short = &subSignal{Confidence: sc, EntryPrice: se, Reasoning: sr}
+		}
+		s.replaySignals = append(s.replaySignals, sig)
+	}
+	s.log.Info("AI: loaded replay signals", zap.Int("count", len(s.replaySignals)))
+}
+
+// nextReplaySignal returns the next cached signal for backtest replay.
+func (s *AIStrategy) nextReplaySignal() (gptSignal, error) {
+	if s.replayIdx >= len(s.replaySignals) {
+		return gptSignal{}, fmt.Errorf("no more replay signals (%d/%d)", s.replayIdx, len(s.replaySignals))
+	}
+	sig := s.replaySignals[s.replayIdx]
+	s.replayIdx++
+	return sig, nil
 }

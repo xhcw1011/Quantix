@@ -55,6 +55,8 @@ type AIStrategy struct {
 	mtfLongScale    float64 // position size multiplier for LONG (0.7-1.0)
 	mtfShortScale   float64 // position size multiplier for SHORT (0.7-1.0)
 	lastHedgeClose  time.Time // when the last hedge position was closed (for cooldown)
+	replaySignals   []gptSignal // cached signals for backtest replay
+	replayIdx       int         // current index into replaySignals
 }
 
 func New(cfg Config, log *zap.Logger) *AIStrategy {
@@ -114,13 +116,21 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 				}
 			}
 			tpDist := fill.Price * tpPct
-			slDist := fill.Price * s.cfg.RangeSLPct
+			// Cap TP same as openRange
+			atr := s.calcATR()
+			if atrTP := atr * 1.0; atrTP > 0 && atrTP < tpDist { tpDist = atrTP }
+			if maxTP := fill.Price * 0.008; maxTP > 0 && maxTP < tpDist { tpDist = maxTP }
+			// SL = TP × 1.5 (same as openRange)
+			// Floor: MinSLDistPct prevents noise stop-outs; Cap: RangeSLPct as safety limit.
+			slDist := tpDist * 1.5
+			if minSL := fill.Price * s.cfg.MinSLDistPct; slDist < minSL { slDist = minSL }
+			if maxSL := fill.Price * s.cfg.RangeSLPct; slDist > maxSL { slDist = maxSL }
 			if pos.side == "LONG" {
-				pos.takeProfit = fill.Price + tpDist
-				pos.stopLoss = fill.Price - slDist
+				pos.takeProfit = math.Round((fill.Price+tpDist)*100) / 100
+				pos.stopLoss = math.Round((fill.Price-slDist)*100) / 100
 			} else {
-				pos.takeProfit = fill.Price - tpDist
-				pos.stopLoss = fill.Price + slDist
+				pos.takeProfit = math.Round((fill.Price-tpDist)*100) / 100
+				pos.stopLoss = math.Round((fill.Price+slDist)*100) / 100
 			}
 		}
 	}
@@ -128,9 +138,24 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 		zap.String("side", pos.side), zap.Float64("fill", fill.Price),
 		zap.Float64("stop", pos.stopLoss), zap.Float64("tp", pos.takeProfit))
 
-	// Trend mode: place staged TP orders on exchange immediately after fill.
+	// Persist updated TP/SL to Redis so recovery uses correct values.
+	s.syncToRedis(pos)
+
+	// Trend mode: place staged TP orders on exchange (no exchange SL — local trailing handles exit).
 	if pos.mode == modeTrend && !pos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, pos)
+	}
+
+	// Range mode: place exchange SL (contrarian positions need exchange protection).
+	if pos.mode == modeRange {
+		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+			closeSide := "SELL"
+			posSide := "LONG"
+			if pos.side == "SHORT" { closeSide = "BUY"; posSide = "SHORT" }
+			if ep.PlaceExchangeSL(s.cfg.Symbol, posSide, closeSide, pos.remainQty, pos.stopLoss) {
+				pos.stagedTPPlaced = true // reuse flag to prevent duplicate SL in signal.go
+			}
+		}
 	}
 }
 
@@ -147,23 +172,17 @@ func (s *AIStrategy) OnTick(ctx *strategy.Context, price float64) {
 }
 
 func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posState, pptr **posState) {
-	// Trend mode with staged exchange orders: only do +0.5R breakeven SL move.
-	// All TP/SL execution is handled by exchange-native limit/stop orders.
-	if p.mode == modeTrend && p.stagedTPPlaced {
-		s.checkBreakevenMove(ctx, price, p)
+	// Real-time SL check for ALL modes (Trend has no exchange SL).
+	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
+		s.log.Warn("TICK STOP-LOSS", zap.String("side", p.side),
+			zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+		s.closePos(ctx, p, pptr, "stop_loss")
+		s.consecLoss++
+		s.stopBar = s.barCount
 		return
 	}
 
-	// Range mode (or trend without staged orders): keep old tick-level SL check.
-	if p.mode == modeRange {
-		if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
-			s.log.Warn("TICK STOP-LOSS", zap.String("side", p.side),
-				zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
-			s.closePos(ctx, p, pptr, "stop_loss")
-			s.consecLoss++
-			s.stopBar = s.barCount
-		}
-	}
+	// SL already checked above for all modes. Nothing more to do per-tick.
 }
 
 // handleStagedTPFill detects closing fills from staged TP orders and updates remainQty.
@@ -200,12 +219,13 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 		zap.Float64("est_pnl", pnl),
 	)
 
+	// Mark the filled TP level in records
+	s.markTPFilled(pos, fill.Price, fill.Qty)
+
 	// Position fully closed (SL fired or all TPs filled) — cancel remaining orders on exchange.
 	if pos.remainQty <= 0 {
 		s.log.Info("AI: position fully closed by exchange order",
 			zap.String("side", pos.side))
-		// Cancel any remaining protective orders (e.g., SL still active after all TPs filled,
-		// or TP orders still active after SL fired).
 		if s.stagedEP != nil {
 			posSide := "LONG"
 			if pos.side == "SHORT" { posSide = "SHORT" }
@@ -215,7 +235,100 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 		s.syncRemove(pos.side)
 		*pptr = nil
 	} else {
+		// Dynamic TP tightening: if oscillating, move far TPs closer to the fill price.
+		s.maybeTightenTPs(pos, fill.Price)
 		s.syncToRedis(pos)
 	}
 	return true
+}
+
+// markTPFilled marks the closest matching TP level as filled (match by price proximity).
+func (s *AIStrategy) markTPFilled(pos *posState, fillPrice, fillQty float64) {
+	bestIdx := -1
+	bestDist := math.MaxFloat64
+	for i := range pos.stagedTPs {
+		if pos.stagedTPs[i].Status != "pending" { continue }
+		dist := math.Abs(pos.stagedTPs[i].Price - fillPrice)
+		if dist < bestDist {
+			bestDist = dist
+			bestIdx = i
+		}
+	}
+	if bestIdx >= 0 && bestDist < pos.entryPrice*0.005 { // within 0.5% of expected price
+		pos.stagedTPs[bestIdx].Status = "filled"
+		s.log.Info("AI: staged TP level filled",
+			zap.Int("level", pos.stagedTPs[bestIdx].Level),
+			zap.Float64("expected_price", pos.stagedTPs[bestIdx].Price),
+			zap.Float64("fill_price", fillPrice))
+	}
+	s.saveStagedTPsToRedis(pos)
+}
+
+// maybeTightenTPs moves unfilled far TPs closer to the last fill price in oscillation.
+// In trending markets (|MTF| >= 2), TPs are kept to let profits run.
+func (s *AIStrategy) maybeTightenTPs(pos *posState, lastFillPrice float64) {
+	if s.stagedEP == nil { return }
+	if math.Abs(float64(s.lastMTFScore)) >= 2 {
+		s.log.Info("AI: keeping far TPs — trending market", zap.Int("mtf", s.lastMTFScore))
+		return
+	}
+
+	// Count unfilled TPs
+	var unfilled []int
+	for i, tp := range pos.stagedTPs {
+		if tp.Status == "pending" { unfilled = append(unfilled, i) }
+	}
+	if len(unfilled) == 0 { return }
+
+	// Calculate new tighter prices: space them ATR×0.3 apart from the fill price
+	atr := s.calcATR()
+	spacing := atr * 0.3
+	if spacing < 1.0 { spacing = 1.0 } // minimum $1 spacing
+
+	needsReplace := false
+	for j, idx := range unfilled {
+		offset := spacing * float64(j+1)
+		var newPrice float64
+		if pos.side == "LONG" {
+			newPrice = math.Round((lastFillPrice+offset)*100) / 100
+		} else {
+			newPrice = math.Round((lastFillPrice-offset)*100) / 100
+		}
+		old := pos.stagedTPs[idx].Price
+		// Only tighten (move closer to entry), never push further out.
+		// LONG TPs are ABOVE entry — tightening = lowering the price (closer to entry)
+		// SHORT TPs are BELOW entry — tightening = raising the price (closer to entry)
+		if pos.side == "LONG" && newPrice > old { continue }  // new is further out, skip
+		if pos.side == "SHORT" && newPrice < old { continue } // new is further out, skip
+		if math.Abs(newPrice-old) < 0.5 { continue } // negligible change
+		pos.stagedTPs[idx].Price = newPrice
+		needsReplace = true
+	}
+
+	if !needsReplace { return }
+
+	// Cancel all existing TPs and re-place with new prices
+	posSide := "LONG"
+	closeSide := "SELL"
+	if pos.side == "SHORT" {
+		posSide = "SHORT"
+		closeSide = "BUY"
+	}
+	s.stagedEP.CancelAllProtective(s.cfg.Symbol, posSide)
+
+	// Re-place SL + new TPs
+	var tps []strategy.StagedTP
+	for _, tp := range pos.stagedTPs {
+		if tp.Status == "pending" {
+			tps = append(tps, strategy.StagedTP{Price: tp.Price, Qty: tp.Qty})
+		}
+	}
+	if len(tps) > 0 {
+		s.stagedEP.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, pos.stopLoss, pos.remainQty, tps)
+		s.log.Info("AI: tightened staged TPs (oscillation)",
+			zap.String("side", pos.side),
+			zap.Float64("fill_price", lastFillPrice),
+			zap.Any("new_tps", tps))
+	}
+	s.saveStagedTPsToRedis(pos)
 }

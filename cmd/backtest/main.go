@@ -24,6 +24,7 @@ import (
 	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/logger"
 	"github.com/Quantix/quantix/internal/strategy/registry"
+	"github.com/redis/go-redis/v9"
 
 	// Strategy registrations (side-effect imports)
 	_ "github.com/Quantix/quantix/internal/strategy/aistrat"
@@ -65,7 +66,7 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	log, err := logger.New(cfg.App.Env, cfg.App.LogLevel)
+	log, err := logger.New(cfg.App.Env, cfg.App.LogLevel, cfg.App.LogDir)
 	if err != nil {
 		return fmt.Errorf("init logger: %w", err)
 	}
@@ -131,6 +132,17 @@ func run() error {
 	}
 
 	engine := backtest.New(btCfg, store, strat, log)
+
+	// Inject Redis for AI signal replay in backtest
+	if cfg.Redis.Addr != "" {
+		rdb := redis.NewClient(&redis.Options{
+			Addr:     cfg.Redis.Addr,
+			Password: cfg.Redis.Password,
+			DB:       cfg.Redis.DB,
+		})
+		engine.SetExtra("redis_client", rdb)
+		defer rdb.Close()
+	}
 
 	// ── Run ───────────────────────────────────────────────────────────────────
 	log.Info("running backtest",

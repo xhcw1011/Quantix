@@ -167,6 +167,10 @@ func (a *stagedExitAdapter) PlaceStagedTPOrders(symbol, posSide, closeSide strin
 	return a.broker.PlaceStagedTPOrders(a.ctx, symbol, posSide, exchange.OrderSide(closeSide), stopPrice, totalQty, liveTPs)
 }
 
+func (a *stagedExitAdapter) PlaceExchangeSL(symbol, posSide, closeSide string, qty, stopPrice float64) bool {
+	return a.broker.PlaceExchangeSL(a.ctx, symbol, posSide, exchange.OrderSide(closeSide), qty, stopPrice)
+}
+
 func (a *stagedExitAdapter) ReplaceSLOrder(symbol, posSide, closeSide string, remainQty, newStopPrice float64) bool {
 	return a.broker.ReplaceSLOrder(a.ctx, symbol, posSide, exchange.OrderSide(closeSide), remainQty, newStopPrice)
 }
@@ -292,7 +296,15 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 					zap.String("exchange_id", fill.ExchangeID),
 					zap.Float64("qty", fill.FilledQty),
 					zap.Float64("price", fill.AvgPrice),
+					zap.String("side", fill.Side),
+					zap.String("position_side", fill.PositionSide),
+					zap.Bool("reduce_only", fill.IsReduceOnly),
 					zap.String("status", status))
+
+				// Cash accounting for unmatched fills (exchange SL/TP, manual trades).
+				// Without this, margin locked by the position is never returned to cash.
+				e.applyUnmatchedFillCash(fill)
+
 				if e.posSyncer != nil && e.marginQuerier != nil {
 					go e.posSyncer.SyncFromExchange(context.Background(), e.marginQuerier)
 				}
@@ -589,6 +601,83 @@ func (e *Engine) processFills(ctx context.Context) {
 			e.strategy.OnFill(e.stratCtx, event.Fill)
 		}
 	}
+}
+
+// applyUnmatchedFillCash updates cash accounting for fills not tracked by OMS.
+// This covers exchange-native SL/TP (algo orders), manual trades, and external closes.
+// Without this, margin locked by the closed position is never returned to cash.
+func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
+	if fill.FilledQty <= 0 || fill.AvgPrice <= 0 {
+		return
+	}
+	leverage := e.cfg.Leverage
+	if leverage < 1 {
+		leverage = 1
+	}
+	marginRate := 1.0 / float64(leverage)
+	notional := fill.FilledQty * fill.AvgPrice
+	prevCash := e.broker.Cash()
+
+	// Determine if this is a closing fill.
+	// Exchange SL/TP are always reduce-only (closing), and are the primary case.
+	isClosingLong := fill.PositionSide == "LONG" && fill.Side == "SELL"
+	isClosingShort := fill.PositionSide == "SHORT" && fill.Side == "BUY"
+	isOpeningLong := fill.PositionSide == "LONG" && fill.Side == "BUY"
+	isOpeningShort := fill.PositionSide == "SHORT" && fill.Side == "SELL"
+
+	// Estimate realized PnL from position manager.
+	sym := fill.Symbol
+	if sym == "" { sym = "ETHUSDT" } // fallback
+	realized := e.positions.ApplyFill(strategy.Fill{
+		Symbol:       sym,
+		Side:         strategy.Side(fill.Side),
+		PositionSide: strategy.PositionSide(fill.PositionSide),
+		Qty:          fill.FilledQty,
+		Price:        fill.AvgPrice,
+		Fee:          fill.Fee,
+		Timestamp:    time.Now(),
+	})
+
+	e.fillMu.Lock()
+	e.realizedPnL += realized
+	e.total++
+	if realized > 0 {
+		e.wins++
+	}
+	e.fillMu.Unlock()
+
+	switch {
+	case isClosingLong:
+		e.broker.cash.Store(prevCash + notional*marginRate + realized - fill.Fee)
+	case isClosingShort:
+		e.broker.cash.Store(prevCash + notional*marginRate + realized - fill.Fee)
+	case isOpeningLong:
+		e.broker.cash.Store(prevCash - notional*marginRate - fill.Fee)
+	case isOpeningShort:
+		e.broker.cash.Store(prevCash - notional*marginRate - fill.Fee)
+	default:
+		// One-way mode or unknown — use side heuristic
+		if fill.Side == "SELL" {
+			e.broker.cash.Store(prevCash + notional - fill.Fee)
+		} else {
+			e.broker.cash.Store(prevCash - notional - fill.Fee)
+		}
+	}
+
+	prices := map[string]float64{sym: fill.AvgPrice}
+	unrealizedPnL := e.positions.TotalUnrealizedPnL(prices)
+	equity := e.broker.Cash() + unrealizedPnL
+	e.broker.equity.Store(equity)
+
+	e.log.Info("unmatched fill: cash updated",
+		zap.String("side", fill.Side),
+		zap.String("position_side", fill.PositionSide),
+		zap.Float64("qty", fill.FilledQty),
+		zap.Float64("price", fill.AvgPrice),
+		zap.Float64("realized", realized),
+		zap.Float64("cash", e.broker.Cash()),
+		zap.Float64("equity", equity),
+	)
 }
 
 // ─── livePortfolioView ────────────────────────────────────────────────────────

@@ -29,10 +29,22 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		s.barsByInterval[iv] = s.barsByInterval[iv][len(s.barsByInterval[iv])-maxBuf:]
 	}
 
+	// ── Early Redis init (needed before warmup for backtest replay detection) ──
+	if s.rdb == nil {
+		if v, ok := ctx.Extra["redis_client"]; ok {
+			if rc, ok := v.(*redis.Client); ok { s.rdb = rc }
+		}
+	}
+	// Pre-load replay signals once (before warmup check)
+	if s.rdb != nil && len(s.replaySignals) == 0 && s.hasCachedSignals() {
+		s.loadReplaySignals()
+	}
+
 	// ── Warmup: need enough primary-interval bars ──
 	primaryBars := s.barsByInterval[s.cfg.PrimaryInterval]
+	isReplay := len(s.replaySignals) > 0 // backtest replay mode
 	if !s.warmedUp {
-		if len(primaryBars) >= s.cfg.LookbackBars && time.Since(bar.CloseTime) < 10*time.Minute {
+		if len(primaryBars) >= s.cfg.LookbackBars && (isReplay || time.Since(bar.CloseTime) < 10*time.Minute) {
 			s.warmedUp = true
 			s.dayStart = time.Now()
 			if pf := ctx.Portfolio; pf != nil {
@@ -71,7 +83,8 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	price := bar.Close
 
 	// ── Skip stale bars for position management (prevent false stop-loss on backfill) ──
-	if time.Since(bar.CloseTime) > 2*time.Minute {
+	// Exception: backtest replay mode processes all bars.
+	if len(s.replaySignals) == 0 && time.Since(bar.CloseTime) > 2*time.Minute {
 		return
 	}
 
@@ -84,11 +97,15 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	// ── Primary interval bars: full logic below ──
 	s.barCount++
-	// Skip GPT calls on stale backfill bars; wait for first real-time bar
+	// Skip GPT calls on stale backfill bars; wait for first real-time bar.
+	// Exception: backtest replay mode uses cached signals.
 	if !s.liveReady {
 		if time.Since(bar.CloseTime) < 2*time.Minute {
 			s.liveReady = true
 			s.log.Info("AI: live ready — first real-time bar")
+		} else if len(s.replaySignals) > 0 {
+			s.liveReady = true
+			s.log.Info("AI: backtest replay mode — using cached signals", zap.Int("signals", len(s.replaySignals)))
 		} else {
 			return
 		}
@@ -108,12 +125,30 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 
-	// Auto-place staged TP for recovered Trend positions that don't have them yet.
+	// Auto-place exchange orders for recovered positions (runs once per position).
+	// Trend: staged TP limit orders (no exchange SL).
+	// Range: exchange algo SL (no staged TP).
 	if s.longPos != nil && s.longPos.filled && s.longPos.mode == modeTrend && !s.longPos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, s.longPos)
 	}
 	if s.shortPos != nil && s.shortPos.filled && s.shortPos.mode == modeTrend && !s.shortPos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, s.shortPos)
+	}
+	// Range exchange SL: use stagedTPPlaced as flag to prevent duplicate SL placement.
+	// Reusing the flag is OK because Range never has staged TP (only exchange SL).
+	if s.longPos != nil && s.longPos.filled && s.longPos.mode == modeRange && !s.longPos.stagedTPPlaced {
+		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+			if ep.PlaceExchangeSL(s.cfg.Symbol, "LONG", "SELL", s.longPos.remainQty, s.longPos.stopLoss) {
+				s.longPos.stagedTPPlaced = true // reuse flag to prevent re-placement
+			}
+		}
+	}
+	if s.shortPos != nil && s.shortPos.filled && s.shortPos.mode == modeRange && !s.shortPos.stagedTPPlaced {
+		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+			if ep.PlaceExchangeSL(s.cfg.Symbol, "SHORT", "BUY", s.shortPos.remainQty, s.shortPos.stopLoss) {
+				s.shortPos.stagedTPPlaced = true
+			}
+		}
 	}
 
 	// Manage positions on primary bar too
@@ -151,21 +186,33 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		return
 	}
 
-	mktCtx := s.buildContext(ctx, bar)
-	signal, err := s.callGPT(mktCtx)
-	if err != nil {
-		// Retry once on transient failure (empty response, EOF, timeout)
-		time.Sleep(500 * time.Millisecond)
-		signal, err = s.callGPT(mktCtx)
+	var signal gptSignal
+	var err error
+	if len(s.replaySignals) > 0 {
+		// Backtest replay: use cached signal
+		signal, err = s.nextReplaySignal()
 		if err != nil {
-			s.log.Warn("AI: GPT failed (after retry)", zap.Error(err))
 			s.lastCallBar = s.barCount
 			return
 		}
+	} else {
+		// Live mode: call GPT
+		mktCtx := s.buildContext(ctx, bar)
+		signal, err = s.callGPT(mktCtx)
+		if err != nil {
+			// Retry once on transient failure (empty response, EOF, timeout)
+			time.Sleep(500 * time.Millisecond)
+			signal, err = s.callGPT(mktCtx)
+			if err != nil {
+				s.log.Warn("AI: GPT failed (after retry)", zap.Error(err))
+				s.lastCallBar = s.barCount
+				return
+			}
+		}
+		s.cacheSignal(bar, signal)
 	}
 	s.lastCallBar = s.barCount
 	s.totalCall++
-	s.cacheSignal(bar, signal)
 
 	// Log both signals
 	longConf, shortConf := 0.0, 0.0
@@ -288,34 +335,44 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 
-	// Apply score: only block on extreme disagreement (±3/±4).
-	// Otherwise adjust position size via mtfQtyScale.
+	// Apply MTF score differently based on regime:
+	// TREND: follow momentum (negative MTF = headwind for LONG)
+	// RANGE: mean-reversion (negative MTF = buy opportunity at support)
 	longQtyScale, shortQtyScale := 1.0, 1.0
 
-	// For LONG: negative score = headwind
-	switch {
-	case mtfScore <= -3:
-		if longConf > 0 {
-			s.log.Info("AI: BUY blocked — MTF strongly bearish", zap.Int("score", mtfScore))
-			longConf = 0
+	if isRange {
+		// ── Range: CONTRARIAN logic ──
+		// MTF bearish at support → LONG opportunity (mean reversion)
+		// MTF bullish at resistance → SHORT opportunity (mean reversion)
+		// No blocking — in Range, both directions are valid at extremes.
+		s.log.Info("AI: Range mode — contrarian MTF", zap.Int("mtf", mtfScore))
+	} else {
+		// ── Trend: MOMENTUM logic ──
+		// For LONG: negative score = headwind
+		switch {
+		case mtfScore <= -3:
+			if longConf > 0 {
+				s.log.Info("AI: BUY blocked — MTF strongly bearish", zap.Int("score", mtfScore))
+				longConf = 0
+			}
+		case mtfScore == -2:
+			longQtyScale = s.cfg.MTFQtyScaleHard
+		case mtfScore == -1:
+			longQtyScale = s.cfg.MTFQtyScaleSoft
 		}
-	case mtfScore == -2:
-		longQtyScale = s.cfg.MTFQtyScaleHard
-	case mtfScore == -1:
-		longQtyScale = s.cfg.MTFQtyScaleSoft
-	}
 
-	// For SHORT: positive score = headwind
-	switch {
-	case mtfScore >= 3:
-		if shortConf > 0 {
-			s.log.Info("AI: SELL blocked — MTF strongly bullish", zap.Int("score", mtfScore))
-			shortConf = 0
+		// For SHORT: positive score = headwind
+		switch {
+		case mtfScore >= 3:
+			if shortConf > 0 {
+				s.log.Info("AI: SELL blocked — MTF strongly bullish", zap.Int("score", mtfScore))
+				shortConf = 0
+			}
+		case mtfScore == 2:
+			shortQtyScale = s.cfg.MTFQtyScaleHard
+		case mtfScore == 1:
+			shortQtyScale = s.cfg.MTFQtyScaleSoft
 		}
-	case mtfScore == 2:
-		shortQtyScale = s.cfg.MTFQtyScaleHard
-	case mtfScore == 1:
-		shortQtyScale = s.cfg.MTFQtyScaleSoft
 	}
 
 	s.mtfLongScale = longQtyScale
@@ -324,32 +381,63 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// ── Rule-based boost (after MTF scoring, respects MTF direction) ──
 	swLow := s.findSwingLow(10)
 	swHigh := s.findSwingHigh(10)
-	if price > 0 && swLow > 0 && (price-swLow)/price < s.cfg.SwingProximity && longConf >= 0.60 && longConf < s.cfg.ConfidenceThreshold && s.longPos == nil && mtfScore >= -1 {
+	// Swing boost: in Range, MTF direction doesn't matter (contrarian at support/resistance).
+	// In Trend, respect MTF direction.
+	// Range uses lower conf threshold (0.40) because GPT caps counter-trend conf at <0.50.
+	swingLongMTFOk := isRange || mtfScore >= -1
+	swingConfMin := 0.60
+	if isRange { swingConfMin = 0.40 }
+	if price > 0 && swLow > 0 && (price-swLow)/price < s.cfg.SwingProximity && longConf >= swingConfMin && longConf < s.cfg.ConfidenceThreshold && s.longPos == nil && swingLongMTFOk {
 		s.log.Info("AI: boost long — price near swing low",
 			zap.Float64("price", price), zap.Float64("swing_low", swLow), zap.Int("mtf", mtfScore))
 		longConf = s.cfg.ConfidenceThreshold
 		if longEntry <= 0 { longEntry = swLow }
 	}
-	if price > 0 && swHigh > 0 && (swHigh-price)/price < s.cfg.SwingProximity && shortConf >= 0.60 && shortConf < s.cfg.ConfidenceThreshold && s.shortPos == nil && mtfScore <= 1 {
+	swingShortMTFOk := isRange || mtfScore <= 1
+	if price > 0 && swHigh > 0 && (swHigh-price)/price < s.cfg.SwingProximity && shortConf >= swingConfMin && shortConf < s.cfg.ConfidenceThreshold && s.shortPos == nil && swingShortMTFOk {
 		s.log.Info("AI: boost short — price near swing high",
 			zap.Float64("price", price), zap.Float64("swing_high", swHigh), zap.Int("mtf", mtfScore))
 		shortConf = s.cfg.ConfidenceThreshold
 		if shortEntry <= 0 { shortEntry = swHigh }
 	}
 
-	// ── MTF momentum boost: when MTF strongly agrees with GPT direction but conf just under threshold ──
-	// This handles the "early reversal" case where EMA hasn't crossed yet but price action is shifting.
-	if mtfScore >= 2 && longConf > 0 && longConf >= 0.60 && longConf < s.cfg.ConfidenceThreshold && s.longPos == nil {
-		s.log.Info("AI: MTF momentum boost → LONG",
-			zap.Float64("conf_before", longConf), zap.Int("mtf", mtfScore))
-		longConf = s.cfg.ConfidenceThreshold
-		if longEntry <= 0 { longEntry = price - price*s.cfg.EntryOffsetPct }
-	}
-	if mtfScore <= -2 && shortConf > 0 && shortConf >= 0.60 && shortConf < s.cfg.ConfidenceThreshold && s.shortPos == nil {
-		s.log.Info("AI: MTF momentum boost → SHORT",
-			zap.Float64("conf_before", shortConf), zap.Int("mtf", mtfScore))
-		shortConf = s.cfg.ConfidenceThreshold
-		if shortEntry <= 0 { shortEntry = price + price*s.cfg.EntryOffsetPct }
+	// ── MTF momentum boost ──
+	// Trend: MTF agrees with GPT direction → boost (momentum following)
+	// Range: MTF DISAGREES with GPT direction → boost (mean reversion at extremes)
+	if isRange {
+		// Range contrarian: MTF bearish + price at support → boost LONG
+		// Must be near swing_low (same proximity as swing boost) — don't boost in the middle of range.
+		nearSupport := swLow > 0 && (price-swLow)/price < s.cfg.SwingProximity*2 // 2x wider than swing boost
+		if mtfScore <= -2 && nearSupport && longConf > 0 && longConf >= 0.40 && longConf < s.cfg.ConfidenceThreshold && s.longPos == nil {
+			s.log.Info("AI: Range contrarian boost → LONG (MTF bearish at support)",
+				zap.Float64("conf_before", longConf), zap.Int("mtf", mtfScore),
+				zap.Float64("swing_low", swLow))
+			longConf = s.cfg.ConfidenceThreshold
+			if longEntry <= 0 { longEntry = swLow }
+		}
+		// Range contrarian: MTF bullish + price at resistance → boost SHORT
+		nearResistance := swHigh > 0 && (swHigh-price)/price < s.cfg.SwingProximity*2
+		if mtfScore >= 2 && nearResistance && shortConf > 0 && shortConf >= 0.40 && shortConf < s.cfg.ConfidenceThreshold && s.shortPos == nil {
+			s.log.Info("AI: Range contrarian boost → SHORT (MTF bullish at resistance)",
+				zap.Float64("conf_before", shortConf), zap.Int("mtf", mtfScore),
+				zap.Float64("swing_high", swHigh))
+			shortConf = s.cfg.ConfidenceThreshold
+			if shortEntry <= 0 { shortEntry = swHigh }
+		}
+	} else {
+		// Trend momentum: MTF agrees with GPT → boost
+		if mtfScore >= 2 && longConf > 0 && longConf >= 0.60 && longConf < s.cfg.ConfidenceThreshold && s.longPos == nil {
+			s.log.Info("AI: MTF momentum boost → LONG",
+				zap.Float64("conf_before", longConf), zap.Int("mtf", mtfScore))
+			longConf = s.cfg.ConfidenceThreshold
+			if longEntry <= 0 { longEntry = price - price*s.cfg.EntryOffsetPct }
+		}
+		if mtfScore <= -2 && shortConf > 0 && shortConf >= 0.60 && shortConf < s.cfg.ConfidenceThreshold && s.shortPos == nil {
+			s.log.Info("AI: MTF momentum boost → SHORT",
+				zap.Float64("conf_before", shortConf), zap.Int("mtf", mtfScore))
+			shortConf = s.cfg.ConfidenceThreshold
+			if shortEntry <= 0 { shortEntry = price + price*s.cfg.EntryOffsetPct }
+		}
 	}
 
 	// ── Cancel pending orders if GPT signal reversed ──
@@ -443,14 +531,14 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			if longEntry > 0 && longEntry < entry && (price-longEntry) <= maxDev {
 				entry = longEntry // GPT found a better support level
 			}
-			// High confidence + GPT entry is ABOVE current price (missed the dip) → use market
-			if longConf >= s.cfg.MarketEntryConf && entry >= price {
+			// High confidence → market entry immediately (don't wait for limit fill)
+			if longConf >= s.cfg.MarketEntryConf {
 				entry = price
-				s.log.Info("AI: high confidence + no better entry → market", zap.String("side", "LONG"), zap.Float64("conf", longConf))
+				s.log.Info("AI: high confidence → market entry", zap.String("side", "LONG"), zap.Float64("conf", longConf))
 			}
-			// Strong MTF → cap entry distance to 0.2% from current price (don't wait for distant limit)
-			if mtfScore >= 3 {
-				maxEntry := price - price*0.002 // at most 0.2% below
+			// Strong MTF → cap entry distance (Trend only — Range should wait at support/resistance)
+			if !isRange && mtfScore >= 3 {
+				maxEntry := price - price*0.002
 				if entry < maxEntry {
 					entry = maxEntry
 					s.log.Info("AI: strong MTF → capped entry", zap.String("side", "LONG"), zap.Float64("entry", entry), zap.Int("mtf", mtfScore))
@@ -461,12 +549,8 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				// Hedge mode: force Range + reduced qty + dynamic TP
 				s.openHedgeScalp(ctx, "LONG", price, entry, atr, s.shortPos)
 			} else if isRange {
-				// Range LONG requires MTF not bearish (≥0). Scalping against MTF is negative EV.
-				if mtfScore < 0 {
-					s.log.Info("AI: Range LONG skipped — MTF bearish", zap.Int("mtf", mtfScore))
-				} else {
-					s.openRange(ctx, "LONG", price, entry, atr)
-				}
+				// Range: contrarian — open at support/resistance regardless of MTF direction.
+				s.openRange(ctx, "LONG", price, entry, atr)
 			} else {
 				s.openTrend(ctx, "LONG", price, entry, atr)
 			}
@@ -491,14 +575,14 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			if shortEntry > 0 && shortEntry > entry && (shortEntry-price) <= maxDev {
 				entry = shortEntry // GPT found a better resistance level
 			}
-			// High confidence + GPT entry is BELOW current price (missed the rally) → use market
-			if shortConf >= s.cfg.MarketEntryConf && entry <= price {
+			// High confidence → market entry immediately (don't wait for limit fill)
+			if shortConf >= s.cfg.MarketEntryConf {
 				entry = price
-				s.log.Info("AI: high confidence + no better entry → market", zap.String("side", "SHORT"), zap.Float64("conf", shortConf))
+				s.log.Info("AI: high confidence → market entry", zap.String("side", "SHORT"), zap.Float64("conf", shortConf))
 			}
-			// Strong MTF → cap entry distance to 0.2% from current price (don't wait for distant limit)
-			if mtfScore <= -3 {
-				minEntry := price + price*0.002 // at most 0.2% above
+			// Strong MTF → cap entry distance (Trend only)
+			if !isRange && mtfScore <= -3 {
+				minEntry := price + price*0.002
 				if entry > minEntry {
 					entry = minEntry
 					s.log.Info("AI: strong MTF → capped entry", zap.String("side", "SHORT"), zap.Float64("entry", entry), zap.Int("mtf", mtfScore))
@@ -508,12 +592,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			if hedgeAllowed && s.longPos != nil {
 				s.openHedgeScalp(ctx, "SHORT", price, entry, atr, s.longPos)
 			} else if isRange {
-				// Range SHORT requires MTF not bullish (≤0). Scalping against MTF is negative EV.
-				if mtfScore > 0 {
-					s.log.Info("AI: Range SHORT skipped — MTF bullish", zap.Int("mtf", mtfScore))
-				} else {
-					s.openRange(ctx, "SHORT", price, entry, atr)
-				}
+				s.openRange(ctx, "SHORT", price, entry, atr)
 			} else {
 				s.openTrend(ctx, "SHORT", price, entry, atr)
 			}

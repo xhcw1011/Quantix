@@ -34,6 +34,7 @@ type OMS struct {
 	counter  atomic.Int64
 	mode     TradingMode
 	log      *zap.Logger
+	ctxMu    sync.RWMutex    // protects ctx field
 	ctx      context.Context // engine lifecycle context; set via SetContext before Run
 }
 
@@ -52,8 +53,19 @@ func New(mode TradingMode, log *zap.Logger) *OMS {
 // SetContext sets the engine lifecycle context. Publish methods will block
 // until the channel drains or ctx is cancelled (engine shutdown), preventing
 // silent event drops that desync position tracking from exchange reality.
+// Safe to call concurrently.
 func (o *OMS) SetContext(ctx context.Context) {
+	o.ctxMu.Lock()
 	o.ctx = ctx
+	o.ctxMu.Unlock()
+}
+
+// engineCtx returns the current engine lifecycle context (thread-safe).
+func (o *OMS) engineCtx() context.Context {
+	o.ctxMu.RLock()
+	c := o.ctx
+	o.ctxMu.RUnlock()
+	return c
 }
 
 // Fills returns a read-only channel that receives every fill event.
@@ -233,7 +245,7 @@ func (o *OMS) Fill(id string, fill strategy.Fill) error {
 		)
 		select {
 		case o.fillsCh <- fe:
-		case <-o.ctx.Done():
+		case <-o.engineCtx().Done():
 			o.log.Error("fills channel full and engine shutting down — fill event DROPPED",
 				zap.String("order_id", id),
 				zap.String("symbol", fill.Symbol),
@@ -381,7 +393,7 @@ func (o *OMS) publishOrderEvent(ord Order, event string) {
 		)
 		select {
 		case o.ordersCh <- oe:
-		case <-o.ctx.Done():
+		case <-o.engineCtx().Done():
 			o.log.Error("orders channel full and engine shutting down — order event DROPPED",
 				zap.String("order_id", ord.ID),
 				zap.String("event", event),

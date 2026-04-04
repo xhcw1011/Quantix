@@ -67,7 +67,7 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	log, err := logger.New(cfg.App.Env, cfg.App.LogLevel)
+	log, err := logger.New(cfg.App.Env, cfg.App.LogLevel, cfg.App.LogDir)
 	if err != nil {
 		return fmt.Errorf("init logger: %w", err)
 	}

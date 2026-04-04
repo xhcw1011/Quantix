@@ -48,6 +48,7 @@ type AppConfig struct {
 	Name     string `mapstructure:"name"`
 	Env      string `mapstructure:"env"`
 	LogLevel string `mapstructure:"log_level"`
+	LogDir   string `mapstructure:"log_dir"` // directory for log files; empty = stdout only
 }
 
 type ExchangeConfig struct {

@@ -18,7 +18,7 @@ import (
 //   +2.5R → close 20%  (trend confirmed)
 //   +4.0R → close 10%  ("lottery ticket" — surprise if it runs)
 //
-// +0.5R breakeven SL move is handled separately in OnTick.
+// Breakeven SL move is disabled — local trailing handles exit.
 func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState) {
 	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
 	if !ok {
@@ -29,8 +29,13 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 
 	R := pos.R
 	if R <= 0 { return }
+	// Cap R for staged TP calculation — same logic as Range TP cap.
+	// Prevents unreachable TP levels in oscillation when ATR is inflated.
+	atr := s.calcATR()
+	if atr > 0 && R > atr*1.0 { R = atr * 1.0 }
+	if maxR := pos.entryPrice * 0.008; R > maxR { R = maxR } // 0.8% cap
 	entry := pos.entryPrice
-	qty := pos.initQty
+	qty := pos.remainQty // use remaining qty, not initial (may have been partially closed)
 
 	// Determine close side
 	closeSide := "SELL"
@@ -71,6 +76,14 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 	ok = ep.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, pos.stopLoss, qty, tps)
 	if ok {
 		pos.stagedTPPlaced = true
+		// Record TP levels for dynamic adjustment
+		pos.stagedTPs = make([]stagedTPRecord, len(tps))
+		for i, tp := range tps {
+			pos.stagedTPs[i] = stagedTPRecord{
+				Level: i + 1, Price: tp.Price, Qty: tp.Qty, Status: "pending",
+			}
+		}
+		s.saveStagedTPsToRedis(pos)
 		s.log.Info("AI: staged TP orders placed on exchange",
 			zap.String("side", pos.side),
 			zap.Float64("entry", entry), zap.Float64("R", R),
@@ -92,6 +105,17 @@ func (s *AIStrategy) checkBreakevenMove(ctx *strategy.Context, price float64, p 
 func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posState, reason string) {
 	qty := math.Floor(p.remainQty*1000) / 1000
 	if qty <= 0 { *pptr = nil; return }
+
+	// Check if the exchange already closed the position (algo SL/TP triggered via UDS).
+	// In that case, skip placing a redundant close order — just clean up local state.
+	if s.syncer != nil && s.syncer.PositionClosedExternally.Load() {
+		s.log.Info("AI: position already closed by exchange — skipping close order",
+			zap.String("side", p.side), zap.String("reason", reason))
+		s.syncer.PositionClosedExternally.Store(false) // consume the flag
+		s.syncRemove(p.side)
+		*pptr = nil
+		return
+	}
 
 	// If staged TP orders are on exchange, cancel them first (GPT reversal / manual close).
 	if p.stagedTPPlaced {

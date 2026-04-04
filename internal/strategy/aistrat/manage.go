@@ -34,16 +34,13 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price }
 	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price }
 
-	// ── Stop-loss (skip for trend with staged orders — exchange handles it) ──
-	if !(p.mode == modeTrend && p.stagedTPPlaced) {
-		if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
-			s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
-			s.closePos(ctx, p, pptr, "stop_loss")
-			s.consecLoss++
-			s.stopBar = s.barCount
-			s.log.Info("AI: stop-loss hit")
-			return
-		}
+	// ── Stop-loss (always check locally — Trend has no exchange SL) ──
+	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
+		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+		s.closePos(ctx, p, pptr, "stop_loss")
+		s.consecLoss++
+		s.stopBar = s.barCount
+		return
 	}
 
 	if p.barsHeld < s.cfg.MinHoldBars { return } // minimum hold
@@ -51,7 +48,10 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	// Dynamic mode switch: re-evaluate regime every bar.
 	// Range → Trend: if ATR is now expanding and MTF strongly directional
 	// Trend → Range: if ATR contracted and position is small profit/loss
-	if p.mode == modeRange && (s.lastMTFScore >= 2 || s.lastMTFScore <= -2) {
+	// Only upgrade if MTF direction AGREES with position direction.
+	// Range LONG + MTF bullish → upgrade. Range LONG + MTF bearish → stay Range (contrarian scalp).
+	mtfAgreesWithPos := (p.side == "LONG" && s.lastMTFScore >= 2) || (p.side == "SHORT" && s.lastMTFScore <= -2)
+	if p.mode == modeRange && mtfAgreesWithPos {
 		atrNow := s.calcATR()
 		bars5m := s.primaryBars()
 		if len(bars5m) >= 20 {
@@ -61,8 +61,24 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 			}
 			if atrNow > atrSum/20*1.2 {
 				p.mode = modeTrend
+				// Cancel Range exchange SL (too tight for Trend).
+				// Trend uses local SL + trailing instead.
+				if s.stagedEP != nil {
+					posSide := "LONG"
+					if p.side == "SHORT" { posSide = "SHORT" }
+					s.stagedEP.CancelAllProtective(s.cfg.Symbol, posSide)
+				}
+				p.stagedTPPlaced = false // will trigger staged TP placement on next bar
+				// Widen SL to Trend level (ATR-based)
+				trendSL := atrNow * s.cfg.ATRK
+				if p.side == "LONG" {
+					p.stopLoss = p.entryPrice - trendSL
+				} else {
+					p.stopLoss = p.entryPrice + trendSL
+				}
 				s.log.Info("AI: mode upgrade Range → Trend (ATR expanding + strong MTF)",
-					zap.String("side", p.side), zap.Int("mtf", s.lastMTFScore))
+					zap.String("side", p.side), zap.Int("mtf", s.lastMTFScore),
+					zap.Float64("new_sl", p.stopLoss))
 				s.syncToRedis(p)
 			}
 		}
@@ -135,31 +151,14 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 	}
 
 	// ── Range trailing: protect profits ──
+	// No breakeven move or profit lock — SL stays at original position.
+	// Moving SL to breakeven caused premature exits (today: SL moved to 2065.17, got hit by $0.03 retrace).
+	// Only trailing protects profits — starts at +0.4%, trails 0.3% from peak.
 	rangePnlPct := 0.0
 	if p.side == "LONG" { rangePnlPct = (price - p.entryPrice) / p.entryPrice }
 	if p.side == "SHORT" { rangePnlPct = (p.entryPrice - price) / p.entryPrice }
 
-	// +0.3%: move SL to breakeven
-	if rangePnlPct >= s.cfg.RangeBEPct && p.side == "LONG" && p.stopLoss < p.entryPrice {
-		p.stopLoss = p.entryPrice + p.entryPrice*s.cfg.BreakevenBuf
-		s.log.Info("AI: Range +0.3% → SL to breakeven", zap.Float64("sl", p.stopLoss))
-	}
-	if rangePnlPct >= s.cfg.RangeBEPct && p.side == "SHORT" && p.stopLoss > p.entryPrice {
-		p.stopLoss = p.entryPrice - p.entryPrice*s.cfg.BreakevenBuf
-		s.log.Info("AI: Range +0.3% → SL to breakeven", zap.Float64("sl", p.stopLoss))
-	}
-	// +0.6%: lock in +0.3% profit
-	if rangePnlPct >= s.cfg.RangeLockPct {
-		lockPrice := 0.0
-		if p.side == "LONG" {
-			lockPrice = p.entryPrice + p.entryPrice*s.cfg.RangeLockOffset
-			if p.stopLoss < lockPrice { p.stopLoss = lockPrice }
-		} else {
-			lockPrice = p.entryPrice - p.entryPrice*s.cfg.RangeLockOffset
-			if p.stopLoss > lockPrice { p.stopLoss = lockPrice }
-		}
-	}
-	// +0.8%: trailing 0.3% from peak
+	// +0.4%: trailing 0.3% from peak
 	if rangePnlPct >= s.cfg.RangeTrailPct {
 		trailDist := p.peakPrice * s.cfg.RangeTrailDist
 		if p.side == "LONG" {
@@ -294,16 +293,18 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
 	if p.barsHeld < s.cfg.MinTrendBars { return }
 
-	// When staged TP orders are on the exchange, the exchange handles all exits.
-	// Only run GPT reversal check (to cancel all orders and reverse if market flips).
+	// Staged TP orders handle profit-taking on exchange.
+	// But since Trend has NO exchange SL, local trailing is still needed as backup exit.
+	// GPT reversal check also runs to detect direction changes.
 	if p.stagedTPPlaced {
 		if s.barCount-s.lastCallBar >= s.cfg.CallIntervalBars {
 			s.checkReversal(ctx, bar, p, pptr)
+			if *pptr == nil { return } // reversed/closed
 		}
-		return
+		// Fall through to trailing logic below — no exchange SL means we need local trailing.
 	}
 
-	// Fallback: local trailing for paper/backtest mode (no staged orders).
+	// Trailing logic (always runs — primary exit for Trend when no exchange SL).
 	price := bar.Close
 	atr := s.calcATR()
 
@@ -376,12 +377,18 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 }
 
 func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
-	mktCtx := s.buildContext(ctx, bar)
-	signal, err := s.callGPT(mktCtx)
+	var signal gptSignal
+	var err error
+	if len(s.replaySignals) > 0 {
+		signal, err = s.nextReplaySignal()
+	} else {
+		mktCtx := s.buildContext(ctx, bar)
+		signal, err = s.callGPT(mktCtx)
+		if err == nil { s.cacheSignal(bar, signal) }
+	}
 	if err != nil { s.lastCallBar = s.barCount; return }
 	s.lastCallBar = s.barCount
 	s.totalCall++
-	s.cacheSignal(bar, signal)
 
 	// Extract reversal signal from new dual format
 	reverseConf := 0.0

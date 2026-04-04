@@ -99,8 +99,10 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 	if atrTP > 0 && atrTP < tpDist { tpDist = atrTP }
 	if maxAbsTP > 0 && maxAbsTP < tpDist { tpDist = maxAbsTP }
 	// Range SL: always 1.5× the ACTUAL TP distance, so R:R stays 1:1.5 regardless of ATR.
-	// Capped by config percentage (default 1%) as absolute safety limit.
+	// Floor: MinSLDistPct (default 0.8%) prevents noise stop-outs in tight BB/ATR conditions.
+	// Cap: RangeSLPct (default 1%) as absolute safety limit.
 	slDist := tpDist * 1.5
+	if minSL := entryPrice * s.cfg.MinSLDistPct; slDist < minSL { slDist = minSL }
 	if maxSL := entryPrice * s.cfg.RangeSLPct; slDist > maxSL { slDist = maxSL }
 
 	var stopLoss, takeProfit float64
@@ -121,8 +123,8 @@ func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice,
 	qty := math.Floor(equity*risk/slDist*1000) / 1000
 	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
 	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
-	// Cap qty so margin needed (notional/leverage) doesn't exceed 80% of equity
-	maxQty := math.Floor(equity*0.8*10/entryPrice*1000) / 1000 // 80% of equity × leverage / price
+	// Cap qty so margin needed (notional/leverage) doesn't exceed 40% of equity
+	maxQty := math.Floor(equity*0.4*10/entryPrice*1000) / 1000 // 40% of equity × leverage / price
 	if qty > maxQty { qty = maxQty }
 	if qty <= 0 { return }
 
@@ -192,8 +194,8 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	qty := math.Floor(equity*risk/R*1000) / 1000
 	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
 	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
-	// Cap qty so margin needed doesn't exceed 80% of equity
-	maxQty := math.Floor(equity*0.8*10/entryPrice*1000) / 1000
+	// Cap qty so margin needed doesn't exceed 40% of equity
+	maxQty := math.Floor(equity*0.4*10/entryPrice*1000) / 1000
 	if qty > maxQty { qty = maxQty }
 	if qty <= 0 { return }
 

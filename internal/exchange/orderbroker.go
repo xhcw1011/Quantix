@@ -33,11 +33,15 @@ const (
 
 // OrderFill contains execution details returned after placing a market order.
 type OrderFill struct {
-	ExchangeID string  // exchange-assigned order ID
-	FilledQty  float64 // base-asset quantity filled
-	AvgPrice   float64 // volume-weighted average fill price
-	Fee        float64 // total fee in quote asset
-	Status     string  // "filled", "partial_fill", "live"
+	ExchangeID   string  // exchange-assigned order ID
+	FilledQty    float64 // base-asset quantity filled
+	AvgPrice     float64 // volume-weighted average fill price
+	Fee          float64 // total fee in quote asset
+	Status       string  // "filled", "partial_fill", "live"
+	Symbol       string  // e.g. "ETHUSDT" (populated by UDS for cash accounting)
+	Side         string  // "BUY" or "SELL" (populated by UDS for cash accounting)
+	PositionSide string  // "LONG", "SHORT", or "" (populated by UDS for cash accounting)
+	IsReduceOnly bool    // true if this is a reduce-only order (closing trade)
 }
 
 // OrderStatusChecker polls the current status of a resting order (limit/stop/TP).

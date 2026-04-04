@@ -16,7 +16,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log, err := logger.New(cfg.App.Env, cfg.App.LogLevel)
+	log, err := logger.New(cfg.App.Env, cfg.App.LogLevel, cfg.App.LogDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init logger: %v\n", err)
 		os.Exit(1)

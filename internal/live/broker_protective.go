@@ -183,29 +183,14 @@ func (b *Broker) cancelProtectiveOrders(ctx context.Context, symbol, posSide str
 // PlaceStagedTPOrders places multiple reduce-only limit orders on the exchange
 // for staged take-profit exits. Also places the initial stop-loss.
 // totalQty is the full position size (used for the SL order).
-// Returns true if at least the SL was placed successfully.
+// PlaceStagedTPOrders places multiple reduce-only limit TP orders on the exchange.
+// NO exchange SL — Trend uses local trailing/reversal for exits. Exchange SL in trends
+// gets triggered by normal pullbacks (today's lesson: SL 2048 hit during normal oscillation).
+// Returns true if at least one TP was placed.
 func (b *Broker) PlaceStagedTPOrders(ctx context.Context, symbol, posSide string, closeSide exchange.OrderSide, stopPrice, totalQty float64, tps []StagedTP) bool {
 	key := brokerPosKey(symbol, posSide)
 	ids := protectiveIDs{}
-
-	// Round price to 2 decimals and qty to 3 decimals (ETHUSDT tick/lot size).
-	stopPrice = math.Round(stopPrice*100) / 100
-	totalQty = math.Floor(totalQty*1000) / 1000
-
-	// Place SL first (most critical) — use totalQty so exchange knows exact qty to close.
-	slID, err := b.orderClient.PlaceStopMarketOrder(ctx, symbol, closeSide, posSide, totalQty, stopPrice, "")
-	if err != nil {
-		b.log.Error("staged TP: failed to place initial SL",
-			zap.String("symbol", symbol), zap.Error(err))
-		if b.notifier != nil {
-			b.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
-				"Failed to place SL for %s %s @ %.2f: %v", symbol, posSide, stopPrice, err))
-		}
-		return false
-	}
-	ids.stopID = slID
-	b.log.Info("staged TP: SL placed",
-		zap.String("sl_id", slID), zap.Float64("stop", stopPrice))
+	// No exchange SL for staged TP (Trend mode) — local trailing/reversal handles exit.
 
 	// Place each TP level as reduce-only limit order, tracked through OMS for fill detection.
 	for i, tp := range tps {
@@ -254,8 +239,33 @@ func (b *Broker) PlaceStagedTPOrders(ctx context.Context, symbol, posSide string
 	return true
 }
 
+// PlaceExchangeSL places an exchange algo SL order for Range mode protection.
+// Range positions need exchange SL because they're contrarian (higher risk).
+func (b *Broker) PlaceExchangeSL(ctx context.Context, symbol, posSide string, closeSide exchange.OrderSide, qty, stopPrice float64) bool {
+	stopPrice = math.Round(stopPrice*100) / 100
+	qty = math.Floor(qty*1000) / 1000
+	key := brokerPosKey(symbol, posSide)
+
+	slID, err := b.orderClient.PlaceStopMarketOrder(ctx, symbol, closeSide, posSide, qty, stopPrice, "")
+	if err != nil {
+		// "would immediately trigger" = price already past SL → local SL will handle it
+		b.log.Warn("Range SL: exchange order failed (local SL active as backup)",
+			zap.String("symbol", symbol), zap.Float64("stop", stopPrice), zap.Error(err))
+		return false
+	}
+
+	b.protMu.Lock()
+	ids := b.protectiveOrders[key]
+	ids.stopID = slID
+	b.protectiveOrders[key] = ids
+	b.protMu.Unlock()
+
+	b.log.Info("Range SL placed on exchange",
+		zap.String("sl_id", slID), zap.Float64("stop", stopPrice), zap.Float64("qty", qty))
+	return true
+}
+
 // ReplaceSLOrder cancels the current SL and places a new one at newStopPrice.
-// Used for the +0.5R breakeven move. Qty=0 means close entire position.
 func (b *Broker) ReplaceSLOrder(ctx context.Context, symbol, posSide string, closeSide exchange.OrderSide, remainQty, newStopPrice float64) bool {
 	newStopPrice = math.Round(newStopPrice*100) / 100
 	remainQty = math.Floor(remainQty*1000) / 1000

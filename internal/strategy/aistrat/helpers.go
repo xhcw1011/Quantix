@@ -2,6 +2,8 @@ package aistrat
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"math"
 	"time"
 
@@ -86,19 +88,21 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		}
 		if s.longPos.initQty == 0 { s.longPos.initQty = lp.Qty }
 		if s.longPos.R == 0 { s.longPos.R = math.Abs(entry - sl) }
-		// Cap R by current ATR×2 — prevents stale R from inflating staged TP distances
-		if atr > 0 && s.longPos.R > atr*2 {
-			s.longPos.R = atr * 1.5
-			s.log.Info("AI: capped recovered LONG R to ATR×1.5", zap.Float64("R", s.longPos.R), zap.Float64("atr", atr))
+		// Cap R by current ATR×1.0 — matches placeStagedExitOrders cap
+		if atr > 0 && s.longPos.R > atr*1.0 {
+			s.longPos.R = atr * 1.0
+			s.log.Info("AI: capped recovered LONG R to ATR×1.0", zap.Float64("R", s.longPos.R), zap.Float64("atr", atr))
 		}
 		if s.longPos.peakPrice == 0 { s.longPos.peakPrice = currentPrice }
 		if s.longPos.trailing == 0 { s.longPos.trailing = sl }
 		if lp.Mode == "trend" { s.longPos.mode = modeTrend }
 		if lp.Mode == "range" { s.longPos.mode = modeRange }
 
+		s.loadStagedTPsFromRedis(s.longPos)
 		s.log.Info("AI: recovered LONG from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", lp.Qty),
-			zap.Float64("stop", sl), zap.Float64("R", s.longPos.R))
+			zap.Float64("stop", sl), zap.Float64("R", s.longPos.R),
+			zap.Int("staged_tps", len(s.longPos.stagedTPs)))
 	}
 
 	// Recover SHORT
@@ -125,18 +129,20 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		}
 		if s.shortPos.initQty == 0 { s.shortPos.initQty = sp.Qty }
 		if s.shortPos.R == 0 { s.shortPos.R = math.Abs(entry - sl) }
-		if atr > 0 && s.shortPos.R > atr*2 {
-			s.shortPos.R = atr * 1.5
-			s.log.Info("AI: capped recovered SHORT R to ATR×1.5", zap.Float64("R", s.shortPos.R), zap.Float64("atr", atr))
+		if atr > 0 && s.shortPos.R > atr*1.0 {
+			s.shortPos.R = atr * 1.0
+			s.log.Info("AI: capped recovered SHORT R to ATR×1.0", zap.Float64("R", s.shortPos.R), zap.Float64("atr", atr))
 		}
 		if s.shortPos.peakPrice == 0 { s.shortPos.peakPrice = currentPrice }
 		if s.shortPos.trailing == 0 { s.shortPos.trailing = sl }
 		if sp.Mode == "trend" { s.shortPos.mode = modeTrend }
 		if sp.Mode == "range" { s.shortPos.mode = modeRange }
 
+		s.loadStagedTPsFromRedis(s.shortPos)
 		s.log.Info("AI: recovered SHORT from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", sp.Qty),
-			zap.Float64("stop", sl), zap.Float64("R", s.shortPos.R))
+			zap.Float64("stop", sl), zap.Float64("R", s.shortPos.R),
+			zap.Int("staged_tps", len(s.shortPos.stagedTPs)))
 	}
 }
 
@@ -166,6 +172,40 @@ func (s *AIStrategy) syncToRedis(pos *posState) {
 func (s *AIStrategy) syncRemove(side string) {
 	if s.syncer == nil { return }
 	s.syncer.RemovePosition(context.Background(), side)
+	s.deleteStagedTPsFromRedis(side)
+}
+
+// stagedTPRedisKey returns the Redis key for staged TP records.
+func (s *AIStrategy) stagedTPRedisKey(side string) string {
+	return fmt.Sprintf("quantix:staged_tp:%s:%s:%s", s.engineID, s.cfg.Symbol, side)
+}
+
+// saveStagedTPsToRedis persists TP records for tracking and restart recovery.
+func (s *AIStrategy) saveStagedTPsToRedis(pos *posState) {
+	if s.rdb == nil || pos == nil || len(pos.stagedTPs) == 0 { return }
+	data, err := json.Marshal(pos.stagedTPs)
+	if err != nil { return }
+	s.rdb.Set(context.Background(), s.stagedTPRedisKey(pos.side), string(data), 0)
+}
+
+// loadStagedTPsFromRedis loads TP records on recovery.
+// If records exist, marks stagedTPPlaced=true to prevent duplicate placement.
+func (s *AIStrategy) loadStagedTPsFromRedis(pos *posState) {
+	if s.rdb == nil || pos == nil { return }
+	val, err := s.rdb.Get(context.Background(), s.stagedTPRedisKey(pos.side)).Result()
+	if err != nil || val == "" { return }
+	var records []stagedTPRecord
+	if err := json.Unmarshal([]byte(val), &records); err != nil { return }
+	pos.stagedTPs = records
+	if len(records) > 0 {
+		pos.stagedTPPlaced = true // exchange orders already exist from previous session
+	}
+}
+
+// deleteStagedTPsFromRedis removes TP records when position is closed.
+func (s *AIStrategy) deleteStagedTPsFromRedis(side string) {
+	if s.rdb == nil { return }
+	s.rdb.Del(context.Background(), s.stagedTPRedisKey(side))
 }
 
 func r2(v float64) float64 { return math.Round(v*100) / 100 }

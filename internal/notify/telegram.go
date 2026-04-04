@@ -134,14 +134,15 @@ func (n *Notifier) SystemAlert(level, message string) {
 }
 
 // send delivers a notification via Telegram (markdown) and/or email (plain text).
-// No-op when neither channel is enabled.
+// Non-blocking: runs in a goroutine so it never freezes the strategy engine.
 func (n *Notifier) send(text string) {
-	n.sendWithRetry(text, false)
+	go n.sendWithRetry(text, false)
 }
 
 // sendCritical delivers a notification with one retry on failure.
+// Non-blocking: runs in a goroutine so it never freezes the strategy engine.
 func (n *Notifier) sendCritical(text string) {
-	n.sendWithRetry(text, true)
+	go n.sendWithRetry(text, true)
 }
 
 func (n *Notifier) sendWithRetry(text string, retry bool) {

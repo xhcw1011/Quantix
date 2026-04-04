@@ -177,16 +177,14 @@ type StagedTP struct {
 	Qty   float64
 }
 
-// StagedExitPlacer places exchange-native orders for staged TP and SL management.
+// StagedExitPlacer places exchange-native orders for TP and SL management.
 // Injected into Context.Extra["staged_exit"] by the live engine when available.
 type StagedExitPlacer interface {
-	// PlaceStagedTPOrders places an initial SL + multiple reduce-only limit TP orders.
-	// closeSide is the side to close (SELL for LONG, BUY for SHORT).
-	// totalQty is the full position size (used for the SL order).
-	// Returns true if at least the SL was placed.
+	// PlaceStagedTPOrders places multiple reduce-only limit TP orders (Trend mode, no exchange SL).
 	PlaceStagedTPOrders(symbol, posSide, closeSide string, stopPrice, totalQty float64, tps []StagedTP) bool
+	// PlaceExchangeSL places an exchange algo SL order (Range mode protection).
+	PlaceExchangeSL(symbol, posSide, closeSide string, qty, stopPrice float64) bool
 	// ReplaceSLOrder cancels the current SL and places a new one.
-	// remainQty is the current remaining position size.
 	ReplaceSLOrder(symbol, posSide, closeSide string, remainQty, newStopPrice float64) bool
 	// CancelAllProtective cancels all protective orders for a position.
 	CancelAllProtective(symbol, posSide string)

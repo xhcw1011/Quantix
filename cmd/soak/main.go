@@ -48,7 +48,7 @@ func main() {
 	flag.Parse()
 
 	// ── Logger ────────────────────────────────────────────────────────────────
-	log, err := logger.New("development", "info")
+	log, err := logger.New("development", "info", "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create logger: %v\n", err)
 		os.Exit(1)
