@@ -6,19 +6,15 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/Quantix/quantix/internal/indicator"
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
 // placeStagedExitOrders places exchange-native SL + 4 staged TP limit orders for trend mode.
 //
-// TP plan (based on R = |entry - stopLoss|):
-//   +1.0R → close 40%  (recover ~2x risk → "free position")
-//   +1.5R → close 30%  (lock profit, 70% total closed)
-//   +2.5R → close 20%  (trend confirmed)
-//   +4.0R → close 10%  ("lottery ticket" — surprise if it runs)
-//
-// Breakeven SL move is disabled — local trailing handles exit.
+// TP plan (based on R = |entry - stopLoss|, no ATR cap):
+//   +1.5R → close 30%  (cover risk + small profit)
+//   +2.0R → close 30%  (lock profit, 60% total closed)
+//   Remaining 40% → R-based trailing (1.5R→BE, 2R→ATR trail) + bounce TP
 func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState) {
 	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
 	if !ok {
@@ -29,11 +25,7 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 
 	R := pos.R
 	if R <= 0 { return }
-	// Cap R for staged TP calculation — same logic as Range TP cap.
-	// Prevents unreachable TP levels in oscillation when ATR is inflated.
-	atr := s.calcATR()
-	if atr > 0 && R > atr*1.0 { R = atr * 1.0 }
-	if maxR := pos.entryPrice * 0.008; R > maxR { R = maxR } // 0.8% cap
+	// R = |entry - SL|, directly from position. No ATR cap — let profits run.
 	entry := pos.entryPrice
 	qty := pos.remainQty // use remaining qty, not initial (may have been partially closed)
 
@@ -53,7 +45,6 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 	}
 
 	tps := make([]strategy.StagedTP, 0, len(levels))
-	usedQty := 0.0
 	for i, lvl := range levels {
 		var tpPrice float64
 		if pos.side == "LONG" {
@@ -61,15 +52,10 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 		} else {
 			tpPrice = math.Round((entry-lvl*R)*100) / 100
 		}
-		var q float64
-		if i == len(levels)-1 {
-			q = qty - usedQty
-			q = math.Floor(q*1000) / 1000
-			if q <= 0 { q = 0.001 }
-		} else {
-			q = math.Floor(qty*splits[i]*1000) / 1000
-		}
-		usedQty += q
+		// Each TP level uses its configured split. Remaining qty (e.g. 40%) is
+		// managed by trailing stop + bounce TP, NOT placed as exchange orders.
+		q := math.Floor(qty*splits[i]*1000) / 1000
+		if q <= 0 { q = 0.001 }
 		tps = append(tps, strategy.StagedTP{Price: tpPrice, Qty: q})
 	}
 
@@ -93,13 +79,6 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 	}
 }
 
-// checkBreakevenMove is disabled — SL stays at original position.
-// Moving SL to breakeven causes premature exits in oscillation (small retrace hits the tighter SL).
-// Staged TP handles profit-taking, original SL handles loss protection.
-func (s *AIStrategy) checkBreakevenMove(ctx *strategy.Context, price float64, p *posState) {
-	// No-op: let SL stay where it was placed.
-}
-
 // ─── Close Helpers ───────────────────────────────────────────────────────────
 
 func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posState, reason string) {
@@ -108,7 +87,8 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 
 	// Check if the exchange already closed the position (algo SL/TP triggered via UDS).
 	// In that case, skip placing a redundant close order — just clean up local state.
-	if s.syncer != nil && s.syncer.PositionClosedExternally.Load() {
+	// Verify with syncer that THIS specific side has no position, not just the global flag.
+	if s.syncer != nil && s.syncer.PositionClosedExternally.Load() && !s.syncer.HasPosition(p.side) {
 		s.log.Info("AI: position already closed by exchange — skipping close order",
 			zap.String("side", p.side), zap.String("reason", reason))
 		s.syncer.PositionClosedExternally.Store(false) // consume the flag
@@ -137,9 +117,9 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 		}
 	}
 
-	// Stop-loss, trailing, and reversal use market order (must fill immediately)
-	// Only TP and timeout use limit for lower fees
-	useMarket := reason == "stop_loss" || reason == "gpt_reversal" || reason == "trailing" || reason == "timeout_loss"
+	// Protective closes use market order (must fill immediately).
+	// Only GPT reversal uses limit (not time-critical, save on fees).
+	useMarket := reason == "stop_loss" || reason == "trailing" || reason == "bounce_tp"
 	s.placeCloseOrder(ctx, p.side, qty, useMarket)
 	bars := s.primaryBars()
 	closePrice := 0.0
@@ -159,6 +139,10 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 			s.lastHedgeClose = time.Now()
 		}
 	}
+
+	// Reset signal accumulation on close so next entry requires fresh signals.
+	s.accumLong = 0
+	s.accumShort = 0
 
 	s.syncRemove(p.side)
 	*pptr = nil
@@ -192,6 +176,20 @@ func (s *AIStrategy) checkDayReset(ctx *strategy.Context, price float64) {
 		s.consecLoss = 0
 		s.log.Info("AI: new day", zap.Float64("equity", s.dayStartEquity))
 	}
+	// Check daily loss limit
+	if !s.dayHalted && s.dayStartEquity > 0 && s.cfg.MaxDailyLossPct > 0 {
+		if pf := ctx.Portfolio; pf != nil {
+			equity := pf.Equity(map[string]float64{s.cfg.Symbol: price})
+			lossPct := (s.dayStartEquity - equity) / s.dayStartEquity
+			if lossPct >= s.cfg.MaxDailyLossPct {
+				s.dayHalted = true
+				s.log.Warn("AI: daily loss limit reached — halting",
+					zap.Float64("loss_pct", lossPct),
+					zap.Float64("equity", equity),
+					zap.Float64("start_equity", s.dayStartEquity))
+			}
+		}
+	}
 }
 
 // canHedge returns true if the main position is in sufficient drawdown and cooldown has elapsed.
@@ -212,17 +210,6 @@ func (s *AIStrategy) canHedge(price float64, mainPos *posState) bool {
 }
 
 // ─── Regime Detection ────────────────────────────────────────────────────────
-
-func (s *AIStrategy) isRangeRegime(price float64) bool {
-	closes := s.getCloses()
-	if len(closes) < 50 { return true }
-	ema20 := indicator.Last(indicator.EMA(closes, s.cfg.EMAFast))
-	ema50 := indicator.Last(indicator.EMA(closes, s.cfg.EMASlow))
-	if price > 0 && math.Abs(ema20-ema50)/price < s.cfg.RangeEMAConv {
-		return true // EMAs converged = range
-	}
-	return false
-}
 
 // effectiveRisk returns risk-per-trade based on current exposure.
 // Single direction: 2x configured risk (e.g. 4%); dual hedge: 1x (e.g. 2%).

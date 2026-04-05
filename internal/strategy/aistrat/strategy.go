@@ -17,7 +17,6 @@ import (
 
 	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/exchange"
-	"github.com/Quantix/quantix/internal/indicator"
 	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/strategy"
 	"github.com/redis/go-redis/v9"
@@ -55,6 +54,13 @@ type AIStrategy struct {
 	mtfLongScale    float64 // position size multiplier for LONG (0.7-1.0)
 	mtfShortScale   float64 // position size multiplier for SHORT (0.7-1.0)
 	lastHedgeClose  time.Time // when the last hedge position was closed (for cooldown)
+	lastConf        float64   // confidence of the signal that triggered current entry
+	lastRegime      Regime    // current detected regime (updated every signal check)
+	lastTrendDir    int       // +1 = bullish, -1 = bearish, 0 = neutral (from detectRegime)
+	lastSLReplace   time.Time // throttle ReplaceSLOrder calls (max 1 per 3s)
+	// Signal accumulation: tracks rolling GPT confidence across bars
+	accumLong       float64   // accumulated long signal strength (decays each bar)
+	accumShort      float64   // accumulated short signal strength (decays each bar)
 	replaySignals   []gptSignal // cached signals for backtest replay
 	replayIdx       int         // current index into replaySignals
 }
@@ -95,44 +101,13 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	pos.filled = true
 	pos.filledAt = time.Now()
 	if fill.Price > 0 {
+		// Adjust SL by the fill-vs-order price difference, then compute unified R.
 		diff := fill.Price - pos.entryPrice
 		pos.entryPrice = fill.Price
 		pos.peakPrice = fill.Price
-		pos.stopLoss += diff
+		pos.stopLoss = math.Round((pos.stopLoss+diff)*100) / 100
 		pos.trailing = pos.stopLoss
-		pos.R = math.Abs(fill.Price - pos.stopLoss)
-		if pos.mode == modeRange {
-			// Dynamic TP based on BB width at fill time
-			tpPct := s.cfg.RangeTPPct
-			closes := s.getCloses()
-			if len(closes) >= 20 {
-				bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-				bbU, bbL := indicator.Last(bb.Upper), indicator.Last(bb.Lower)
-				if bbU > bbL && fill.Price > 0 {
-					w := (bbU - bbL) / fill.Price * 0.6
-					if w < s.cfg.BBWidthMin { w = s.cfg.BBWidthMin }
-					if w > s.cfg.BBWidthMax { w = s.cfg.BBWidthMax }
-					tpPct = w
-				}
-			}
-			tpDist := fill.Price * tpPct
-			// Cap TP same as openRange
-			atr := s.calcATR()
-			if atrTP := atr * 1.0; atrTP > 0 && atrTP < tpDist { tpDist = atrTP }
-			if maxTP := fill.Price * 0.008; maxTP > 0 && maxTP < tpDist { tpDist = maxTP }
-			// SL = TP × 1.5 (same as openRange)
-			// Floor: MinSLDistPct prevents noise stop-outs; Cap: RangeSLPct as safety limit.
-			slDist := tpDist * 1.5
-			if minSL := fill.Price * s.cfg.MinSLDistPct; slDist < minSL { slDist = minSL }
-			if maxSL := fill.Price * s.cfg.RangeSLPct; slDist > maxSL { slDist = maxSL }
-			if pos.side == "LONG" {
-				pos.takeProfit = math.Round((fill.Price+tpDist)*100) / 100
-				pos.stopLoss = math.Round((fill.Price-slDist)*100) / 100
-			} else {
-				pos.takeProfit = math.Round((fill.Price-tpDist)*100) / 100
-				pos.stopLoss = math.Round((fill.Price+slDist)*100) / 100
-			}
-		}
+		pos.R = math.Abs(fill.Price - pos.stopLoss) // unified R = |entry - SL|
 	}
 	s.log.Info("AI: fill confirmed",
 		zap.String("side", pos.side), zap.Float64("fill", fill.Price),
@@ -141,21 +116,9 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	// Persist updated TP/SL to Redis so recovery uses correct values.
 	s.syncToRedis(pos)
 
-	// Trend mode: place staged TP orders on exchange (no exchange SL — local trailing handles exit).
-	if pos.mode == modeTrend && !pos.stagedTPPlaced {
+	// Place staged TP orders on exchange. Local trailing handles SL exit.
+	if !pos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, pos)
-	}
-
-	// Range mode: place exchange SL (contrarian positions need exchange protection).
-	if pos.mode == modeRange {
-		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
-			closeSide := "SELL"
-			posSide := "LONG"
-			if pos.side == "SHORT" { closeSide = "BUY"; posSide = "SHORT" }
-			if ep.PlaceExchangeSL(s.cfg.Symbol, posSide, closeSide, pos.remainQty, pos.stopLoss) {
-				pos.stagedTPPlaced = true // reuse flag to prevent duplicate SL in signal.go
-			}
-		}
 	}
 }
 
@@ -171,8 +134,16 @@ func (s *AIStrategy) OnTick(ctx *strategy.Context, price float64) {
 	}
 }
 
+// throttledReplaceSL calls ReplaceSLOrder at most once per 3 seconds to avoid API rate limits.
+func (s *AIStrategy) throttledReplaceSL(symbol, posSide, closeSide string, qty, stopPrice float64) {
+	if s.stagedEP == nil { return }
+	if time.Since(s.lastSLReplace) < 3*time.Second { return }
+	s.stagedEP.ReplaceSLOrder(symbol, posSide, closeSide, qty, stopPrice)
+	s.lastSLReplace = time.Now()
+}
+
 func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posState, pptr **posState) {
-	// Real-time SL check for ALL modes (Trend has no exchange SL).
+	// ── 1. Real-time SL check (must be instant, not wait for bar close) ──
 	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
 		s.log.Warn("TICK STOP-LOSS", zap.String("side", p.side),
 			zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
@@ -182,7 +153,84 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		return
 	}
 
-	// SL already checked above for all modes. Nothing more to do per-tick.
+	// ── 2. Real-time peak update ──
+	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price }
+	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price }
+
+	// ── 3. Real-time trailing calculation + check ──
+	if p.R > 0 {
+		pnlR := 0.0
+		if p.side == "LONG" { pnlR = (price - p.entryPrice) / p.R }
+		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
+
+		// Phase 2: pnlR >= 2.0 → ATR trailing
+		if pnlR >= 2.0 {
+			atr := s.calcATR()
+			trailDist := atr * s.cfg.TrailingATRK
+			var newTrail float64
+			if p.side == "LONG" {
+				newTrail = p.peakPrice - trailDist
+				if newTrail < p.entryPrice { newTrail = p.entryPrice } // floor at BE
+			} else {
+				newTrail = p.peakPrice + trailDist
+				if newTrail > p.entryPrice { newTrail = p.entryPrice }
+			}
+			newTrail = math.Round(newTrail*100) / 100
+			// Only tighten
+			if p.side == "LONG" && newTrail > p.trailing {
+				p.trailing = newTrail
+				s.throttledReplaceSL(s.cfg.Symbol, "LONG", "SELL", p.remainQty, p.trailing)
+			}
+			if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
+				p.trailing = newTrail
+				s.throttledReplaceSL(s.cfg.Symbol, "SHORT", "BUY", p.remainQty, p.trailing)
+			}
+		}
+		// Phase 1: pnlR >= 1.5 → breakeven
+		if pnlR >= 1.5 && !p.tp1RHit {
+			p.trailing = p.entryPrice
+			p.tp1RHit = true
+			closeSide := "SELL"
+			if p.side == "SHORT" { closeSide = "BUY" }
+			s.throttledReplaceSL(s.cfg.Symbol, p.side, closeSide, p.remainQty, p.trailing)
+			s.log.Info("TICK: trailing → breakeven", zap.String("side", p.side), zap.Float64("pnlR", pnlR))
+		}
+
+		// ── 4. Real-time bounce TP (remaining position) ──
+		if p.remainQty < p.initQty && p.remainQty > 0 && pnlR > 0 {
+			bounceThreshold := 0.5 * p.R
+			if p.side == "LONG" && p.peakPrice-price >= bounceThreshold {
+				s.log.Info("TICK: bounce TP", zap.String("side", p.side),
+					zap.Float64("peak", p.peakPrice), zap.Float64("price", price))
+				s.closePos(ctx, p, pptr, "bounce_tp")
+				s.consecLoss = 0
+				return
+			}
+			if p.side == "SHORT" && price-p.peakPrice >= bounceThreshold {
+				s.log.Info("TICK: bounce TP", zap.String("side", p.side),
+					zap.Float64("peak", p.peakPrice), zap.Float64("price", price))
+				s.closePos(ctx, p, pptr, "bounce_tp")
+				s.consecLoss = 0
+				return
+			}
+		}
+	}
+
+	// ── 5. Real-time trailing trigger ──
+	if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
+		s.log.Warn("TICK TRAILING", zap.String("side", p.side),
+			zap.Float64("price", price), zap.Float64("trail", p.trailing))
+		s.closePos(ctx, p, pptr, "trailing")
+		s.consecLoss = 0
+		return
+	}
+	if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
+		s.log.Warn("TICK TRAILING", zap.String("side", p.side),
+			zap.Float64("price", price), zap.Float64("trail", p.trailing))
+		s.closePos(ctx, p, pptr, "trailing")
+		s.consecLoss = 0
+		return
+	}
 }
 
 // handleStagedTPFill detects closing fills from staged TP orders and updates remainQty.
@@ -232,9 +280,17 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 			s.stagedEP.CancelAllProtective(s.cfg.Symbol, posSide)
 		}
 		s.consecLoss = 0
+		s.accumLong = 0
+		s.accumShort = 0
 		s.syncRemove(pos.side)
 		*pptr = nil
 	} else {
+		// Update exchange SL qty to match remaining position after TP fill.
+		if s.stagedEP != nil && pos.trailing > 0 {
+			closeSide := "SELL"
+			if pos.side == "SHORT" { closeSide = "BUY" }
+			s.stagedEP.ReplaceSLOrder(s.cfg.Symbol, pos.side, closeSide, pos.remainQty, pos.trailing)
+		}
 		// Dynamic TP tightening: if oscillating, move far TPs closer to the fill price.
 		s.maybeTightenTPs(pos, fill.Price)
 		s.syncToRedis(pos)

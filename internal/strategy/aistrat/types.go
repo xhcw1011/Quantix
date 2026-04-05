@@ -2,6 +2,17 @@ package aistrat
 
 import "time"
 
+// ─── Regime ─────────────────────────────────────────────────────────────────
+
+type Regime string
+
+const (
+	RegimeStrongTrend Regime = "STRONG_TREND"
+	RegimeSlowTrend   Regime = "SLOW_TREND"
+	RegimeRange       Regime = "RANGE"
+	RegimeExpansion   Regime = "EXPANSION"
+)
+
 // ─── Position ────────────────────────────────────────────────────────────────
 
 type posMode int
@@ -32,6 +43,9 @@ type posState struct {
 	stagedTPPlaced bool // true once SL + TP orders are on the exchange
 	breakevenMoved bool // true once SL has been moved to breakeven at +0.5R
 	stagedTPs      []stagedTPRecord // tracks each TP level for dynamic adjustment
+
+	// Regime at entry time (determines management behavior)
+	entryRegime Regime
 
 	// Grid orders (range mode only)
 	gridOrders []*gridOrder

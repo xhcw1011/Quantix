@@ -141,6 +141,7 @@ func run() error {
 			DB:       cfg.Redis.DB,
 		})
 		engine.SetExtra("redis_client", rdb)
+		engine.SetExtra("backtest_replay", true)
 		defer rdb.Close()
 	}
 

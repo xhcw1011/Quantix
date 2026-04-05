@@ -55,6 +55,84 @@ func (s *AIStrategy) findSwingHigh(n int) float64 {
 	return high
 }
 
+// ─── Regime Detection ────────────────────────────────────────────────────────
+
+// detectRegime identifies the current market structure and sets s.lastTrendDir.
+// lastTrendDir: +1 = bullish (price rising), -1 = bearish (price falling), 0 = neutral.
+// Only affects new entries — existing positions are managed by their entryRegime.
+func (s *AIStrategy) detectRegime() Regime {
+	bars := s.primaryBars()
+	atr := s.calcATR()
+	if atr <= 0 || len(bars) < s.cfg.RegimeN+1 {
+		s.lastTrendDir = 0
+		return RegimeRange // not enough data, don't trade
+	}
+
+	lastBar := bars[len(bars)-1]
+	prevBar := bars[len(bars)-2]
+	price := lastBar.Close
+
+	// ── Compute overall trend direction from N-bar window ──
+	recentBars := bars[len(bars)-s.cfg.RegimeN:]
+	priceChange := price - recentBars[0].Close
+	trendDir := 0
+	if priceChange > atr*0.5 { trendDir = 1 }   // bullish
+	if priceChange < -atr*0.5 { trendDir = -1 }  // bearish
+	s.lastTrendDir = trendDir
+
+	// ── 1. Expansion check (breakout bar + confirmation + trend alignment) ──
+	barRange := lastBar.High - lastBar.Low
+	body := math.Abs(lastBar.Close - lastBar.Open)
+	dirOK := (lastBar.Close > prevBar.Close && lastBar.Close > lastBar.Open) ||
+		(lastBar.Close < prevBar.Close && lastBar.Close < lastBar.Open)
+	prevBody := math.Abs(prevBar.Close - prevBar.Open)
+	prevSameDir := (lastBar.Close-prevBar.Close)*(prevBar.Close-prevBar.Open) > 0
+	confirmOK := prevBody > atr*0.5 || prevSameDir
+	// Expansion bar must align with overall trend direction.
+	// A big bullish bar in a bearish trend = bounce, not breakout.
+	barDir := 0
+	if lastBar.Close > lastBar.Open { barDir = 1 } else { barDir = -1 }
+	trendAligned := trendDir == 0 || barDir == trendDir
+	if barRange > atr*s.cfg.ExpansionATRK && body > atr*s.cfg.ExpansionBodyK && dirOK && confirmOK && trendAligned {
+		return RegimeExpansion
+	}
+
+	// ── 2. Trend strength = |close_now - close_N| / ATR ──
+	trendStrength := math.Abs(priceChange) / atr
+
+	// ── 3. Direction score ──
+	dirScore := calcDirectionScore(recentBars)
+
+	// ── 4. Classify ──
+	if trendStrength > s.cfg.StrongTrendThreshold && atr/price > s.cfg.StrongTrendMinVol {
+		return RegimeStrongTrend
+	}
+	if trendStrength > s.cfg.SlowTrendThreshold && dirScore > s.cfg.SlowTrendDirScore {
+		return RegimeSlowTrend
+	}
+	return RegimeRange
+}
+
+// calcDirectionScore measures how consistently bars move in the overall direction.
+// Returns 0.0-1.0; higher = more consistent trend.
+func calcDirectionScore(bars []exchange.Kline) float64 {
+	if len(bars) < 2 {
+		return 0
+	}
+	overallDir := bars[len(bars)-1].Close - bars[0].Close
+	if overallDir == 0 {
+		return 0
+	}
+	sameDir := 0
+	for i := 1; i < len(bars); i++ {
+		delta := bars[i].Close - bars[i-1].Close
+		if delta*overallDir > 0 {
+			sameDir++
+		}
+	}
+	return float64(sameDir) / float64(len(bars)-1)
+}
+
 // recoverFromSyncer loads positions from PositionSyncer (Redis/exchange).
 func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 	if s.syncer == nil {
@@ -88,11 +166,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		}
 		if s.longPos.initQty == 0 { s.longPos.initQty = lp.Qty }
 		if s.longPos.R == 0 { s.longPos.R = math.Abs(entry - sl) }
-		// Cap R by current ATR×1.0 — matches placeStagedExitOrders cap
-		if atr > 0 && s.longPos.R > atr*1.0 {
-			s.longPos.R = atr * 1.0
-			s.log.Info("AI: capped recovered LONG R to ATR×1.0", zap.Float64("R", s.longPos.R), zap.Float64("atr", atr))
-		}
+		// R = |entry - SL|, no cap. Consistent with "only ATR determines risk, never limits profit".
 		if s.longPos.peakPrice == 0 { s.longPos.peakPrice = currentPrice }
 		if s.longPos.trailing == 0 { s.longPos.trailing = sl }
 		if lp.Mode == "trend" { s.longPos.mode = modeTrend }
@@ -129,10 +203,6 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		}
 		if s.shortPos.initQty == 0 { s.shortPos.initQty = sp.Qty }
 		if s.shortPos.R == 0 { s.shortPos.R = math.Abs(entry - sl) }
-		if atr > 0 && s.shortPos.R > atr*1.0 {
-			s.shortPos.R = atr * 1.0
-			s.log.Info("AI: capped recovered SHORT R to ATR×1.0", zap.Float64("R", s.shortPos.R), zap.Float64("atr", atr))
-		}
 		if s.shortPos.peakPrice == 0 { s.shortPos.peakPrice = currentPrice }
 		if s.shortPos.trailing == 0 { s.shortPos.trailing = sl }
 		if sp.Mode == "trend" { s.shortPos.mode = modeTrend }

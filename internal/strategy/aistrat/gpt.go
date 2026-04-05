@@ -80,6 +80,7 @@ Keep each reasoning under 2 sentences. Be concise.`
 type mktCtx struct {
 	Symbol       string             `json:"symbol"`
 	Price        float64            `json:"price"`
+	Regime       string             `json:"regime"`
 	Indicators   map[string]float64 `json:"indicators"`
 	Indicators15 map[string]float64 `json:"indicators_15m,omitempty"`
 	RecentBars   []barData          `json:"recent_bars"`
@@ -166,7 +167,7 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 	if s.shortPos != nil && s.shortPos.filled { parts = append(parts, fmt.Sprintf("SHORT@%.2f", s.shortPos.entryPrice)) }
 	if len(parts) > 0 { posStr = fmt.Sprintf("%v", parts) }
 
-	return mktCtx{Symbol: s.cfg.Symbol, Price: r2(bar.Close), Indicators: ind, Indicators15: ind15, RecentBars: bars, Position: posStr}
+	return mktCtx{Symbol: s.cfg.Symbol, Price: r2(bar.Close), Regime: string(s.lastRegime), Indicators: ind, Indicators15: ind15, RecentBars: bars, Position: posStr}
 }
 
 func (s *AIStrategy) callGPT(mc mktCtx) (gptSignal, error) {
@@ -245,6 +246,8 @@ func (s *AIStrategy) cacheSignal(bar exchange.Kline, sig gptSignal) {
 	if err := s.rdb.RPush(context.Background(), key, string(data)).Err(); err != nil {
 		s.log.Warn("AI: signal cache failed", zap.Error(err))
 	}
+	// Keep only last 2000 signals (~2 weeks at 144/day) to prevent unbounded growth.
+	s.rdb.LTrim(context.Background(), key, -2000, -1)
 }
 
 // hasCachedSignals checks if Redis has cached GPT signals for backtest replay.

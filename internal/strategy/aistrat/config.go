@@ -76,6 +76,19 @@ func init() {
 		if v, ok := params["MTFQtyScaleHard"]; ok { cfg.MTFQtyScaleHard = toFloat(v) }
 		if v, ok := params["MTFQtyScaleSoft"]; ok { cfg.MTFQtyScaleSoft = toFloat(v) }
 		if v, ok := params["SwingProximity"]; ok { cfg.SwingProximity = toFloat(v) }
+		if v, ok := params["ConfQtyScale"].(bool); ok { cfg.ConfQtyScale = v }
+		if v, ok := params["MaxRPercent"]; ok { cfg.MaxRPercent = toFloat(v) }
+		if v, ok := params["FeeDragPct"]; ok { cfg.FeeDragPct = toFloat(v) }
+		if v, ok := params["SignalDecay"]; ok { cfg.SignalDecay = toFloat(v) }
+		if v, ok := params["SignalAccumMax"]; ok { cfg.SignalAccumMax = toFloat(v) }
+		if v, ok := params["RegimeN"]; ok { cfg.RegimeN = toInt(v) }
+		if v, ok := params["StrongTrendThreshold"]; ok { cfg.StrongTrendThreshold = toFloat(v) }
+		if v, ok := params["StrongTrendMinVol"]; ok { cfg.StrongTrendMinVol = toFloat(v) }
+		if v, ok := params["SlowTrendThreshold"]; ok { cfg.SlowTrendThreshold = toFloat(v) }
+		if v, ok := params["SlowTrendDirScore"]; ok { cfg.SlowTrendDirScore = toFloat(v) }
+		if v, ok := params["ExpansionATRK"]; ok { cfg.ExpansionATRK = toFloat(v) }
+		if v, ok := params["ExpansionBodyK"]; ok { cfg.ExpansionBodyK = toFloat(v) }
+		if v, ok := params["RegimeEntryConf"]; ok { cfg.RegimeEntryConf = toFloat(v) }
 		if v, ok := params["RSIPeriod"]; ok { cfg.RSIPeriod = toInt(v) }
 		if v, ok := params["MACDFast"]; ok { cfg.MACDFast = toInt(v) }
 		if v, ok := params["MACDSlow"]; ok { cfg.MACDSlow = toInt(v) }
@@ -94,6 +107,7 @@ func init() {
 		if v, ok := params["GPTTemperature"]; ok { cfg.GPTTemperature = toFloat(v) }
 		if v, ok := params["GPTMaxTokens"]; ok { cfg.GPTMaxTokens = toInt(v) }
 		if v, ok := params["GPTTimeout"]; ok { cfg.GPTTimeout = time.Duration(toFloat(v)) * time.Second }
+		if v, ok := params["ForceTrend"].(bool); ok { cfg.ForceTrend = v }
 		if v, ok := params["HedgeOnDrawdown"].(bool); ok { cfg.HedgeOnDrawdown = v }
 		if v, ok := params["HedgeDrawdownPct"]; ok { cfg.HedgeDrawdownPct = toFloat(v) }
 		if v, ok := params["HedgeCooldown"]; ok { cfg.HedgeCooldown = time.Duration(toFloat(v)) * time.Minute }
@@ -126,6 +140,7 @@ type Config struct {
 	CallIntervalBars    int
 	EnableShort         bool
 	HedgeMode           bool          // true = long+short simultaneously; false = single strongest direction
+	ForceTrend          bool          // true = disable Range mode, always use Trend mode
 	HedgeOnDrawdown     bool          // true = allow counter-trend Range scalp when main position is losing
 	HedgeDrawdownPct    float64       // min drawdown % to trigger hedge (default 0.005 = 0.5% of entry)
 	HedgeCooldown       time.Duration // cooldown after hedge close before next hedge (default 15m)
@@ -185,6 +200,21 @@ type Config struct {
 	MTFQtyScaleHard float64 // qty scale for strong headwind (default 0.70)
 	MTFQtyScaleSoft float64 // qty scale for mild headwind (default 0.85)
 	SwingProximity  float64 // swing high/low proximity % (default 0.0015)
+	ConfQtyScale    bool    // true = scale qty by confidence
+	MaxRPercent     float64 // max R/price ratio (default 0.01 = 1%); skip trade if SL too wide
+	FeeDragPct      float64 // round-trip fee as % of price, deducted from R for sizing (default 0.0014 = 0.14%)
+	SignalDecay     float64 // per-bar decay factor for accumulated signal (default 0.7, range 0-1)
+	SignalAccumMax  float64 // cap for accumulated signal score (default 1.5)
+
+	// Regime detection
+	RegimeN               int     // lookback bars for trend strength (default 20)
+	StrongTrendThreshold  float64 // trendStrength > this = STRONG_TREND (default 2.5)
+	StrongTrendMinVol     float64 // min ATR/price for STRONG_TREND (default 0.001)
+	SlowTrendThreshold    float64 // trendStrength > this = SLOW_TREND (default 1.5)
+	SlowTrendDirScore     float64 // min direction score for SLOW_TREND (default 0.60)
+	ExpansionATRK         float64 // bar range > ATR * this = breakout candidate (default 2.0)
+	ExpansionBodyK        float64 // bar body > ATR * this = confirmed breakout (default 1.0)
+	RegimeEntryConf       float64 // GPT confidence threshold when STRONG_TREND/EXPANSION (default 0.60)
 
 	// Technical indicator periods
 	RSIPeriod   int     // RSI lookback (default 14)
@@ -219,13 +249,13 @@ func DefaultConfig() Config {
 	return Config{
 		Symbol: "ETHUSDT", Model: "gpt-5.4-mini",
 		ConfidenceThreshold: 0.82, LookbackBars: 60,
-		CallIntervalBars: 10, EnableShort: true,
-		RiskPerTrade: 0.02, ATRK: 4.0, TrailingATRK: 10.0,
+		CallIntervalBars: 2, EnableShort: true,
+		RiskPerTrade: 0.02, ATRK: 2.0, TrailingATRK: 1.5,
 		RangeTPPct: 0.012, RangeSLPct: 0.010,
 		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
-		TPLevels: []float64{1.0, 1.5, 2.5, 4.0},
-		TPQtySplits: []float64{0.40, 0.30, 0.20, 0.10},
-		BreakevenR: 0.5, BreakevenBuf: 0.001,
+		TPLevels: []float64{1.5, 2.0},
+		TPQtySplits: []float64{0.30, 0.30},
+		BreakevenR: 1.5, BreakevenBuf: 0.001,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015,
 		TrailFloorPct: 0.005, MinSLDistPct: 0.008,
 		ReversalConf: 0.72, MarketEntryConf: 0.90,
@@ -235,10 +265,15 @@ func DefaultConfig() Config {
 		MTFStrongTrend: 0.01, MTFWeakTrend: 0.002,
 		MTFBullRSI: 60, MTFBearRSI: 40, MTF1mThreshold: 0.001,
 		MTFQtyScaleHard: 0.70, MTFQtyScaleSoft: 0.85, SwingProximity: 0.0015,
+		ConfQtyScale: true, ForceTrend: true, MaxRPercent: 0.01, FeeDragPct: 0.0014,
+		SignalDecay: 0.85, SignalAccumMax: 1.5,
+		RegimeN: 20, StrongTrendThreshold: 2.5, StrongTrendMinVol: 0.001,
+		SlowTrendThreshold: 1.5, SlowTrendDirScore: 0.60,
+		ExpansionATRK: 2.0, ExpansionBodyK: 1.0, RegimeEntryConf: 0.60,
 		RSIPeriod: 14, MACDFast: 12, MACDSlow: 26, MACDSignal: 9,
 		EMAFast: 20, EMASlow: 50, BBPeriod: 20, BBStdDev: 2.0,
 		ATRPeriod: 60, VolMAPeriod: 20,
-		EntryOffsetPct: 0.0013, MaxEntryDevPct: 0.005,
+		EntryOffsetPct: 0.0005, MaxEntryDevPct: 0.005,
 		LimitTimeoutBars: 2, MinHoldBars: 3, MinTrendBars: 5,
 		GPTTemperature: 0.3, GPTMaxTokens: 600, GPTTimeout: 15 * time.Second,
 		MaxDailyLossPct: 0.10, MaxConsecLoss: 5,

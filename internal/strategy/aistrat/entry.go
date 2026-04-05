@@ -7,7 +7,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/Quantix/quantix/internal/indicator"
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
@@ -75,105 +74,12 @@ func (s *AIStrategy) openHedgeScalp(ctx *strategy.Context, side string, currentP
 	s.syncToRedis(pos)
 }
 
-func (s *AIStrategy) openRange(ctx *strategy.Context, side string, currentPrice, entryPrice, atr float64) {
-	entryPrice = math.Round(entryPrice*100) / 100
-
-	// Dynamic TP based on Bollinger Band width (recent volatility)
-	// Use 60% of BB width as TP target, clamped between 0.6% and 1.5%
-	tpPct := s.cfg.RangeTPPct
-	closes := s.getCloses()
-	if len(closes) >= 20 {
-		bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-		bbU, bbL := indicator.Last(bb.Upper), indicator.Last(bb.Lower)
-		if bbU > bbL && currentPrice > 0 {
-			bbWidthPct := (bbU - bbL) / currentPrice * 0.6 // 60% of BB width
-			if bbWidthPct < s.cfg.BBWidthMin { bbWidthPct = s.cfg.BBWidthMin }
-			if bbWidthPct > s.cfg.BBWidthMax { bbWidthPct = s.cfg.BBWidthMax }
-			tpPct = bbWidthPct
-		}
-	}
-	tpDist := entryPrice * tpPct
-	// Cap TP by ATR (prevents TP being unreachable in wide-BB low-trend markets)
-	atrTP := atr * 1.0 // 1x ATR as absolute maximum for range TP
-	maxAbsTP := entryPrice * 0.008 // 0.8% absolute cap
-	if atrTP > 0 && atrTP < tpDist { tpDist = atrTP }
-	if maxAbsTP > 0 && maxAbsTP < tpDist { tpDist = maxAbsTP }
-	// Range SL: always 1.5× the ACTUAL TP distance, so R:R stays 1:1.5 regardless of ATR.
-	// Floor: MinSLDistPct (default 0.8%) prevents noise stop-outs in tight BB/ATR conditions.
-	// Cap: RangeSLPct (default 1%) as absolute safety limit.
-	slDist := tpDist * 1.5
-	if minSL := entryPrice * s.cfg.MinSLDistPct; slDist < minSL { slDist = minSL }
-	if maxSL := entryPrice * s.cfg.RangeSLPct; slDist > maxSL { slDist = maxSL }
-
-	var stopLoss, takeProfit float64
-	if side == "LONG" {
-		takeProfit = entryPrice + tpDist
-		stopLoss = entryPrice - slDist
-	} else {
-		takeProfit = entryPrice - tpDist
-		stopLoss = entryPrice + slDist
-	}
-	if slDist <= 0 { return }
-
-	equity := 100.0
-	if pf := ctx.Portfolio; pf != nil {
-		equity = pf.Equity(map[string]float64{s.cfg.Symbol: currentPrice})
-	}
-	risk := s.effectiveRisk(side)
-	qty := math.Floor(equity*risk/slDist*1000) / 1000
-	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
-	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
-	// Cap qty so margin needed (notional/leverage) doesn't exceed 40% of equity
-	maxQty := math.Floor(equity*0.4*10/entryPrice*1000) / 1000 // 40% of equity × leverage / price
-	if qty > maxQty { qty = maxQty }
-	if qty <= 0 { return }
-
-	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
-	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit)
-	if omsID == "" { return }
-
-	filledAt := time.Time{}
-	if !useLimit { filledAt = time.Now() }
-	pos := &posState{
-		side: side, mode: modeRange, entryPrice: entryPrice,
-		initQty: qty, remainQty: qty,
-		R: slDist, stopLoss: stopLoss, takeProfit: takeProfit,
-		trailing: stopLoss, peakPrice: entryPrice,
-		filled: !useLimit, filledAt: filledAt, orderID: omsID, limitBar: s.barCount,
-	}
-	if side == "LONG" { s.longPos = pos } else { s.shortPos = pos }
-
-	s.log.Info("AI: OPEN RANGE",
-		zap.String("side", side), zap.Float64("entry", entryPrice),
-		zap.Float64("tp", takeProfit), zap.Float64("sl", stopLoss),
-		zap.Float64("qty", qty))
-	s.logEvent("open", side, "range", currentPrice, entryPrice, qty, 0, 0,
-		fmt.Sprintf(`{"tp":%.2f,"sl":%.2f}`, takeProfit, stopLoss))
-	s.syncToRedis(pos)
-}
 
 func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice, entryPrice, atr float64) {
 	entryPrice = math.Round(entryPrice*100) / 100
-	minDist := entryPrice * s.cfg.MinSLDistPct
 	atrDist := atr * s.cfg.ATRK
+	minDist := entryPrice * s.cfg.MinSLDistPct
 	if atrDist < minDist { atrDist = minDist }
-
-	// Dynamic SL cap: tighter in oscillation, wider in confirmed trend.
-	// Compare current ATR to 20-bar average — if ATR is NOT expanding, market is oscillating.
-	bars5m := s.primaryBars()
-	if len(bars5m) >= 20 {
-		var atrSum float64
-		for i := len(bars5m) - 20; i < len(bars5m); i++ {
-			atrSum += bars5m[i].High - bars5m[i].Low
-		}
-		atrMean := atrSum / 20
-		if atr <= atrMean*1.2 {
-			// Oscillation: ATR not expanding → cap SL at 1.0%
-			maxDist := entryPrice * 0.01
-			if atrDist > maxDist { atrDist = maxDist }
-		}
-		// Trend: ATR expanding → no cap, let ATR×ATRK define SL
-	}
 
 	var stopLoss float64
 	if side == "LONG" {
@@ -186,16 +92,41 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 
 	R := math.Abs(entryPrice - stopLoss)
 	if R <= 0 { return }
+
+	// MaxRPercent: skip trade if SL is too wide relative to price
+	if s.cfg.MaxRPercent > 0 && R/entryPrice > s.cfg.MaxRPercent {
+		s.log.Info("AI: skip — R too wide", zap.Float64("R", R), zap.Float64("max", entryPrice*s.cfg.MaxRPercent))
+		return
+	}
+
 	equity := 100.0
 	if pf := ctx.Portfolio; pf != nil {
 		equity = pf.Equity(map[string]float64{s.cfg.Symbol: currentPrice})
 	}
 	risk := s.effectiveRisk(side)
-	qty := math.Floor(equity*risk/R*1000) / 1000
+	// Deduct round-trip fee drag from effective R so sizing accounts for costs.
+	// Entry taker ~0.05%, exit maker ~0.02%, total ~0.07% per side = ~0.14% round trip.
+	feeDrag := entryPrice * s.cfg.FeeDragPct
+	effectiveR := R - feeDrag
+	if effectiveR <= 0 { effectiveR = R * 0.5 } // floor: never let fees eliminate R entirely
+	qty := math.Floor(equity*risk/effectiveR*1000) / 1000
 	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
 	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
-	// Cap qty so margin needed doesn't exceed 40% of equity
-	maxQty := math.Floor(equity*0.4*10/entryPrice*1000) / 1000
+	// Confidence-weighted sizing: lower conf → smaller position (min 50%)
+	// Use regime-aware threshold: STRONG_TREND uses lower entryConf,
+	// so conf 0.65 in STRONG_TREND should scale higher than in SLOW_TREND.
+	if s.cfg.ConfQtyScale && s.lastConf > 0 {
+		baseConf := s.cfg.ConfidenceThreshold
+		if s.lastRegime == RegimeStrongTrend || s.lastRegime == RegimeExpansion {
+			baseConf = s.cfg.RegimeEntryConf
+		}
+		confScale := (s.lastConf - baseConf) / (1.0 - baseConf)
+		if confScale < 0.5 { confScale = 0.5 }
+		if confScale > 1.0 { confScale = 1.0 }
+		qty = math.Floor(qty*confScale*1000) / 1000
+	}
+	// Cap qty so margin needed doesn't exceed 60% of equity
+	maxQty := math.Floor(equity*0.6*10/entryPrice*1000) / 1000
 	if qty > maxQty { qty = maxQty }
 	if qty <= 0 { return }
 
@@ -251,19 +182,22 @@ func (s *AIStrategy) placeCloseOrder(ctx *strategy.Context, side string, qty flo
 		Symbol: s.cfg.Symbol, Side: closeSide, PositionSide: psSide, Qty: qty,
 	}
 	if !useMarket {
-		// Get current price from latest primary bar
+		// Close with Maker limit: SELL slightly above market, BUY slightly below market
 		bars := s.primaryBars()
 		if len(bars) > 0 {
 			lastPrice := bars[len(bars)-1].Close
 			if side == "LONG" {
-				req.Price = math.Round((lastPrice+0.01)*100) / 100 // sell slightly above
+				req.Price = math.Round((lastPrice+0.5)*100) / 100 // close LONG = SELL above market
 			} else {
-				req.Price = math.Round((lastPrice-0.01)*100) / 100 // buy slightly below
+				req.Price = math.Round((lastPrice-0.5)*100) / 100 // close SHORT = BUY below market
 			}
 			req.Type = strategy.OrderLimit
 		}
 	}
-	ctx.PlaceOrder(req)
+	if id := ctx.PlaceOrder(req); id == "" {
+		s.log.Error("placeCloseOrder failed", zap.String("side", side),
+			zap.Float64("qty", qty), zap.Bool("market", useMarket))
+	}
 }
 
 // addGPTGrid adds the GPT-suggested support/resistance price as a grid order for future fill.
