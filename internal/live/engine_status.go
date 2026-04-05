@@ -26,6 +26,7 @@ func (e *Engine) printStatus() {
 
 	e.log.Info("──── Live Trading Status ────",
 		zap.Duration("uptime", elapsed),
+		zap.Float64("wallet_balance", e.broker.WalletBalance()),
 		zap.Float64("cash", cash),
 		zap.Float64("equity", equity),
 		zap.Float64("total_return_pct", totalReturn),
@@ -34,9 +35,17 @@ func (e *Engine) printStatus() {
 		zap.Bool("risk_halted", e.risk.Halted()),
 	)
 
-	// Stale bar detection: warn if no kline data for > 2 minutes (should arrive every ~1m for 1m bars).
+	// Stale bar detection: warn if no kline data for > 2× bar interval.
+	// For 5m bars, threshold = 10min; for 1m bars, threshold = max(2min, 2×1min).
+	staleThreshold := 2 * time.Minute
+	if e.cfg.BarInterval > 0 {
+		t := 2 * e.cfg.BarInterval
+		if t > staleThreshold {
+			staleThreshold = t
+		}
+	}
 	staleSince := time.Since(e.lastBarTime)
-	if staleSince > 2*time.Minute && !e.staleAlerted {
+	if staleSince > staleThreshold && !e.staleAlerted {
 		e.staleAlerted = true
 		e.log.Error("no kline data received — possible WS disconnect",
 			zap.Duration("silent_for", staleSince.Truncate(time.Second)),

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -21,6 +22,13 @@ import (
 	"github.com/Quantix/quantix/internal/strategy"
 	"github.com/redis/go-redis/v9"
 )
+
+// emergencySignal carries the async result of an emergency GPT call.
+type emergencySignal struct {
+	side   string
+	price  float64
+	signal gptSignal
+}
 
 // ─── Strategy ────────────────────────────────────────────────────────────────
 
@@ -63,6 +71,17 @@ type AIStrategy struct {
 	accumShort      float64   // accumulated short signal strength (decays each bar)
 	replaySignals   []gptSignal // cached signals for backtest replay
 	replayIdx       int         // current index into replaySignals
+
+	// Post-SL immediate reversal: set by tickManage when SL fires on tick data.
+	// Cleared on next OnBar when the urgent GPT check runs.
+	postSLReeval    bool
+	postSLSide      string    // which side was closed ("LONG"/"SHORT")
+	postSLPrice     float64   // tick price at SL trigger
+	lastEmergencyAt time.Time // throttle emergency GPT calls (max 1 per 30s)
+
+	// Async emergency GPT: the goroutine sends results here, OnTick consumes.
+	emergencyCh     chan emergencySignal
+	emergencyActive atomic.Bool
 }
 
 func New(cfg Config, log *zap.Logger) *AIStrategy {
@@ -74,6 +93,7 @@ func New(cfg Config, log *zap.Logger) *AIStrategy {
 		log:            log,
 		client:         &http.Client{Timeout: cfg.GPTTimeout},
 		barsByInterval: make(map[string][]exchange.Kline),
+		emergencyCh:    make(chan emergencySignal, 1),
 	}
 }
 
@@ -126,6 +146,7 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 // Implements strategy.TickReceiver.
 func (s *AIStrategy) OnTick(ctx *strategy.Context, price float64) {
 	if !s.warmedUp { return }
+	s.processEmergencyResult(ctx, price)
 	if s.longPos != nil && s.longPos.filled {
 		s.tickManage(ctx, price, s.longPos, &s.longPos)
 	}
@@ -145,11 +166,16 @@ func (s *AIStrategy) throttledReplaceSL(symbol, posSide, closeSide string, qty, 
 func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posState, pptr **posState) {
 	// ── 1. Real-time SL check (must be instant, not wait for bar close) ──
 	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
-		s.log.Warn("TICK STOP-LOSS", zap.String("side", p.side),
+		closedSide := p.side
+		s.log.Warn("TICK STOP-LOSS", zap.String("side", closedSide),
 			zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
 		s.closePos(ctx, p, pptr, "stop_loss")
 		s.consecLoss++
 		s.stopBar = s.barCount
+		// Flag for immediate reversal evaluation on next OnBar.
+		s.postSLReeval = true
+		s.postSLSide = closedSide
+		s.postSLPrice = price
 		return
 	}
 
@@ -214,6 +240,11 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 				return
 			}
 		}
+
+		// ── 4b. Emergency reversal: if losing > 0.8R, trigger async GPT check ──
+		if pnlR < -0.8 && time.Since(s.lastEmergencyAt) > 30*time.Second {
+			s.emergencyReversalCheck(ctx, price, p)
+		}
 	}
 
 	// ── 5. Real-time trailing trigger ──
@@ -230,6 +261,100 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		s.closePos(ctx, p, pptr, "trailing")
 		s.consecLoss = 0
 		return
+	}
+}
+
+// emergencyReversalCheck launches an async GPT call when unrealized loss exceeds 0.8R.
+// The GPT call runs in a goroutine to avoid blocking tick processing.
+// Results are consumed by processEmergencyResult on the next tick.
+func (s *AIStrategy) emergencyReversalCheck(ctx *strategy.Context, price float64, p *posState) {
+	if s.emergencyActive.Load() { return }
+	s.lastEmergencyAt = time.Now()
+	s.emergencyActive.Store(true)
+
+	side := p.side
+	bars := s.primaryBars()
+	if len(bars) == 0 { s.emergencyActive.Store(false); return }
+
+	// Build context in the main goroutine (reads strategy state safely).
+	lastBar := bars[len(bars)-1]
+	syntheticBar := lastBar
+	syntheticBar.Close = price
+	mktCtx := s.buildContext(ctx, syntheticBar)
+
+	s.log.Info("TICK: launching async emergency GPT check",
+		zap.String("side", side), zap.Float64("price", price))
+
+	go func() {
+		defer s.emergencyActive.Store(false)
+		signal, err := s.callGPT(mktCtx)
+		if err != nil {
+			s.log.Warn("emergency GPT call failed", zap.Error(err))
+			return
+		}
+		select {
+		case s.emergencyCh <- emergencySignal{side: side, price: price, signal: signal}:
+		default:
+		}
+	}()
+}
+
+// processEmergencyResult consumes async emergency GPT results and acts on them.
+// Called from OnTick in the main goroutine — safe to modify strategy state.
+func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice float64) {
+	select {
+	case result := <-s.emergencyCh:
+		var p *posState
+		var pptr **posState
+		if result.side == "LONG" && s.longPos != nil && s.longPos.filled {
+			p = s.longPos; pptr = &s.longPos
+		} else if result.side == "SHORT" && s.shortPos != nil && s.shortPos.filled {
+			p = s.shortPos; pptr = &s.shortPos
+		}
+		if p == nil {
+			s.log.Info("TICK: emergency result arrived but position already closed")
+			return
+		}
+
+		signal := result.signal
+		reverseConf := 0.0
+		if p.side == "LONG" && signal.Short != nil { reverseConf = signal.Short.Confidence }
+		if p.side == "SHORT" && signal.Long != nil { reverseConf = signal.Long.Confidence }
+		if signal.Action != "" {
+			if p.side == "LONG" && signal.Action == "SELL" { reverseConf = signal.Confidence }
+			if p.side == "SHORT" && signal.Action == "BUY" { reverseConf = signal.Confidence }
+		}
+
+		s.log.Info("TICK: emergency result received",
+			zap.String("side", p.side), zap.Float64("price", currentPrice),
+			zap.Float64("reverse_conf", reverseConf))
+
+		emergencyThreshold := s.cfg.ReversalConf - 0.07
+		if emergencyThreshold < 0.55 { emergencyThreshold = 0.55 }
+
+		if reverseConf >= emergencyThreshold {
+			closedSide := p.side
+			s.log.Warn("TICK: emergency reversal → close "+closedSide,
+				zap.Float64("conf", reverseConf), zap.Float64("price", currentPrice))
+			s.closePos(ctx, p, pptr, "emergency_reversal")
+
+			if *pptr != nil { return }
+
+			atr := s.calcATR()
+			entry := math.Round(currentPrice*100) / 100
+			flipThreshold := (emergencyThreshold + s.cfg.ConfidenceThreshold) / 2
+			if closedSide == "LONG" && signal.Short != nil && signal.Short.Confidence >= flipThreshold && s.shortPos == nil {
+				s.lastConf = signal.Short.Confidence
+				s.log.Info("TICK: emergency flip → SHORT", zap.Float64("conf", signal.Short.Confidence))
+				s.openTrend(ctx, "SHORT", currentPrice, entry, atr)
+			}
+			if closedSide == "SHORT" && signal.Long != nil && signal.Long.Confidence >= flipThreshold && s.longPos == nil {
+				s.lastConf = signal.Long.Confidence
+				s.log.Info("TICK: emergency flip → LONG", zap.Float64("conf", signal.Long.Confidence))
+				s.openTrend(ctx, "LONG", currentPrice, entry, atr)
+			}
+		}
+	default:
 	}
 }
 

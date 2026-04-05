@@ -113,7 +113,6 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 	s.checkDayReset(ctx, price)
-	if s.dayHalted { return }
 
 	// Check syncer for externally closed positions
 	if s.syncer != nil {
@@ -153,15 +152,66 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 
-	// Manage positions on primary bar too
+	// Manage positions on primary bar too (SL, trailing, TP checks must run even if halted)
 	if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
 	if s.shortPos != nil { s.managePos(ctx, bar, s.shortPos, &s.shortPos) }
+
+	// dayHalted blocks NEW entries only — existing position management above must still run.
+	if s.dayHalted { return }
 
 	// Track if we have pending orders (for post-GPT cancel logic)
 	hasPendingLong := s.longPos != nil && !s.longPos.filled
 	hasPendingShort := s.shortPos != nil && !s.shortPos.filled
 
-	// Don't open new positions on the same bar as a stop-loss
+	// Post-SL immediate reversal: if SL fired on tick data, run an urgent GPT check
+	// and potentially open the reverse direction on the same bar.
+	if s.postSLReeval {
+		s.postSLReeval = false
+		closedSide := s.postSLSide
+		slPrice := s.postSLPrice
+		if slPrice <= 0 { slPrice = price }
+		s.log.Info("AI: post-SL urgent signal check",
+			zap.String("closed_side", closedSide), zap.Float64("sl_price", slPrice))
+
+		mktCtx := s.buildContext(ctx, bar)
+		sig, err := s.callGPT(mktCtx)
+		if err == nil {
+			s.cacheSignal(bar, sig)
+			s.lastCallBar = s.barCount
+			s.totalCall++
+
+			reverseConf := 0.0
+			if closedSide == "LONG" && sig.Short != nil { reverseConf = sig.Short.Confidence }
+			if closedSide == "SHORT" && sig.Long != nil { reverseConf = sig.Long.Confidence }
+			if sig.Action != "" {
+				if closedSide == "LONG" && sig.Action == "SELL" { reverseConf = sig.Confidence }
+				if closedSide == "SHORT" && sig.Action == "BUY" { reverseConf = sig.Confidence }
+			}
+			s.log.Info("AI: post-SL signal",
+				zap.String("closed_side", closedSide), zap.Float64("reverse_conf", reverseConf))
+
+			flipThreshold := (s.cfg.ReversalConf + s.cfg.ConfidenceThreshold) / 2
+			atr := s.calcATR()
+			entry := math.Round(price*100) / 100
+			if closedSide == "LONG" && reverseConf >= flipThreshold && s.shortPos == nil {
+				s.lastConf = reverseConf
+				s.log.Info("AI: post-SL flip → SHORT",
+					zap.Float64("conf", reverseConf), zap.Float64("price", price))
+				s.openTrend(ctx, "SHORT", price, entry, atr)
+				if s.shortPos != nil { s.shortPos.entryRegime = s.lastRegime }
+			}
+			if closedSide == "SHORT" && reverseConf >= flipThreshold && s.longPos == nil {
+				s.lastConf = reverseConf
+				s.log.Info("AI: post-SL flip → LONG",
+					zap.Float64("conf", reverseConf), zap.Float64("price", price))
+				s.openTrend(ctx, "LONG", price, entry, atr)
+				if s.longPos != nil { s.longPos.entryRegime = s.lastRegime }
+			}
+		}
+		return
+	}
+
+	// Don't open new positions on the same bar as a stop-loss (normal path)
 	if s.stopBar == s.barCount { return }
 
 	// ── Regime detection (every bar — sliding window, not batch) ──

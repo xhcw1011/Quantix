@@ -43,9 +43,14 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	// ── Stop-loss (always check locally — Trend has no exchange SL) ──
 	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
 		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+		closedSide := p.side
 		s.closePos(ctx, p, pptr, "stop_loss")
 		s.consecLoss++
 		s.stopBar = s.barCount
+		// Flag for immediate reversal evaluation in the OnBar signal path.
+		s.postSLReeval = true
+		s.postSLSide = closedSide
+		s.postSLPrice = price
 		return
 	}
 

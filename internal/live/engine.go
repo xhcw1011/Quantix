@@ -27,7 +27,8 @@ type EngineConfig struct {
 	StrategyID     string
 	InitialCapital float64 // used for % return calculations only; real balance synced from exchange
 	StatusInterval time.Duration
-	Leverage       int // futures leverage (e.g. 10 = 10x); 0 or 1 = spot (full margin)
+	BarInterval    time.Duration // primary kline interval for stale detection (e.g. 5*time.Minute)
+	Leverage       int           // futures leverage (e.g. 10 = 10x); 0 or 1 = spot (full margin)
 
 	// Margin monitoring thresholds (futures/swap only).
 	// Zero values use the MarginMonitor package defaults (warn=0.20, critical=0.12, interval=60s).
@@ -67,6 +68,7 @@ type Engine struct {
 	wins, total int
 	startTime   time.Time
 	dbWg        sync.WaitGroup // tracks in-flight DB write goroutines for clean shutdown
+	stratFillCh chan strategy.Fill // routes OnFill to the main goroutine (eliminates data race)
 
 	// Exchange interfaces (for futures — margin query and equity cache)
 	marginQuerier   exchange.MarginQuerier
@@ -147,7 +149,8 @@ func NewEngine(
 		marginMon:     mm,
 		marginQuerier: mq,
 		equityQuerier: eq,
-		tickCh:        make(chan float64, 64),
+		tickCh:        make(chan float64, 512),
+		stratFillCh:   make(chan strategy.Fill, 16),
 		log:           log,
 	}, nil
 }
@@ -399,6 +402,9 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				tr.OnTick(e.stratCtx, tickPrice)
 			}
 
+		case fill := <-e.stratFillCh:
+			e.strategy.OnFill(e.stratCtx, fill)
+
 		case <-statusTicker.C:
 			e.printStatus()
 			e.publishStatus()
@@ -510,9 +516,14 @@ func (e *Engine) processFills(ctx context.Context) {
 				e.broker.cash.Store(prevCash + notional - event.Fill.Fee)
 			}
 
+			// Update true wallet balance: only fees and realized PnL affect it.
+			// Opening a position does NOT change wallet balance (only locks margin).
+			prevWallet := e.broker.WalletBalance()
+			e.broker.walletBalance.Store(prevWallet + realized - event.Fill.Fee)
+
 			prices := map[string]float64{event.Fill.Symbol: event.Fill.Price}
 			unrealizedPnL := e.positions.TotalUnrealizedPnL(prices)
-			equity := e.broker.Cash() + unrealizedPnL
+			equity := e.broker.WalletBalance() + unrealizedPnL
 			e.broker.equity.Store(equity)
 
 			latencyMs := float64(fillTime.Sub(event.Fill.Timestamp).Milliseconds())
@@ -598,7 +609,12 @@ func (e *Engine) processFills(ctx context.Context) {
 				zap.Float64("latency_ms", latencyMs),
 			)
 
-			e.strategy.OnFill(e.stratCtx, event.Fill)
+			select {
+			case e.stratFillCh <- event.Fill:
+			default:
+				e.log.Warn("strategy fill channel full — OnFill delayed",
+					zap.String("order_id", event.Order.ID))
+			}
 		}
 	}
 }
@@ -664,9 +680,13 @@ func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
 		}
 	}
 
+	// Update true wallet balance
+	prevWallet := e.broker.WalletBalance()
+	e.broker.walletBalance.Store(prevWallet + realized - fill.Fee)
+
 	prices := map[string]float64{sym: fill.AvgPrice}
 	unrealizedPnL := e.positions.TotalUnrealizedPnL(prices)
-	equity := e.broker.Cash() + unrealizedPnL
+	equity := e.broker.WalletBalance() + unrealizedPnL
 	e.broker.equity.Store(equity)
 
 	e.log.Info("unmatched fill: cash updated",
@@ -699,5 +719,5 @@ func (pv *livePortfolioView) Position(symbol string) (qty, avgPrice float64, ok 
 
 func (pv *livePortfolioView) Equity(prices map[string]float64) float64 {
 	unrealized := pv.positions.TotalUnrealizedPnL(prices)
-	return pv.broker.Cash() + unrealized
+	return pv.broker.WalletBalance() + unrealized
 }

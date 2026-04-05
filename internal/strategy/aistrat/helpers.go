@@ -259,7 +259,10 @@ func (s *AIStrategy) saveStagedTPsToRedis(pos *posState) {
 }
 
 // loadStagedTPsFromRedis loads TP records on recovery.
-// If records exist, marks stagedTPPlaced=true to prevent duplicate placement.
+// Records are loaded for reference, but stagedTPPlaced is left FALSE so that
+// the next OnBar re-places all protective orders on the exchange.
+// The previous session's exchange orders are cancelled during engine shutdown,
+// so relying on them still being active would leave the position unprotected.
 func (s *AIStrategy) loadStagedTPsFromRedis(pos *posState) {
 	if s.rdb == nil || pos == nil { return }
 	val, err := s.rdb.Get(context.Background(), s.stagedTPRedisKey(pos.side)).Result()
@@ -267,9 +270,8 @@ func (s *AIStrategy) loadStagedTPsFromRedis(pos *posState) {
 	var records []stagedTPRecord
 	if err := json.Unmarshal([]byte(val), &records); err != nil { return }
 	pos.stagedTPs = records
-	if len(records) > 0 {
-		pos.stagedTPPlaced = true // exchange orders already exist from previous session
-	}
+	// stagedTPPlaced stays false — exchange orders were cancelled on shutdown.
+	// OnBar will detect !stagedTPPlaced and re-place SL+TP on the exchange.
 }
 
 // deleteStagedTPsFromRedis removes TP records when position is closed.

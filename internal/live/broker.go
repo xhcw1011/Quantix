@@ -38,9 +38,10 @@ type Broker struct {
 	notifier    *notify.Notifier // may be nil; used for critical alerts (e.g. unhedged position)
 	log         *zap.Logger
 
-	cash      atomic.Value // float64
-	equity    atomic.Value // float64
-	lastPrice atomic.Value // float64; updated by engine before each OnBar
+	cash          atomic.Value // float64 — internal accounting (affected by leverage/margin)
+	equity        atomic.Value // float64
+	walletBalance atomic.Value // float64 — true exchange wallet balance, independent of leverage
+	lastPrice     atomic.Value // float64; updated by engine before each OnBar
 
 	// engineCtx is set by engine.Run before processing begins.
 	// Poll goroutines for limit/stop orders use this context so they
@@ -76,6 +77,7 @@ func New(orderClient exchange.OrderClient, o *oms.OMS, pm *oms.PositionManager, 
 	}
 	b.cash.Store(0.0)
 	b.equity.Store(0.0)
+	b.walletBalance.Store(0.0)
 	b.lastPrice.Store(0.0)
 	return b
 }
@@ -96,6 +98,7 @@ func (b *Broker) SyncBalance(ctx context.Context, asset string) error {
 	}
 	b.cash.Store(free)
 	b.equity.Store(free)
+	b.walletBalance.Store(free)
 	b.log.Info("balance synced",
 		zap.String("asset", asset),
 		zap.Float64("free", free))
@@ -444,6 +447,9 @@ func (b *Broker) Cash() float64 { return safeLoadFloat64(&b.cash) }
 
 // Equity returns current total equity.
 func (b *Broker) Equity() float64 { return safeLoadFloat64(&b.equity) }
+
+// WalletBalance returns the true exchange wallet balance, independent of leverage.
+func (b *Broker) WalletBalance() float64 { return safeLoadFloat64(&b.walletBalance) }
 
 // safeLoadFloat64 loads a float64 from an atomic.Value without panicking.
 // Returns 0.0 if the stored value is nil or not a float64.

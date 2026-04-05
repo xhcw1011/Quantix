@@ -117,9 +117,9 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 		}
 	}
 
-	// Protective closes use market order (must fill immediately).
-	// Only GPT reversal uses limit (not time-critical, save on fees).
-	useMarket := reason == "stop_loss" || reason == "trailing" || reason == "bounce_tp"
+	// All protective and urgent closes use market order (must fill immediately).
+	useMarket := reason == "stop_loss" || reason == "trailing" || reason == "bounce_tp" ||
+		reason == "emergency_reversal" || reason == "gpt_reversal"
 	s.placeCloseOrder(ctx, p.side, qty, useMarket)
 	bars := s.primaryBars()
 	closePrice := 0.0
