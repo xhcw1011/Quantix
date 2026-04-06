@@ -23,11 +23,16 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 		if isPrimary && s.barCount-p.limitBar > s.cfg.LimitTimeoutBars {
 			s.log.Warn("AI: limit timeout — cancelling", zap.String("side", p.side), zap.String("id", p.orderID))
 			if p.orderID != "" { ctx.CancelOrder(p.orderID) }
-			// Check if OnFill already marked this as filled while we were cancelling.
-			// If filled, keep the position (cancel only affects unfilled remainder).
 			if p.filled {
 				s.log.Info("AI: limit order partially/fully filled before cancel, keeping position")
 				return
+			}
+			// Clear pendingFlip if this timed-out order was the flip order
+			if s.pendingFlip != nil && s.pendingFlip.reverseSide == p.side {
+				s.log.Info("AI: flip order timed out — keeping original position",
+					zap.String("flip_side", p.side),
+					zap.String("orig_side", s.pendingFlip.origSide))
+				s.pendingFlip = nil
 			}
 			s.syncRemove(p.side)
 			*pptr = nil
@@ -43,11 +48,12 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	// ── Stop-loss (always check locally — Trend has no exchange SL) ──
 	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
 		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+		// If a pending flip exists for this side, cancel the unfilled reverse order
+		s.cancelPendingFlipIfOrigSide(ctx, p.side)
 		closedSide := p.side
 		s.closePos(ctx, p, pptr, "stop_loss")
 		s.consecLoss++
 		s.stopBar = s.barCount
-		// Flag for immediate reversal evaluation in the OnBar signal path.
 		s.postSLReeval = true
 		s.postSLSide = closedSide
 		s.postSLPrice = price
@@ -167,29 +173,33 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 	}
 
 	// ── Trailing stop (R-based progressive tightening) ──
-	// Phase 1: pnlR >= 1.5 → move SL to breakeven (entry price)
-	// Phase 2: pnlR >= 2.0 → start ATR trailing (let trend run)
+	// Breakeven threshold adapts to entry regime:
+	//   STRONG_TREND/EXPANSION → TrendBreakevenR (wider, default 0.80)
+	//   Default → BreakevenR (tighter, default 0.40)
+	beR := s.cfg.BreakevenR
+	if (p.entryRegime == RegimeStrongTrend || p.entryRegime == RegimeExpansion) && s.cfg.TrendBreakevenR > 0 {
+		beR = s.cfg.TrendBreakevenR
+	}
+	atrTrailR := beR + 0.5 // ATR trailing starts half-R above breakeven
+
 	var newTrail float64
 	moved := false
 
-	if pnlR >= 2.0 {
-		// ATR trailing: follow peak with ATR×TrailATRK distance
+	if pnlR >= atrTrailR {
 		trailDist := atr * s.cfg.TrailingATRK
 		if p.side == "LONG" {
 			newTrail = p.peakPrice - trailDist
 		} else {
 			newTrail = p.peakPrice + trailDist
 		}
-		// Floor: never trail below breakeven once we're at 2R+
 		if p.side == "LONG" && newTrail < p.entryPrice { newTrail = p.entryPrice }
 		if p.side == "SHORT" && newTrail > p.entryPrice { newTrail = p.entryPrice }
 		moved = true
-	} else if pnlR >= 1.5 && !p.tp1RHit {
-		// Move to breakeven
+	} else if pnlR >= beR && !p.tp1RHit {
 		newTrail = p.entryPrice
 		p.tp1RHit = true
 		moved = true
-		s.log.Info("AI: trailing → breakeven", zap.String("side", p.side), zap.Float64("pnlR", pnlR))
+		s.log.Info("AI: trailing → breakeven", zap.String("side", p.side), zap.Float64("pnlR", pnlR), zap.Float64("beR", beR))
 	}
 
 	if moved {
@@ -217,6 +227,7 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		if p.side == "LONG" && p.peakPrice-price >= bounceThreshold && pnlR > 0 {
 			s.log.Info("AI: bounce TP — price retreated from peak",
 				zap.Float64("peak", p.peakPrice), zap.Float64("price", price), zap.Float64("pnlR", pnlR))
+			s.cancelPendingFlipIfOrigSide(ctx, p.side)
 			s.closePos(ctx, p, pptr, "bounce_tp")
 			s.consecLoss = 0
 			return
@@ -224,6 +235,7 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		if p.side == "SHORT" && price-p.peakPrice >= bounceThreshold && pnlR > 0 {
 			s.log.Info("AI: bounce TP — price bounced from low",
 				zap.Float64("peak", p.peakPrice), zap.Float64("price", price), zap.Float64("pnlR", pnlR))
+			s.cancelPendingFlipIfOrigSide(ctx, p.side)
 			s.closePos(ctx, p, pptr, "bounce_tp")
 			s.consecLoss = 0
 			return
@@ -232,18 +244,23 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 
 	// ── Local SL check (backup for exchange SL) ──
 	if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
+		s.cancelPendingFlipIfOrigSide(ctx, p.side)
 		s.closePos(ctx, p, pptr, "trailing")
 		if pnlR > 0 { s.consecLoss = 0 }
 		return
 	}
 	if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
+		s.cancelPendingFlipIfOrigSide(ctx, p.side)
 		s.closePos(ctx, p, pptr, "trailing")
 		if pnlR > 0 { s.consecLoss = 0 }
 		return
 	}
 
 	// ── GPT reversal check — only when losing (pnlR < 1.0) ──
-	// When profitable, let trailing/bounce handle exit. Don't cut winners.
+	// Skip if a flip order is already pending for this position.
+	if s.pendingFlip != nil && s.pendingFlip.origSide == p.side {
+		return
+	}
 	if pnlR < 1.0 && s.barCount-s.lastCallBar >= s.cfg.CallIntervalBars && p.barsHeld >= s.cfg.MinTrendBars {
 		s.checkReversal(ctx, bar, p, pptr)
 	}
@@ -300,46 +317,89 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 		zap.Float64("reverse_conf", reverseConf),
 		zap.String("reasoning", reverseReason))
 
-	// Reversal threshold lower than entry — exit faster when direction changes
+	// ── Flip-first reversal: place reverse limit order BEFORE closing ──
+	// Original position stays open until the flip order fills.
+	// If the flip order doesn't fill, we keep the original position (no harm done).
 	if reverseConf >= s.cfg.ReversalConf {
-		closedSide := p.side
-		s.log.Info("AI: reversal → close "+closedSide, zap.Float64("conf", reverseConf))
-		s.closePos(ctx, p, pptr, "gpt_reversal")
-
-		// Verify position was actually closed before attempting flip.
-		if *pptr != nil {
-			s.log.Warn("AI: flip aborted — close order may have failed")
+		// Already have a pending flip — don't place another
+		if s.pendingFlip != nil {
+			s.log.Info("AI: reversal signal but flip already pending",
+				zap.String("flip_side", s.pendingFlip.reverseSide),
+				zap.Float64("new_conf", reverseConf))
 			return
 		}
 
-		// Flip: immediately open the opposite direction using the GPT signal we already have.
-		// Flip threshold: halfway between ReversalConf and ConfidenceThreshold.
-		// Higher than reversal (not every close deserves a flip) but lower than normal entry
-		// (the reversal itself provides directional confirmation).
-		flipThreshold := (s.cfg.ReversalConf + s.cfg.ConfidenceThreshold) / 2 // e.g. (0.72+0.82)/2 = 0.77
 		atr := s.calcATR()
 		price := bar.Close
-		// Flip uses MARKET price — the whole point is immediate direction change.
-		// Don't wait for a limit fill that may never come.
-		if closedSide == "LONG" && signal.Short != nil && signal.Short.Confidence >= flipThreshold && s.shortPos == nil {
-			entry := math.Round(price*100) / 100 // market price
+		flipOffset := price * 0.0008 // 0.08% offset for better fill
+		maxDev := price * s.cfg.MaxEntryDevPct
+
+		if p.side == "LONG" && signal.Short != nil && s.shortPos == nil {
+			entry := math.Round((price+flipOffset)*100) / 100
+			if signal.Short.EntryPrice > 0 && signal.Short.EntryPrice > entry && (signal.Short.EntryPrice-price) <= maxDev {
+				entry = math.Round(signal.Short.EntryPrice*100) / 100
+			}
 			s.lastConf = signal.Short.Confidence
-			s.log.Info("AI: flip → open SHORT (market)",
+			s.log.Info("AI: flip-first → SHORT limit placed (keeping LONG open)",
 				zap.Float64("conf", signal.Short.Confidence),
-				zap.Float64("flip_threshold", flipThreshold),
-				zap.Float64("price", price))
+				zap.Float64("price", price),
+				zap.Float64("limit_entry", entry))
 			s.openTrend(ctx, "SHORT", price, entry, atr)
-			if s.shortPos != nil { s.shortPos.entryRegime = s.lastRegime }
+			if s.shortPos != nil {
+				s.shortPos.entryRegime = s.lastRegime
+				s.pendingFlip = &pendingFlipState{
+					reverseSide: "SHORT", origSide: "LONG",
+					entry: entry, conf: signal.Short.Confidence,
+					placedBar: s.barCount,
+				}
+			}
 		}
-		if closedSide == "SHORT" && signal.Long != nil && signal.Long.Confidence >= flipThreshold && s.longPos == nil {
-			entry := math.Round(price*100) / 100 // market price
+		if p.side == "SHORT" && signal.Long != nil && s.longPos == nil {
+			entry := math.Round((price-flipOffset)*100) / 100
+			if signal.Long.EntryPrice > 0 && signal.Long.EntryPrice < entry && (price-signal.Long.EntryPrice) <= maxDev {
+				entry = math.Round(signal.Long.EntryPrice*100) / 100
+			}
 			s.lastConf = signal.Long.Confidence
-			s.log.Info("AI: flip → open LONG (market)",
+			s.log.Info("AI: flip-first → LONG limit placed (keeping SHORT open)",
 				zap.Float64("conf", signal.Long.Confidence),
-				zap.Float64("flip_threshold", flipThreshold),
-				zap.Float64("price", price))
+				zap.Float64("price", price),
+				zap.Float64("limit_entry", entry))
 			s.openTrend(ctx, "LONG", price, entry, atr)
-			if s.longPos != nil { s.longPos.entryRegime = s.lastRegime }
+			if s.longPos != nil {
+				s.longPos.entryRegime = s.lastRegime
+				s.pendingFlip = &pendingFlipState{
+					reverseSide: "LONG", origSide: "SHORT",
+					entry: entry, conf: signal.Long.Confidence,
+					placedBar: s.barCount,
+				}
+			}
 		}
 	}
+}
+
+// cancelPendingFlipIfOrigSide cancels the unfilled flip order when the original
+// position is closed (e.g., by stop-loss). Without the original position,
+// the flip loses its hedging purpose.
+func (s *AIStrategy) cancelPendingFlipIfOrigSide(ctx *strategy.Context, closedSide string) {
+	if s.pendingFlip == nil || s.pendingFlip.origSide != closedSide {
+		return
+	}
+	flipSide := s.pendingFlip.reverseSide
+	s.log.Info("AI: cancelling pending flip (original position closed)",
+		zap.String("closed_side", closedSide),
+		zap.String("flip_side", flipSide))
+
+	var flipPos *posState
+	var flipPtr **posState
+	if flipSide == "LONG" && s.longPos != nil && !s.longPos.filled {
+		flipPos = s.longPos; flipPtr = &s.longPos
+	} else if flipSide == "SHORT" && s.shortPos != nil && !s.shortPos.filled {
+		flipPos = s.shortPos; flipPtr = &s.shortPos
+	}
+	if flipPos != nil {
+		if flipPos.orderID != "" { ctx.CancelOrder(flipPos.orderID) }
+		s.syncRemove(flipSide)
+		*flipPtr = nil
+	}
+	s.pendingFlip = nil
 }

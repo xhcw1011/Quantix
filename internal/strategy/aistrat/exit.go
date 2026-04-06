@@ -37,8 +37,16 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 		posSide = "SHORT"
 	}
 
+	// Select TP levels based on entry regime: wider targets for strong trends.
 	levels := s.cfg.TPLevels
 	splits := s.cfg.TPQtySplits
+	tpMode := "default"
+	if (pos.entryRegime == RegimeStrongTrend || pos.entryRegime == RegimeExpansion) &&
+		len(s.cfg.TrendTPLevels) > 0 && len(s.cfg.TrendTPQtySplits) > 0 {
+		levels = s.cfg.TrendTPLevels
+		splits = s.cfg.TrendTPQtySplits
+		tpMode = "trend"
+	}
 	if len(levels) == 0 || len(splits) == 0 || len(levels) != len(splits) {
 		s.log.Error("staged TP: invalid TPLevels/TPQtySplits config")
 		return
@@ -72,6 +80,8 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 		s.saveStagedTPsToRedis(pos)
 		s.log.Info("AI: staged TP orders placed on exchange",
 			zap.String("side", pos.side),
+			zap.String("tp_mode", tpMode),
+			zap.String("regime", string(pos.entryRegime)),
 			zap.Float64("entry", entry), zap.Float64("R", R),
 			zap.Float64("sl", pos.stopLoss),
 			zap.Any("levels", levels), zap.Any("splits", splits),

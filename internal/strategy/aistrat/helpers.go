@@ -171,11 +171,17 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		if s.longPos.trailing == 0 { s.longPos.trailing = sl }
 		if lp.Mode == "trend" { s.longPos.mode = modeTrend }
 		if lp.Mode == "range" { s.longPos.mode = modeRange }
+		if lp.EntryRegime != "" {
+			s.longPos.entryRegime = Regime(lp.EntryRegime)
+		} else {
+			s.longPos.entryRegime = s.detectRegime()
+		}
 
 		s.loadStagedTPsFromRedis(s.longPos)
 		s.log.Info("AI: recovered LONG from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", lp.Qty),
 			zap.Float64("stop", sl), zap.Float64("R", s.longPos.R),
+			zap.String("regime", string(s.longPos.entryRegime)),
 			zap.Int("staged_tps", len(s.longPos.stagedTPs)))
 	}
 
@@ -207,11 +213,17 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		if s.shortPos.trailing == 0 { s.shortPos.trailing = sl }
 		if sp.Mode == "trend" { s.shortPos.mode = modeTrend }
 		if sp.Mode == "range" { s.shortPos.mode = modeRange }
+		if sp.EntryRegime != "" {
+			s.shortPos.entryRegime = Regime(sp.EntryRegime)
+		} else {
+			s.shortPos.entryRegime = s.detectRegime()
+		}
 
 		s.loadStagedTPsFromRedis(s.shortPos)
 		s.log.Info("AI: recovered SHORT from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", sp.Qty),
 			zap.Float64("stop", sl), zap.Float64("R", s.shortPos.R),
+			zap.String("regime", string(s.shortPos.entryRegime)),
 			zap.Int("staged_tps", len(s.shortPos.stagedTPs)))
 	}
 }
@@ -234,6 +246,7 @@ func (s *AIStrategy) syncToRedis(pos *posState) {
 		R: pos.R, InitQty: pos.initQty,
 		TP1Hit: pos.tp1RHit, BarsHeld: pos.barsHeld,
 		OrderID: pos.orderID, Filled: pos.filled,
+		EntryRegime: string(pos.entryRegime),
 	}
 	s.syncer.UpdatePosition(context.Background(), sp)
 }

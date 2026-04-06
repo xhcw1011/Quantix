@@ -72,6 +72,10 @@ type AIStrategy struct {
 	replaySignals   []gptSignal // cached signals for backtest replay
 	replayIdx       int         // current index into replaySignals
 
+	// Flip-first reversal: reverse limit order placed while original position is still open.
+	// Original position closes only when the flip order fills.
+	pendingFlip     *pendingFlipState
+
 	// Post-SL immediate reversal: set by tickManage when SL fires on tick data.
 	// Cleared on next OnBar when the urgent GPT check runs.
 	postSLReeval    bool
@@ -121,22 +125,35 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	pos.filled = true
 	pos.filledAt = time.Now()
 	if fill.Price > 0 {
-		// Adjust SL by the fill-vs-order price difference, then compute unified R.
 		diff := fill.Price - pos.entryPrice
 		pos.entryPrice = fill.Price
 		pos.peakPrice = fill.Price
 		pos.stopLoss = math.Round((pos.stopLoss+diff)*100) / 100
 		pos.trailing = pos.stopLoss
-		pos.R = math.Abs(fill.Price - pos.stopLoss) // unified R = |entry - SL|
+		pos.R = math.Abs(fill.Price - pos.stopLoss)
 	}
 	s.log.Info("AI: fill confirmed",
 		zap.String("side", pos.side), zap.Float64("fill", fill.Price),
 		zap.Float64("stop", pos.stopLoss), zap.Float64("tp", pos.takeProfit))
 
-	// Persist updated TP/SL to Redis so recovery uses correct values.
 	s.syncToRedis(pos)
 
-	// Place staged TP orders on exchange. Local trailing handles SL exit.
+	// ── Flip-first: reverse order filled → close original position ──
+	if s.pendingFlip != nil && pos.side == s.pendingFlip.reverseSide {
+		origSide := s.pendingFlip.origSide
+		s.log.Info("AI: flip order filled → closing original position",
+			zap.String("new_side", pos.side),
+			zap.String("orig_side", origSide),
+			zap.Float64("fill_price", fill.Price))
+
+		if origSide == "LONG" && s.longPos != nil {
+			s.closePos(ctx, s.longPos, &s.longPos, "flip_reversal")
+		} else if origSide == "SHORT" && s.shortPos != nil {
+			s.closePos(ctx, s.shortPos, &s.shortPos, "flip_reversal")
+		}
+		s.pendingFlip = nil
+	}
+
 	if !pos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, pos)
 	}
@@ -336,6 +353,7 @@ func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice 
 			closedSide := p.side
 			s.log.Warn("TICK: emergency reversal → close "+closedSide,
 				zap.Float64("conf", reverseConf), zap.Float64("price", currentPrice))
+			s.cancelPendingFlipIfOrigSide(ctx, closedSide)
 			s.closePos(ctx, p, pptr, "emergency_reversal")
 
 			if *pptr != nil { return }
@@ -466,22 +484,27 @@ func (s *AIStrategy) maybeTightenTPs(pos *posState, lastFillPrice float64) {
 	spacing := atr * 0.3
 	if spacing < 1.0 { spacing = 1.0 } // minimum $1 spacing
 
+	// Floor: never tighten below 1.0R from entry — preserve meaningful profit target.
+	minTPDist := pos.R
+	if minTPDist < 5.0 { minTPDist = 5.0 }
+
 	needsReplace := false
 	for j, idx := range unfilled {
 		offset := spacing * float64(j+1)
 		var newPrice float64
 		if pos.side == "LONG" {
 			newPrice = math.Round((lastFillPrice+offset)*100) / 100
+			floor := math.Round((pos.entryPrice+minTPDist)*100) / 100
+			if newPrice < floor { newPrice = floor }
 		} else {
 			newPrice = math.Round((lastFillPrice-offset)*100) / 100
+			floor := math.Round((pos.entryPrice-minTPDist)*100) / 100
+			if newPrice > floor { newPrice = floor }
 		}
 		old := pos.stagedTPs[idx].Price
-		// Only tighten (move closer to entry), never push further out.
-		// LONG TPs are ABOVE entry — tightening = lowering the price (closer to entry)
-		// SHORT TPs are BELOW entry — tightening = raising the price (closer to entry)
-		if pos.side == "LONG" && newPrice > old { continue }  // new is further out, skip
-		if pos.side == "SHORT" && newPrice < old { continue } // new is further out, skip
-		if math.Abs(newPrice-old) < 0.5 { continue } // negligible change
+		if pos.side == "LONG" && newPrice > old { continue }
+		if pos.side == "SHORT" && newPrice < old { continue }
+		if math.Abs(newPrice-old) < 0.5 { continue }
 		pos.stagedTPs[idx].Price = newPrice
 		needsReplace = true
 	}

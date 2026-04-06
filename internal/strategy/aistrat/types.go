@@ -69,3 +69,14 @@ type gridOrder struct {
 	orderID    string
 	limitBar   int
 }
+
+// pendingFlipState tracks a reverse limit order placed BEFORE closing the original
+// position. The original position stays open until the flip order fills, avoiding
+// the scenario where we close a position and the reverse order never executes.
+type pendingFlipState struct {
+	reverseSide string  // new direction: "LONG" or "SHORT"
+	origSide    string  // original position side being flipped
+	entry       float64 // limit price of the flip order
+	conf        float64 // GPT confidence at placement
+	placedBar   int     // bar index when placed
+}

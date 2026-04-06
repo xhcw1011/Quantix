@@ -110,7 +110,7 @@ func (b *Broker) RebuildProtectiveOrders(orders []*data.OrderRecord) {
 	defer b.protMu.Unlock()
 	rebuilt := 0
 	for _, rec := range orders {
-		if rec.OrderRole != "stop_loss" && rec.OrderRole != "take_profit" {
+		if rec.OrderRole != "stop_loss" && rec.OrderRole != "take_profit" && rec.OrderRole != "staged_tp" {
 			continue
 		}
 		if rec.ExchangeID == "" {
@@ -189,8 +189,23 @@ func (b *Broker) cancelProtectiveOrders(ctx context.Context, symbol, posSide str
 // Returns true if at least one TP was placed.
 func (b *Broker) PlaceStagedTPOrders(ctx context.Context, symbol, posSide string, closeSide exchange.OrderSide, stopPrice, totalQty float64, tps []StagedTP) bool {
 	key := brokerPosKey(symbol, posSide)
+
+	// Cancel any existing staged TP orders before placing new ones.
+	// Critical after engine restart: old exchange orders survive but strategy re-places.
+	b.protMu.Lock()
+	oldIDs, hasOld := b.protectiveOrders[key]
+	b.protMu.Unlock()
+	if hasOld && len(oldIDs.tpIDs) > 0 {
+		b.log.Info("staged TP: cancelling old orders before re-placement", zap.Int("count", len(oldIDs.tpIDs)))
+		for _, tpID := range oldIDs.tpIDs {
+			if err := b.orderClient.CancelOrder(ctx, symbol, tpID); err != nil {
+				b.log.Warn("staged TP: cancel old order failed (may already be filled/cancelled)",
+					zap.String("tp_id", tpID), zap.Error(err))
+			}
+		}
+	}
+
 	ids := protectiveIDs{}
-	// No exchange SL for staged TP (Trend mode) — local trailing/reversal handles exit.
 
 	// Place each TP level as reduce-only limit order, tracked through OMS for fill detection.
 	for i, tp := range tps {

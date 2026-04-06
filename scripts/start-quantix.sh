@@ -12,10 +12,24 @@ export QUANTIX_JWT_SECRET="${QUANTIX_JWT_SECRET:-61ea018d43c6c953b4978606778107b
 export QUANTIX_LIVE_CONFIRM="${QUANTIX_LIVE_CONFIRM:-true}"
 export QUANTIX_API_ADDR="${QUANTIX_API_ADDR:-:9300}"
 
+# Stop old process if running
+if pgrep -f "quantix-api" > /dev/null 2>&1; then
+  echo "Stopping old quantix-api..."
+  pkill -f "quantix-api" || true
+  sleep 1
+fi
+
+# Build binary
+echo "Building quantix-api..."
+mkdir -p ./bin
+go build -o ./bin/quantix-api ./cmd/api
+
 # Log directory under project root
 LOG_DIR="./logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/quantix-$(date +%Y%m%d).log"
 
+# Start engine in background
 echo "=== Engine start: $(date) ===" >> "$LOG_FILE"
-exec ./bin/quantix-api -config config/config.yaml >> "$LOG_FILE" 2>&1
+nohup ./bin/quantix-api -config config/config.yaml >> "$LOG_FILE" 2>&1 &
+echo "quantix-api started (pid: $!)"

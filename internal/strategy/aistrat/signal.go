@@ -229,20 +229,6 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if s.accumLong < 0.01 { s.accumLong = 0 }
 	if s.accumShort < 0.01 { s.accumShort = 0 }
 
-	if regime == RegimeRange && s.longPos == nil && s.shortPos == nil {
-		if s.barCount%12 == 0 { // log every hour (12 × 5min)
-			bars := s.primaryBars()
-			ts := 0.0
-			if len(bars) > s.cfg.RegimeN && atr > 0 {
-				ts = math.Abs(price-bars[len(bars)-s.cfg.RegimeN].Close) / atr
-			}
-			s.log.Info("AI: skip — RANGE regime (no trend)",
-				zap.Float64("atr", atr), zap.Float64("trend_strength", ts),
-				zap.Float64("price", price))
-		}
-		return
-	}
-
 	// Force immediate GPT check if a position was closed externally (SL hit, manual close).
 	forceCheck := false
 	if s.syncer != nil && s.syncer.PositionClosedExternally.CompareAndSwap(true, false) {
@@ -250,9 +236,14 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		s.log.Info("AI: position closed externally — forcing immediate signal check")
 	}
 
-	// GPT signal check (every N primary bars, or immediately if forced)
+	// GPT call frequency: reduced in RANGE with no positions (saves API calls)
 	interval := s.cfg.CallIntervalBars
 	if interval < 1 { interval = 1 }
+	if regime == RegimeRange && s.longPos == nil && s.shortPos == nil {
+		ri := s.cfg.RangeCallIntervalBars
+		if ri < 1 { ri = 3 }
+		interval = ri
+	}
 	if !forceCheck && s.barCount-s.lastCallBar < interval { return }
 
 	if s.consecLoss >= s.cfg.MaxConsecLoss {
@@ -337,14 +328,17 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	effectiveShort := math.Max(shortConf, s.accumShort)
 
 	// ── Two-layer decision: regime determines conditions, GPT adds weight ──
-	// The lower threshold (RegimeEntryConf=0.60) only applies to the WITH-trend direction.
-	// Counter-trend entries must still meet the full ConfidenceThreshold (0.82).
-	// This prevents opening LONG in a bearish STRONG_TREND (which caused the 15:04 bad trade).
+	// STRONG_TREND/EXPANSION: with-trend entries use RegimeEntryConf (0.60), counter-trend stays at full threshold.
+	// RANGE: both directions use RangeEntryConf (0.75) — lower than full threshold but still requires decent conviction.
+	// SLOW_TREND: uses full ConfidenceThreshold (0.82).
 	entryConfLong := s.cfg.ConfidenceThreshold
 	entryConfShort := s.cfg.ConfidenceThreshold
 	if regime == RegimeStrongTrend || regime == RegimeExpansion {
 		if s.lastTrendDir >= 0 { entryConfLong = s.cfg.RegimeEntryConf }   // bullish → lower long threshold
 		if s.lastTrendDir <= 0 { entryConfShort = s.cfg.RegimeEntryConf }  // bearish → lower short threshold
+	} else if regime == RegimeRange && s.cfg.RangeEntryConf > 0 {
+		entryConfLong = s.cfg.RangeEntryConf
+		entryConfShort = s.cfg.RangeEntryConf
 	}
 	// entryConfLong / entryConfShort used throughout below for directional entry decisions.
 
@@ -605,8 +599,8 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			}
 			// Regime-based entry mode
 			switch regime {
-			case RegimeStrongTrend, RegimeExpansion:
-				entry = price // market entry — trend/breakout won't wait
+			case RegimeStrongTrend, RegimeExpansion, RegimeRange:
+				entry = price // market entry — don't wait for limit fill
 				s.log.Info("AI: market entry", zap.String("side", "LONG"),
 					zap.String("regime", string(regime)), zap.Float64("conf", longConf))
 			default: // SLOW_TREND
@@ -647,8 +641,8 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			}
 			// Regime-based entry mode
 			switch regime {
-			case RegimeStrongTrend, RegimeExpansion:
-				entry = price // market entry — trend/breakout won't wait
+			case RegimeStrongTrend, RegimeExpansion, RegimeRange:
+				entry = price // market entry — don't wait for limit fill
 				s.log.Info("AI: market entry", zap.String("side", "SHORT"),
 					zap.String("regime", string(regime)), zap.Float64("conf", shortConf))
 			default: // SLOW_TREND

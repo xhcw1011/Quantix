@@ -19,6 +19,7 @@ func init() {
 		if v, ok := params["ConfidenceThreshold"]; ok { cfg.ConfidenceThreshold = toFloat(v) }
 		if v, ok := params["LookbackBars"]; ok { cfg.LookbackBars = toInt(v) }
 		if v, ok := params["CallIntervalBars"]; ok { cfg.CallIntervalBars = toInt(v) }
+		if v, ok := params["RangeCallIntervalBars"]; ok { cfg.RangeCallIntervalBars = toInt(v) }
 		if v, ok := params["RiskPerTrade"]; ok { cfg.RiskPerTrade = toFloat(v) }
 		if v, ok := params["ATRK"]; ok { cfg.ATRK = toFloat(v) }
 		if v, ok := params["TrailingATRK"]; ok { cfg.TrailingATRK = toFloat(v) }
@@ -89,6 +90,7 @@ func init() {
 		if v, ok := params["ExpansionATRK"]; ok { cfg.ExpansionATRK = toFloat(v) }
 		if v, ok := params["ExpansionBodyK"]; ok { cfg.ExpansionBodyK = toFloat(v) }
 		if v, ok := params["RegimeEntryConf"]; ok { cfg.RegimeEntryConf = toFloat(v) }
+		if v, ok := params["RangeEntryConf"]; ok { cfg.RangeEntryConf = toFloat(v) }
 		if v, ok := params["RSIPeriod"]; ok { cfg.RSIPeriod = toInt(v) }
 		if v, ok := params["MACDFast"]; ok { cfg.MACDFast = toInt(v) }
 		if v, ok := params["MACDSlow"]; ok { cfg.MACDSlow = toInt(v) }
@@ -137,8 +139,9 @@ type Config struct {
 	Model               string
 	ConfidenceThreshold float64
 	LookbackBars        int
-	CallIntervalBars    int
-	EnableShort         bool
+	CallIntervalBars      int
+	RangeCallIntervalBars int // GPT call interval (in bars) when regime=RANGE and no positions (default 3)
+	EnableShort           bool
 	HedgeMode           bool          // true = long+short simultaneously; false = single strongest direction
 	ForceTrend          bool          // true = disable Range mode, always use Trend mode
 	HedgeOnDrawdown     bool          // true = allow counter-trend Range scalp when main position is losing
@@ -167,8 +170,13 @@ type Config struct {
 	GridQtyRatio   float64 // grid qty as ratio of base qty (default 0.5)
 
 	// Staged TP (trend mode) — exchange-native limit orders
-	TPLevels     []float64 // R-multiples for each TP level (default [1.0, 1.5, 2.5, 4.0])
-	TPQtySplits  []float64 // fraction of qty for each level (default [0.40, 0.30, 0.20, 0.10])
+	// Default (range/slow_trend) TP levels:
+	TPLevels     []float64 // R-multiples for each TP level
+	TPQtySplits  []float64 // fraction of qty for each level
+	// Strong-trend TP levels (wider targets to ride momentum):
+	TrendTPLevels    []float64 // R-multiples for STRONG_TREND/EXPANSION (default [1.0, 1.8])
+	TrendTPQtySplits []float64 // fraction of qty for trend TP (default [0.50, 0.30])
+	TrendBreakevenR  float64   // breakeven R for trend mode (default 0.80)
 	BreakevenR   float64   // R threshold to move SL to breakeven (default 0.5)
 	BreakevenBuf float64   // buffer above/below entry for breakeven SL (default 0.001 = 0.1%)
 
@@ -215,6 +223,7 @@ type Config struct {
 	ExpansionATRK         float64 // bar range > ATR * this = breakout candidate (default 2.0)
 	ExpansionBodyK        float64 // bar body > ATR * this = confirmed breakout (default 1.0)
 	RegimeEntryConf       float64 // GPT confidence threshold when STRONG_TREND/EXPANSION (default 0.60)
+	RangeEntryConf        float64 // GPT confidence threshold when RANGE (default 0.75)
 
 	// Technical indicator periods
 	RSIPeriod   int     // RSI lookback (default 14)
@@ -249,16 +258,19 @@ func DefaultConfig() Config {
 	return Config{
 		Symbol: "ETHUSDT", Model: "gpt-5.4-mini",
 		ConfidenceThreshold: 0.82, LookbackBars: 60,
-		CallIntervalBars: 2, EnableShort: true,
+		CallIntervalBars: 1, RangeCallIntervalBars: 1, EnableShort: true,
 		RiskPerTrade: 0.02, ATRK: 2.0, TrailingATRK: 1.5,
 		RangeTPPct: 0.012, RangeSLPct: 0.010,
 		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
-		TPLevels: []float64{0.55, 0.80},
+		TPLevels: []float64{0.65, 1.50},
 		TPQtySplits: []float64{0.70, 0.30},
-		BreakevenR: 0.40, BreakevenBuf: 0.001,
+		TrendTPLevels: []float64{0.65, 1.50},
+		TrendTPQtySplits: []float64{0.70, 0.30},
+		TrendBreakevenR: 0.50,
+		BreakevenR: 0.50, BreakevenBuf: 0.001,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015,
 		TrailFloorPct: 0.005, MinSLDistPct: 0.008,
-		ReversalConf: 0.72, MarketEntryConf: 0.90,
+		ReversalConf: 0.60, MarketEntryConf: 0.90,
 		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
@@ -266,10 +278,10 @@ func DefaultConfig() Config {
 		MTFBullRSI: 60, MTFBearRSI: 40, MTF1mThreshold: 0.001,
 		MTFQtyScaleHard: 0.70, MTFQtyScaleSoft: 0.85, SwingProximity: 0.0015,
 		ConfQtyScale: true, ForceTrend: true, MaxRPercent: 0.01, FeeDragPct: 0.0014,
-		SignalDecay: 0.85, SignalAccumMax: 1.5,
-		RegimeN: 20, StrongTrendThreshold: 2.5, StrongTrendMinVol: 0.001,
+		SignalDecay: 0.90, SignalAccumMax: 1.5,
+		RegimeN: 12, StrongTrendThreshold: 2.5, StrongTrendMinVol: 0.001,
 		SlowTrendThreshold: 1.5, SlowTrendDirScore: 0.60,
-		ExpansionATRK: 2.0, ExpansionBodyK: 1.0, RegimeEntryConf: 0.60,
+		ExpansionATRK: 2.0, ExpansionBodyK: 1.0, RegimeEntryConf: 0.60, RangeEntryConf: 0.75,
 		RSIPeriod: 14, MACDFast: 12, MACDSlow: 26, MACDSignal: 9,
 		EMAFast: 20, EMASlow: 50, BBPeriod: 20, BBStdDev: 2.0,
 		ATRPeriod: 60, VolMAPeriod: 20,

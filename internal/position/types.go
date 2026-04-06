@@ -29,8 +29,9 @@ type StrategyPosition struct {
 	InitQty    float64 `json:"init_qty"`
 	TP1Hit     bool    `json:"tp1_hit"`
 	BarsHeld   int     `json:"bars_held"`
-	OrderID    string  `json:"order_id"`
-	Filled     bool    `json:"filled"`
+	OrderID      string  `json:"order_id"`
+	Filled       bool    `json:"filled"`
+	EntryRegime  string  `json:"entry_regime,omitempty"`
 }
 
 // PositionEvent describes a change detected by the syncer.
