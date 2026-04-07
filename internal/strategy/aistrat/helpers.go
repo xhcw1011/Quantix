@@ -110,6 +110,16 @@ func (s *AIStrategy) detectRegime() Regime {
 	if trendStrength > s.cfg.SlowTrendThreshold && dirScore > s.cfg.SlowTrendDirScore {
 		return RegimeSlowTrend
 	}
+
+	// Signal accumulation override: sustained directional GPT signals
+	// imply a trend even when price-based metrics show RANGE.
+	if trendDir > 0 && s.accumLong > 0.5 {
+		return RegimeSlowTrend
+	}
+	if trendDir < 0 && s.accumShort > 0.5 {
+		return RegimeSlowTrend
+	}
+
 	return RegimeRange
 }
 

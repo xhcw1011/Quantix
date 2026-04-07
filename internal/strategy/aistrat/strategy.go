@@ -1,10 +1,8 @@
-// Package aistrat implements an AI-driven dual-mode trading strategy.
+// Package aistrat implements an AI-driven trading strategy with regime detection.
 //
-// Trend Mode: R-based sizing, trailing stop, let profits run.
-// Range Mode: fixed TP/SL scalping, quick in/out, supports simultaneous long+short.
-//
-// GPT decides direction (BUY/SELL/HOLD). Regime detection picks the mode.
-// Hedge Mode: LONG and SHORT positions managed independently.
+// Regime detection (STRONG_TREND, SLOW_TREND, EXPANSION, RANGE) determines
+// entry thresholds and mode. GPT provides directional signals with confidence.
+// ATR-adaptive TP + R-based trailing stop manage exits.
 package aistrat
 
 import (
@@ -72,10 +70,6 @@ type AIStrategy struct {
 	replaySignals   []gptSignal // cached signals for backtest replay
 	replayIdx       int         // current index into replaySignals
 
-	// Flip-first reversal: reverse limit order placed while original position is still open.
-	// Original position closes only when the flip order fills.
-	pendingFlip     *pendingFlipState
-
 	// Post-SL immediate reversal: set by tickManage when SL fires on tick data.
 	// Cleared on next OnBar when the urgent GPT check runs.
 	postSLReeval    bool
@@ -138,22 +132,6 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 
 	s.syncToRedis(pos)
 
-	// ── Flip-first: reverse order filled → close original position ──
-	if s.pendingFlip != nil && pos.side == s.pendingFlip.reverseSide {
-		origSide := s.pendingFlip.origSide
-		s.log.Info("AI: flip order filled → closing original position",
-			zap.String("new_side", pos.side),
-			zap.String("orig_side", origSide),
-			zap.Float64("fill_price", fill.Price))
-
-		if origSide == "LONG" && s.longPos != nil {
-			s.closePos(ctx, s.longPos, &s.longPos, "flip_reversal")
-		} else if origSide == "SHORT" && s.shortPos != nil {
-			s.closePos(ctx, s.shortPos, &s.shortPos, "flip_reversal")
-		}
-		s.pendingFlip = nil
-	}
-
 	if !pos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, pos)
 	}
@@ -206,20 +184,26 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		if p.side == "LONG" { pnlR = (price - p.entryPrice) / p.R }
 		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
 
-		// Phase 2: pnlR >= 2.0 → ATR trailing
-		if pnlR >= 2.0 {
+		// Trailing thresholds must match manageTrend (use same config values).
+		beR := s.cfg.BreakevenR
+		if (p.entryRegime == RegimeStrongTrend || p.entryRegime == RegimeExpansion) && s.cfg.TrendBreakevenR > 0 {
+			beR = s.cfg.TrendBreakevenR
+		}
+		atrTrailR := beR + 0.5
+
+		// Phase 2: pnlR >= atrTrailR → ATR trailing
+		if pnlR >= atrTrailR {
 			atr := s.calcATR()
 			trailDist := atr * s.cfg.TrailingATRK
 			var newTrail float64
 			if p.side == "LONG" {
 				newTrail = p.peakPrice - trailDist
-				if newTrail < p.entryPrice { newTrail = p.entryPrice } // floor at BE
+				if newTrail < p.entryPrice { newTrail = p.entryPrice }
 			} else {
 				newTrail = p.peakPrice + trailDist
 				if newTrail > p.entryPrice { newTrail = p.entryPrice }
 			}
 			newTrail = math.Round(newTrail*100) / 100
-			// Only tighten
 			if p.side == "LONG" && newTrail > p.trailing {
 				p.trailing = newTrail
 				s.throttledReplaceSL(s.cfg.Symbol, "LONG", "SELL", p.remainQty, p.trailing)
@@ -229,19 +213,20 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 				s.throttledReplaceSL(s.cfg.Symbol, "SHORT", "BUY", p.remainQty, p.trailing)
 			}
 		}
-		// Phase 1: pnlR >= 1.5 → breakeven
-		if pnlR >= 1.5 && !p.tp1RHit {
+		// Phase 1: pnlR >= beR → breakeven
+		if pnlR >= beR && !p.tp1RHit {
 			p.trailing = p.entryPrice
 			p.tp1RHit = true
 			closeSide := "SELL"
 			if p.side == "SHORT" { closeSide = "BUY" }
 			s.throttledReplaceSL(s.cfg.Symbol, p.side, closeSide, p.remainQty, p.trailing)
-			s.log.Info("TICK: trailing → breakeven", zap.String("side", p.side), zap.Float64("pnlR", pnlR))
+			s.log.Info("TICK: trailing → breakeven", zap.String("side", p.side),
+				zap.Float64("pnlR", pnlR), zap.Float64("beR", beR))
 		}
 
 		// ── 4. Real-time bounce TP (remaining position) ──
 		if p.remainQty < p.initQty && p.remainQty > 0 && pnlR > 0 {
-			bounceThreshold := 0.5 * p.R
+			bounceThreshold := 0.8 * p.R
 			if p.side == "LONG" && p.peakPrice-price >= bounceThreshold {
 				s.log.Info("TICK: bounce TP", zap.String("side", p.side),
 					zap.Float64("peak", p.peakPrice), zap.Float64("price", price))
@@ -258,8 +243,9 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 			}
 		}
 
-		// ── 4b. Emergency reversal: if losing > 0.8R, trigger async GPT check ──
-		if pnlR < -0.8 && time.Since(s.lastEmergencyAt) > 30*time.Second {
+		// ── 4b. Emergency reversal: if losing > 0.9R, trigger async GPT check ──
+		// Raised from -0.8R to -0.9R, cooldown 30s→60s to avoid premature cuts.
+		if pnlR < -0.9 && time.Since(s.lastEmergencyAt) > 60*time.Second {
 			s.emergencyReversalCheck(ctx, price, p)
 		}
 	}
@@ -281,7 +267,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 	}
 }
 
-// emergencyReversalCheck launches an async GPT call when unrealized loss exceeds 0.8R.
+// emergencyReversalCheck launches an async GPT call when unrealized loss exceeds 0.9R.
 // The GPT call runs in a goroutine to avoid blocking tick processing.
 // Results are consumed by processEmergencyResult on the next tick.
 func (s *AIStrategy) emergencyReversalCheck(ctx *strategy.Context, price float64, p *posState) {
@@ -346,31 +332,17 @@ func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice 
 			zap.String("side", p.side), zap.Float64("price", currentPrice),
 			zap.Float64("reverse_conf", reverseConf))
 
-		emergencyThreshold := s.cfg.ReversalConf - 0.07
-		if emergencyThreshold < 0.55 { emergencyThreshold = 0.55 }
+		// Emergency threshold = ReversalConf (same bar, not easier).
+		// Previously was ReversalConf-0.07 which made it too easy to trigger (0.53).
+		emergencyThreshold := s.cfg.ReversalConf
+		if emergencyThreshold < 0.65 { emergencyThreshold = 0.65 }
 
 		if reverseConf >= emergencyThreshold {
 			closedSide := p.side
 			s.log.Warn("TICK: emergency reversal → close "+closedSide,
 				zap.Float64("conf", reverseConf), zap.Float64("price", currentPrice))
-			s.cancelPendingFlipIfOrigSide(ctx, closedSide)
 			s.closePos(ctx, p, pptr, "emergency_reversal")
-
-			if *pptr != nil { return }
-
-			atr := s.calcATR()
-			entry := math.Round(currentPrice*100) / 100
-			flipThreshold := (emergencyThreshold + s.cfg.ConfidenceThreshold) / 2
-			if closedSide == "LONG" && signal.Short != nil && signal.Short.Confidence >= flipThreshold && s.shortPos == nil {
-				s.lastConf = signal.Short.Confidence
-				s.log.Info("TICK: emergency flip → SHORT", zap.Float64("conf", signal.Short.Confidence))
-				s.openTrend(ctx, "SHORT", currentPrice, entry, atr)
-			}
-			if closedSide == "SHORT" && signal.Long != nil && signal.Long.Confidence >= flipThreshold && s.longPos == nil {
-				s.lastConf = signal.Long.Confidence
-				s.log.Info("TICK: emergency flip → LONG", zap.Float64("conf", signal.Long.Confidence))
-				s.openTrend(ctx, "LONG", currentPrice, entry, atr)
-			}
+			// No flip — let next bar's normal flow decide new direction.
 		}
 	default:
 	}
@@ -428,8 +400,16 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 		s.syncRemove(pos.side)
 		*pptr = nil
 	} else {
-		// Update exchange SL qty to match remaining position after TP fill.
-		if s.stagedEP != nil && pos.trailing > 0 {
+		// TP1 filled → move SL to breakeven immediately.
+		// This ensures the remaining position can't turn a profitable trade into a loss.
+		if !pos.tp1RHit {
+			pos.tp1RHit = true
+			pos.trailing = pos.entryPrice
+			s.log.Info("AI: TP fill → trailing to breakeven",
+				zap.String("side", pos.side), zap.Float64("entry", pos.entryPrice))
+		}
+		// Update exchange SL to match breakeven + remaining qty.
+		if s.stagedEP != nil {
 			closeSide := "SELL"
 			if pos.side == "SHORT" { closeSide = "BUY" }
 			s.stagedEP.ReplaceSLOrder(s.cfg.Symbol, pos.side, closeSide, pos.remainQty, pos.trailing)

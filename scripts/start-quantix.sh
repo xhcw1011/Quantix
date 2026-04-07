@@ -1,35 +1,87 @@
 #!/bin/bash
-# Quantix API server startup script
+# Quantix — build, start, health check, auto-start engine
 # Usage: ./scripts/start-quantix.sh
-# Logs written to ./logs/quantix-YYYYMMDD.log (date rotation, append mode)
+# Logs: ./logs/quantix-YYYYMMDD.log
 
 set -e
 cd "$(dirname "$0")/.."
 
-# Environment variables (defaults baked in, override via env if needed)
+# ─── Environment ─────────────────────────────────────────────────────────────
 export QUANTIX_ENCRYPTION_KEY="${QUANTIX_ENCRYPTION_KEY:-b16f993bf0b8c2695bd9773ca9b24d060ea78182d884c3f4056fd80e4e021743}"
 export QUANTIX_JWT_SECRET="${QUANTIX_JWT_SECRET:-61ea018d43c6c953b4978606778107beb341e6e56b8b9e7b21df252897b0e55d}"
 export QUANTIX_LIVE_CONFIRM="${QUANTIX_LIVE_CONFIRM:-true}"
 export QUANTIX_API_ADDR="${QUANTIX_API_ADDR:-:9300}"
+API="http://localhost${QUANTIX_API_ADDR}"
 
-# Stop old process if running
+# ─── Stop old process ────────────────────────────────────────────────────────
 if pgrep -f "quantix-api" > /dev/null 2>&1; then
   echo "Stopping old quantix-api..."
   pkill -f "quantix-api" || true
-  sleep 1
+  sleep 2
 fi
 
-# Build binary
-echo "Building quantix-api..."
+# ─── Build ───────────────────────────────────────────────────────────────────
+echo "Building..."
 mkdir -p ./bin
 go build -o ./bin/quantix-api ./cmd/api
 
-# Log directory under project root
+# ─── Start ───────────────────────────────────────────────────────────────────
 LOG_DIR="./logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/quantix-$(date +%Y%m%d).log"
 
-# Start engine in background
 echo "=== Engine start: $(date) ===" >> "$LOG_FILE"
 nohup ./bin/quantix-api -config config/config.yaml >> "$LOG_FILE" 2>&1 &
-echo "quantix-api started (pid: $!)"
+PID=$!
+echo "quantix-api started (pid: $PID)"
+
+# ─── Health check ────────────────────────────────────────────────────────────
+echo "Waiting for health check..."
+for i in $(seq 1 10); do
+  sleep 1
+  if curl -sf "$API/api/health" > /dev/null 2>&1; then
+    echo "Health: OK"
+    break
+  fi
+  if [ $i -eq 10 ]; then
+    echo "ERROR: health check failed after 10s"
+    tail -20 "$LOG_FILE"
+    exit 1
+  fi
+done
+
+# ─── Auto-start engine (if session exists, auto-restart handles it) ──────────
+# Check if there's an active engine session — if so, auto-restart will pick it up.
+# If not, start one manually.
+sleep 3
+TOKEN=$(printf '{"username":"stresstest","password":"StressTest123!"}' | \
+  curl -s -X POST "$API/api/auth/login" -H 'Content-Type: application/json' -d @- 2>/dev/null | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token',''))" 2>/dev/null || true)
+
+if [ -n "$TOKEN" ]; then
+  # Check if engine is already running (auto-restarted from session)
+  STATUS=$(curl -s -H "Authorization: Bearer $TOKEN" "$API/api/engine/status" 2>/dev/null || true)
+  if echo "$STATUS" | grep -q '"running"'; then
+    echo "Engine already running (auto-restart from session)"
+  else
+    echo "Starting AI engine..."
+    RESULT=$(printf '{
+      "credential_id": 2,
+      "strategy_id": "ai",
+      "symbol": "ETHUSDT",
+      "interval": "5m",
+      "mode": "live",
+      "confirm_live": true,
+      "params": {"Symbol":"ETHUSDT","EnableShort":true,"Intervals":["1m","5m","15m"]},
+      "risk": {"max_position_pct":0.6,"max_drawdown_pct":0.10,"max_single_loss_pct":0.04}
+    }' | curl -s --max-time 60 -X POST "$API/api/engine/start" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H 'Content-Type: application/json' -d @- 2>/dev/null || true)
+    echo "Engine: $RESULT"
+  fi
+else
+  echo "Note: could not login — engine needs manual start via API or will auto-restart from session"
+fi
+
+echo ""
+echo "Done. Logs: tail -f $LOG_FILE"

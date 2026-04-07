@@ -40,8 +40,7 @@ type posState struct {
 	limitBar   int
 
 	// Staged TP (trend mode): exchange-native limit orders
-	stagedTPPlaced bool // true once SL + TP orders are on the exchange
-	breakevenMoved bool // true once SL has been moved to breakeven at +0.5R
+	stagedTPPlaced bool // true once TP orders are on the exchange
 	stagedTPs      []stagedTPRecord // tracks each TP level for dynamic adjustment
 
 	// Regime at entry time (determines management behavior)
@@ -70,13 +69,3 @@ type gridOrder struct {
 	limitBar   int
 }
 
-// pendingFlipState tracks a reverse limit order placed BEFORE closing the original
-// position. The original position stays open until the flip order fills, avoiding
-// the scenario where we close a position and the reverse order never executes.
-type pendingFlipState struct {
-	reverseSide string  // new direction: "LONG" or "SHORT"
-	origSide    string  // original position side being flipped
-	entry       float64 // limit price of the flip order
-	conf        float64 // GPT confidence at placement
-	placedBar   int     // bar index when placed
-}

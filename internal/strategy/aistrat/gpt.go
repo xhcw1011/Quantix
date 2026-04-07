@@ -34,53 +34,32 @@ type subSignal struct {
 	Reasoning  string  `json:"reasoning"`
 }
 
-const systemPrompt = `You are a crypto futures trader. Multi-timeframe analysis: 5m (entry) + 15m (trend).
+const systemPrompt = `Crypto futures signal scorer. JSON only:
+{"long":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"<1 sentence>"},"short":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"<1 sentence>"}}
 
-RESPONSE (strict JSON):
-{"long":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."},"short":{"confidence":0.0-1.0,"entry_price":0.00,"reasoning":"..."}}
+INPUTS: trend_dir (+1=up,-1=down,0=flat), regime, indicators_15m.structure (1=bull,-1=bear,0=range), 5m indicators.
 
-MULTI-TIMEFRAME RULES:
-1. CHECK indicators_15m.structure FIRST — this is pre-computed and authoritative:
-   - structure = 1: BULLISH (EMA20 > EMA50) → favor long, short needs strong evidence
-   - structure = -1: BEARISH (EMA20 < EMA50) → favor short, long needs strong evidence
-   - structure = 0: RANGE → both sides OK
-   DO NOT re-interpret EMA values yourself — use the structure field directly.
-2. THEN check return_8bar for MOMENTUM:
-   - 15m return_8bar > +1%: strong upward momentum
-   - 15m return_8bar < -1%: strong downward momentum
-   - Between ±1%: weak/mixed momentum
-3. CRITICAL — distinguish BOUNCE from REVERSAL:
-   - If 15m EMA structure is BEARISH but return_8bar is temporarily positive:
-     this is an OVERSOLD BOUNCE, NOT a trend reversal. Keep long confidence < 0.50.
-   - If 15m EMA structure is BULLISH but return_8bar is temporarily negative:
-     this is an OVERBOUGHT PULLBACK, NOT a trend reversal. Keep short confidence < 0.50.
-   - EXCEPTION — EARLY REVERSAL: If price has moved >2% against the EMA structure
-     (e.g., price far below EMA20 in bearish structure AND 5m shows strong momentum shift:
-     MACD turning positive, RSI rising from oversold, volume spike), this may be an
-     early reversal BEFORE the EMA crossover. In this case, allow confidence up to 0.70
-     for the counter-trend direction. EMA is a lagging indicator — don't wait for it
-     to cross if price action is already showing clear reversal signals.
-   - True confirmed reversal requires BOTH structure change AND momentum alignment.
-4. USE 5m indicators for precise timing:
-   - long entry_price: nearest SUPPORT (swing_low_10, bb_lower, ema20), below current price
-   - short entry_price: nearest RESISTANCE (swing_high_10, bb_upper), above current price
-   - entry_price within 0.5% of current price
+SCORING RULES (in priority order):
+1. trend_dir is the PRIMARY signal. Score WITH-trend high, AGAINST-trend low.
+2. 15m structure CONFIRMS trend_dir. If both agree → high conf. If they disagree → moderate.
+3. 5m indicators (MACD, RSI, price vs EMA) fine-tune timing within the trend.
 
-CONFIDENCE GUIDE:
-- Strong trend (structure + momentum aligned): 0.85-0.95
-- Range (EMA20 ≈ EMA50): 0.65-0.85 for both sides
-- Early reversal (price >2% from structure, 5m momentum shifting): 0.55-0.70
-- Bounce against structure (no momentum shift): < 0.50
-- Weak/conflicting signals: 0.30-0.60
+CONFIDENCE TABLE:
+  trend + structure + 5m aligned  → with-trend: 0.85-0.95
+  trend + structure agree, 5m weak → with-trend: 0.70-0.85
+  trend only (structure neutral)  → with-trend: 0.55-0.70
+  no trend (flat/range)           → both sides: 0.40-0.60
+  COUNTER-TREND (any scenario)    → HARD CAP: 0.40
 
-Be decisive. When 15m STRUCTURE and MOMENTUM both align, give HIGH confidence (0.85+).
-Never chase a bounce as if it were a reversal.
-Keep each reasoning under 2 sentences. Be concise.`
+NEVER score counter-trend > 0.40. A bounce against the trend is noise, not signal.
+
+ENTRY: long=nearest support below price, short=nearest resistance above. Within 0.3% of price.`
 
 type mktCtx struct {
 	Symbol       string             `json:"symbol"`
 	Price        float64            `json:"price"`
 	Regime       string             `json:"regime"`
+	TrendDir     int                `json:"trend_dir"` // +1=bullish, -1=bearish, 0=neutral
 	Indicators   map[string]float64 `json:"indicators"`
 	Indicators15 map[string]float64 `json:"indicators_15m,omitempty"`
 	RecentBars   []barData          `json:"recent_bars"`
@@ -94,80 +73,53 @@ func (s *AIStrategy) buildContext(ctx *strategy.Context, bar exchange.Kline) mkt
 	closes := s.getCloses()
 	rsi := indicator.Last(indicator.RSI(closes, s.cfg.RSIPeriod))
 	macd := indicator.MACD(closes, s.cfg.MACDFast, s.cfg.MACDSlow, s.cfg.MACDSignal)
-	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-	ema20 := indicator.Last(indicator.EMA(closes, s.cfg.EMAFast))
-	ema50 := indicator.Last(indicator.EMA(closes, s.cfg.EMASlow))
 	atr := s.calcATR()
-	bbU, bbL := indicator.Last(bb.Upper), indicator.Last(bb.Lower)
-	bbPos := 0.5; if bbU-bbL > 0 { bbPos = (bar.Close - bbL) / (bbU - bbL) }
-	vols := make([]float64, len(s.primaryBars())); for i, b := range s.primaryBars() { vols[i] = b.Volume }
-	volMA := indicator.Last(indicator.SMA(vols, s.cfg.VolMAPeriod)); vr := 1.0; if volMA > 0 { vr = bar.Volume / volMA }
 
+	// 5m indicators — only what the prompt actually uses
 	ind := map[string]float64{
-		"rsi": r2(rsi), "macd_hist": r2(indicator.Last(macd.Histogram)),
-		"ema20": r2(ema20), "ema50": r2(ema50),
-		"bb_upper": r2(bbU), "bb_lower": r2(bbL), "bb_pos": r3(bbPos),
-		"atr": r2(atr), "vol_ratio": r3(vr),
-		"swing_high_10": r2(s.findSwingHigh(10)), "swing_low_10": r2(s.findSwingLow(10)),
-		"return_60bar": func() float64 {
-			c := s.getCloses()
-			if len(c) < 60 { return 0 }
-			return r3((c[len(c)-1] - c[len(c)-60]) / c[len(c)-60] * 100)
-		}(),
-		"return_10bar": func() float64 {
-			c := s.getCloses()
-			if len(c) < 10 { return 0 }
-			return r3((c[len(c)-1] - c[len(c)-10]) / c[len(c)-10] * 100)
-		}(),
+		"rsi":           r2(rsi),
+		"macd_hist":     r2(indicator.Last(macd.Histogram)),
+		"atr":           r2(atr),
+		"swing_high_10": r2(s.findSwingHigh(10)),
+		"swing_low_10":  r2(s.findSwingLow(10)),
+		"ema20":         r2(indicator.Last(indicator.EMA(closes, s.cfg.EMAFast))),
 	}
 
-	n := 10; if len(s.primaryBars()) < n { n = len(s.primaryBars()) }
+	// Last 5 bars (enough for pattern, saves ~50% tokens vs 10 bars)
+	n := 5; if len(s.primaryBars()) < n { n = len(s.primaryBars()) }
 	bars := make([]barData, n); st := len(s.primaryBars()) - n
 	for i := 0; i < n; i++ {
 		b := s.primaryBars()[st+i]
 		bars[i] = barData{T: b.OpenTime.Format("15:04"), O: r2(b.Open), H: r2(b.High), L: r2(b.Low), C: r2(b.Close), V: r2(b.Volume)}
 	}
 
-	// ── 15m trend indicators ──
-	// Default: structure=0 (range) when insufficient data, so GPT treats both directions equally.
-	ind15 := map[string]float64{"structure": 0}
+	// 15m trend — structure + return only (GPT doesn't need raw EMA values)
+	ind15 := map[string]float64{"structure": 0, "return_8bar": 0}
 	bars15 := s.barsForInterval("15m")
 	if len(bars15) >= 20 {
 		closes15 := make([]float64, len(bars15))
 		for i, b := range bars15 { closes15[i] = b.Close }
-		rsi15 := indicator.Last(indicator.RSI(closes15, s.cfg.RSIPeriod))
-		ema20_15 := indicator.Last(indicator.EMA(closes15, s.cfg.EMAFast))
-		ema50_15 := 0.0
-		if len(closes15) >= 50 { ema50_15 = indicator.Last(indicator.EMA(closes15, s.cfg.EMASlow)) }
-		macd15 := indicator.MACD(closes15, s.cfg.MACDFast, s.cfg.MACDSlow, s.cfg.MACDSignal)
 		ret8 := 0.0
 		if len(closes15) >= 8 { ret8 = (closes15[len(closes15)-1] - closes15[len(closes15)-8]) / closes15[len(closes15)-8] * 100 }
-		trend := "range"
-		if ret8 > 1.0 { trend = "uptrend" } else if ret8 < -1.0 { trend = "downtrend" }
-		_ = trend
-		// structure: 1=bullish(EMA20>EMA50), -1=bearish, 0=range
+		ema10_15 := indicator.Last(indicator.EMA(closes15, 10))
+		ema30_15 := 0.0
+		if len(closes15) >= 30 { ema30_15 = indicator.Last(indicator.EMA(closes15, 30)) }
 		structure := 0.0
-		if ema50_15 > 0 {
-			if ema20_15 > ema50_15 { structure = 1 }
-			if ema20_15 < ema50_15 { structure = -1 }
+		if ema30_15 > 0 {
+			if ema10_15 > ema30_15 { structure = 1 }
+			if ema10_15 < ema30_15 { structure = -1 }
 		}
 		ind15 = map[string]float64{
-			"rsi":       r2(rsi15),
-			"ema20":     r2(ema20_15),
-			"ema50":     r2(ema50_15),
-			"structure":  structure, // 1=bullish, -1=bearish, 0=range
-			"macd_hist": r2(indicator.Last(macd15.Histogram)),
+			"structure":  structure,
 			"return_8bar": r3(ret8),
 		}
 	}
 
 	posStr := "FLAT"
-	parts := []string{}
-	if s.longPos != nil && s.longPos.filled { parts = append(parts, fmt.Sprintf("LONG@%.2f", s.longPos.entryPrice)) }
-	if s.shortPos != nil && s.shortPos.filled { parts = append(parts, fmt.Sprintf("SHORT@%.2f", s.shortPos.entryPrice)) }
-	if len(parts) > 0 { posStr = fmt.Sprintf("%v", parts) }
+	if s.longPos != nil && s.longPos.filled { posStr = fmt.Sprintf("LONG@%.2f", s.longPos.entryPrice) }
+	if s.shortPos != nil && s.shortPos.filled { posStr = fmt.Sprintf("SHORT@%.2f", s.shortPos.entryPrice) }
 
-	return mktCtx{Symbol: s.cfg.Symbol, Price: r2(bar.Close), Regime: string(s.lastRegime), Indicators: ind, Indicators15: ind15, RecentBars: bars, Position: posStr}
+	return mktCtx{Symbol: s.cfg.Symbol, Price: r2(bar.Close), Regime: string(s.lastRegime), TrendDir: s.lastTrendDir, Indicators: ind, Indicators15: ind15, RecentBars: bars, Position: posStr}
 }
 
 func (s *AIStrategy) callGPT(mc mktCtx) (gptSignal, error) {

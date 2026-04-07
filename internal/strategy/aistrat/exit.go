@@ -9,12 +9,11 @@ import (
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
-// placeStagedExitOrders places exchange-native SL + 4 staged TP limit orders for trend mode.
+// placeStagedExitOrders places exchange-native staged TP limit orders.
 //
-// TP plan (based on R = |entry - stopLoss|, no ATR cap):
-//   +1.5R → close 30%  (cover risk + small profit)
-//   +2.0R → close 30%  (lock profit, 60% total closed)
-//   Remaining 40% → R-based trailing (1.5R→BE, 2R→ATR trail) + bounce TP
+// TP distances are ATR-adaptive: min(R*level, ATR*mult), so TPs tighten in low volatility.
+// Default: TP1=0.7R (50%), TP2=1.5R (30%). Trend: TP1=0.8R (40%), TP2=2.0R (30%).
+// Remaining qty managed by trailing stop + bounce TP.
 func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState) {
 	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
 	if !ok {
@@ -52,20 +51,40 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 		return
 	}
 
+	// ATR-adaptive TP: use max(R*level, ATR*atrMultiplier) so TPs tighten in low volatility.
+	// This prevents the common problem of TP never being reached in quiet markets.
+	atr := s.calcATR()
+	atrTP1Mult := 1.5 // TP1 = ATR * 1.5 (~1-2 bars of movement)
+	atrTP2Mult := 3.0 // TP2 = ATR * 3.0 (~3-4 bars of sustained trend)
+
 	tps := make([]strategy.StagedTP, 0, len(levels))
 	for i, lvl := range levels {
+		// R-based distance (original)
+		rDist := lvl * R
+		// ATR-based distance (adaptive to current volatility)
+		atrMult := atrTP1Mult
+		if i >= 1 { atrMult = atrTP2Mult }
+		atrDist := atr * atrMult
+		// Use the SMALLER of the two — ensures TP is reachable in low vol,
+		// but doesn't give away too much in high vol.
+		dist := math.Min(rDist, atrDist)
+		// Floor: at least 0.3R to cover fees
+		if dist < 0.3*R { dist = 0.3 * R }
+
 		var tpPrice float64
 		if pos.side == "LONG" {
-			tpPrice = math.Round((entry+lvl*R)*100) / 100
+			tpPrice = math.Round((entry+dist)*100) / 100
 		} else {
-			tpPrice = math.Round((entry-lvl*R)*100) / 100
+			tpPrice = math.Round((entry-dist)*100) / 100
 		}
-		// Each TP level uses its configured split. Remaining qty (e.g. 40%) is
-		// managed by trailing stop + bounce TP, NOT placed as exchange orders.
 		q := math.Floor(qty*splits[i]*1000) / 1000
 		if q <= 0 { q = 0.001 }
 		tps = append(tps, strategy.StagedTP{Price: tpPrice, Qty: q})
 	}
+
+	s.log.Info("AI: TP calculation",
+		zap.Float64("R", R), zap.Float64("ATR", atr),
+		zap.Any("levels", levels), zap.Any("tp_prices", tps))
 
 	ok = ep.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, pos.stopLoss, qty, tps)
 	if ok {
@@ -127,9 +146,8 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 		}
 	}
 
-	// All protective and urgent closes use market order (must fill immediately).
-	useMarket := reason == "stop_loss" || reason == "trailing" || reason == "bounce_tp" ||
-		reason == "emergency_reversal" || reason == "gpt_reversal"
+	// All closes use market order (must fill immediately to avoid ghost positions).
+	useMarket := true
 	s.placeCloseOrder(ctx, p.side, qty, useMarket)
 	bars := s.primaryBars()
 	closePrice := 0.0
@@ -156,21 +174,6 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 
 	s.syncRemove(p.side)
 	*pptr = nil
-}
-
-func (s *AIStrategy) closePartial(ctx *strategy.Context, p *posState, pptr **posState, qty float64, reason string) {
-	qty = math.Floor(qty*1000) / 1000
-	if qty <= 0 { return }
-	if qty > p.remainQty { qty = p.remainQty }
-
-	s.placeCloseOrder(ctx, p.side, qty, false) // partial close always uses limit
-	p.remainQty -= qty
-	if p.remainQty <= 1e-10 {
-		s.syncRemove(p.side)
-		*pptr = nil
-	} else {
-		s.syncToRedis(p) // update qty in Redis
-	}
 }
 
 // ─── Daily Risk ──────────────────────────────────────────────────────────────
@@ -219,16 +222,3 @@ func (s *AIStrategy) canHedge(price float64, mainPos *posState) bool {
 	return drawdownPct >= s.cfg.HedgeDrawdownPct
 }
 
-// ─── Regime Detection ────────────────────────────────────────────────────────
-
-// effectiveRisk returns risk-per-trade based on current exposure.
-// Single direction: 2x configured risk (e.g. 4%); dual hedge: 1x (e.g. 2%).
-func (s *AIStrategy) effectiveRisk(side string) float64 {
-	hasOpposite := false
-	if side == "LONG" && s.shortPos != nil && s.shortPos.filled { hasOpposite = true }
-	if side == "SHORT" && s.longPos != nil && s.longPos.filled { hasOpposite = true }
-	if hasOpposite {
-		return s.cfg.RiskPerTrade // hedge mode: use base risk (2%)
-	}
-	return s.cfg.RiskPerTrade * 2 // single direction: double risk (4%)
-}

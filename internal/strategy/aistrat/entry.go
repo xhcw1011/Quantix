@@ -103,30 +103,39 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	if pf := ctx.Portfolio; pf != nil {
 		equity = pf.Equity(map[string]float64{s.cfg.Symbol: currentPrice})
 	}
-	risk := s.effectiveRisk(side)
-	// Deduct round-trip fee drag from effective R so sizing accounts for costs.
-	// Entry taker ~0.05%, exit maker ~0.02%, total ~0.07% per side = ~0.14% round trip.
-	feeDrag := entryPrice * s.cfg.FeeDragPct
-	effectiveR := R - feeDrag
-	if effectiveR <= 0 { effectiveR = R * 0.5 } // floor: never let fees eliminate R entirely
-	qty := math.Floor(equity*risk/effectiveR*1000) / 1000
+
+	// Leverage-based position sizing: notional = equity × PosSizePct × Leverage
+	leverage := s.cfg.Leverage
+	if leverage <= 0 { leverage = 10 }
+	posPct := s.cfg.PosSizePct
+	if posPct <= 0 { posPct = 0.40 }
+	qty := math.Floor(equity*posPct*leverage/entryPrice*1000) / 1000
+
+	// In hedge mode (opposite position exists), halve the size
+	if side == "LONG" && s.shortPos != nil && s.shortPos.filled { qty = math.Floor(qty*0.5*1000) / 1000 }
+	if side == "SHORT" && s.longPos != nil && s.longPos.filled { qty = math.Floor(qty*0.5*1000) / 1000 }
+
+	// MTF headwind scaling
 	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
 	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
-	// Confidence-weighted sizing: lower conf → smaller position (min 50%)
-	// Use regime-aware threshold: STRONG_TREND uses lower entryConf,
-	// so conf 0.65 in STRONG_TREND should scale higher than in SLOW_TREND.
+
+	// Confidence scaling (floor raised to 0.7 to avoid excessive reduction)
 	if s.cfg.ConfQtyScale && s.lastConf > 0 {
 		baseConf := s.cfg.ConfidenceThreshold
-		if s.lastRegime == RegimeStrongTrend || s.lastRegime == RegimeExpansion {
+		switch s.lastRegime {
+		case RegimeStrongTrend, RegimeExpansion:
 			baseConf = s.cfg.RegimeEntryConf
+		case RegimeSlowTrend:
+			baseConf = (s.cfg.RegimeEntryConf + s.cfg.ConfidenceThreshold) / 2
 		}
 		confScale := (s.lastConf - baseConf) / (1.0 - baseConf)
-		if confScale < 0.5 { confScale = 0.5 }
+		if confScale < 0.7 { confScale = 0.7 }
 		if confScale > 1.0 { confScale = 1.0 }
 		qty = math.Floor(qty*confScale*1000) / 1000
 	}
-	// Cap qty so margin needed doesn't exceed 60% of equity
-	maxQty := math.Floor(equity*0.6*10/entryPrice*1000) / 1000
+
+	// Safety cap: margin must not exceed 80% of equity
+	maxQty := math.Floor(equity*0.8*leverage/entryPrice*1000) / 1000
 	if qty > maxQty { qty = maxQty }
 	if qty <= 0 { return }
 

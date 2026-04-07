@@ -718,6 +718,11 @@ func (pv *livePortfolioView) Position(symbol string) (qty, avgPrice float64, ok 
 }
 
 func (pv *livePortfolioView) Equity(prices map[string]float64) float64 {
+	// Prefer exchange-cached equity (from WS ACCOUNT_UPDATE) — this includes
+	// ALL positions' unrealized PnL, not just engine-tracked ones.
+	if eq := pv.broker.Equity(); eq > 0 {
+		return eq
+	}
 	unrealized := pv.positions.TotalUnrealizedPnL(prices)
 	return pv.broker.WalletBalance() + unrealized
 }

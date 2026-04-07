@@ -20,6 +20,8 @@ func init() {
 		if v, ok := params["LookbackBars"]; ok { cfg.LookbackBars = toInt(v) }
 		if v, ok := params["CallIntervalBars"]; ok { cfg.CallIntervalBars = toInt(v) }
 		if v, ok := params["RangeCallIntervalBars"]; ok { cfg.RangeCallIntervalBars = toInt(v) }
+		if v, ok := params["Leverage"]; ok { cfg.Leverage = toFloat(v) }
+		if v, ok := params["PosSizePct"]; ok { cfg.PosSizePct = toFloat(v) }
 		if v, ok := params["RiskPerTrade"]; ok { cfg.RiskPerTrade = toFloat(v) }
 		if v, ok := params["ATRK"]; ok { cfg.ATRK = toFloat(v) }
 		if v, ok := params["TrailingATRK"]; ok { cfg.TrailingATRK = toFloat(v) }
@@ -154,6 +156,10 @@ type Config struct {
 	PrimaryInterval string   // "5m" — drives GPT signals + entries
 	Intervals       []string // all subscribed intervals, e.g. ["1m","5m","15m"]
 
+	// Position sizing
+	Leverage   float64 // exchange leverage multiplier (default 10)
+	PosSizePct float64 // fraction of equity used as margin per trade (default 0.40 = 40%)
+
 	// Trend mode
 	RiskPerTrade float64 // 1% of equity per trade
 	ATRK         float64 // stop-loss ATR multiplier
@@ -258,19 +264,20 @@ func DefaultConfig() Config {
 	return Config{
 		Symbol: "ETHUSDT", Model: "gpt-5.4-mini",
 		ConfidenceThreshold: 0.82, LookbackBars: 60,
-		CallIntervalBars: 1, RangeCallIntervalBars: 1, EnableShort: true,
+		CallIntervalBars: 1, RangeCallIntervalBars: 3, EnableShort: true,
+		Leverage: 10, PosSizePct: 0.20, // 40%→20%: halve position size to reduce per-trade risk
 		RiskPerTrade: 0.02, ATRK: 2.0, TrailingATRK: 1.5,
 		RangeTPPct: 0.012, RangeSLPct: 0.010,
 		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
-		TPLevels: []float64{0.65, 1.50},
-		TPQtySplits: []float64{0.70, 0.30},
-		TrendTPLevels: []float64{0.65, 1.50},
-		TrendTPQtySplits: []float64{0.70, 0.30},
-		TrendBreakevenR: 0.50,
-		BreakevenR: 0.50, BreakevenBuf: 0.001,
+		TPLevels: []float64{0.50, 1.50},       // TP1=0.5R (easy to reach, triggers breakeven)
+		TPQtySplits: []float64{0.30, 0.30},   // TP1 only 30%, keep 40% for trailing
+		TrendTPLevels: []float64{0.50, 2.00},  // trend: same TP1, wider TP2 for momentum
+		TrendTPQtySplits: []float64{0.30, 0.30},
+		TrendBreakevenR: 0.80,                // 0.50→0.80: don't move to breakeven too early
+		BreakevenR: 0.80, BreakevenBuf: 0.001,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015,
 		TrailFloorPct: 0.005, MinSLDistPct: 0.008,
-		ReversalConf: 0.60, MarketEntryConf: 0.90,
+		ReversalConf: 0.75, MarketEntryConf: 0.90, // 0.60→0.75: much harder to trigger reversal close
 		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
@@ -278,16 +285,16 @@ func DefaultConfig() Config {
 		MTFBullRSI: 60, MTFBearRSI: 40, MTF1mThreshold: 0.001,
 		MTFQtyScaleHard: 0.70, MTFQtyScaleSoft: 0.85, SwingProximity: 0.0015,
 		ConfQtyScale: true, ForceTrend: true, MaxRPercent: 0.01, FeeDragPct: 0.0014,
-		SignalDecay: 0.90, SignalAccumMax: 1.5,
-		RegimeN: 12, StrongTrendThreshold: 2.5, StrongTrendMinVol: 0.001,
+		SignalDecay: 0.80, SignalAccumMax: 1.0,  // 0.90→0.80: faster decay; 1.5→1.0: lower cap
+		RegimeN: 20, StrongTrendThreshold: 2.5, StrongTrendMinVol: 0.001,  // 12→20: longer window for trend detection
 		SlowTrendThreshold: 1.5, SlowTrendDirScore: 0.60,
-		ExpansionATRK: 2.0, ExpansionBodyK: 1.0, RegimeEntryConf: 0.60, RangeEntryConf: 0.75,
+		ExpansionATRK: 2.0, ExpansionBodyK: 1.0, RegimeEntryConf: 0.65, RangeEntryConf: 0.0, // Range: 0.75→0.0 = DISABLED (don't trade in RANGE)
 		RSIPeriod: 14, MACDFast: 12, MACDSlow: 26, MACDSignal: 9,
 		EMAFast: 20, EMASlow: 50, BBPeriod: 20, BBStdDev: 2.0,
 		ATRPeriod: 60, VolMAPeriod: 20,
 		EntryOffsetPct: 0.0005, MaxEntryDevPct: 0.005,
 		LimitTimeoutBars: 2, MinHoldBars: 3, MinTrendBars: 5,
-		GPTTemperature: 0.3, GPTMaxTokens: 600, GPTTimeout: 15 * time.Second,
+		GPTTemperature: 0.1, GPTMaxTokens: 200, GPTTimeout: 15 * time.Second,
 		MaxDailyLossPct: 0.10, MaxConsecLoss: 5,
 		HedgeOnDrawdown: false, HedgeDrawdownPct: 0.005,
 		HedgeCooldown: 15 * time.Minute, HedgeQtyRatio: 0.3, HedgeTPRatio: 0.5,
