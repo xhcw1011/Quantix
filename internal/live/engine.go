@@ -421,7 +421,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				klineCh = nil
 				continue
 			}
-			e.log.Info("engine: bar received",
+			e.log.Debug("engine: bar received",
 				zap.String("symbol", kline.Symbol), zap.String("interval", kline.Interval),
 				zap.Float64("close", kline.Close), zap.Bool("closed", kline.IsClosed))
 			e.onBar(kline)

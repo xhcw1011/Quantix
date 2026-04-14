@@ -209,11 +209,9 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		newTrail = math.Round(newTrail*100) / 100
 		if p.side == "LONG" && newTrail > p.trailing {
 			p.trailing = newTrail
-			s.throttledReplaceSL(s.cfg.Symbol, "LONG", "SELL", p.remainQty, p.trailing)
 		}
 		if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
 			p.trailing = newTrail
-			s.throttledReplaceSL(s.cfg.Symbol, "SHORT", "BUY", p.remainQty, p.trailing)
 		}
 
 		// ── 4. Real-time bounce TP (remaining position) ──
@@ -403,12 +401,7 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 			s.log.Info("AI: TP fill → trailing to breakeven",
 				zap.String("side", pos.side), zap.Float64("entry", pos.entryPrice))
 		}
-		// Update exchange SL to match breakeven + remaining qty.
-		if s.stagedEP != nil {
-			closeSide := "SELL"
-			if pos.side == "SHORT" { closeSide = "BUY" }
-			s.stagedEP.ReplaceSLOrder(s.cfg.Symbol, pos.side, closeSide, pos.remainQty, pos.trailing)
-		}
+		// No exchange SL — local trailing handles the breakeven exit.
 		s.syncToRedis(pos)
 	}
 	return true

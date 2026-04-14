@@ -192,11 +192,8 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		moved = true
 	}
 	if moved {
-		if s.stagedEP != nil {
-			closeSide := "SELL"
-			if p.side == "SHORT" { closeSide = "BUY" }
-			s.stagedEP.ReplaceSLOrder(s.cfg.Symbol, p.side, closeSide, p.remainQty, p.trailing)
-		}
+		// No exchange SL — local trailing handles exits (tick + bar level).
+		// Exchange SL algo orders caused orphan issues and conflicts with local trailing.
 		s.syncToRedis(p)
 	}
 
