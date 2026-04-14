@@ -671,13 +671,17 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			if math.Abs(s.shortPos.entryPrice-price) < minSpread { longConf = 0 }
 		}
 		if longConf > 0 {
-			// LONG entry: prevClose - buffer (previous candle's close as support)
-			// If GPT gives a better support level, use that instead.
+			// LONG entry: blend between prevClose and GPT support.
+			// Pure GPT support is often too far to fill; pure prevClose is too close to market.
+			// Use upper 1/3 of the gap: entry = price - (price - gptSupport) * 0.33
 			var entry float64
+			fallback := math.Round((prevClose-entryBuf)*100) / 100
 			if longEntry > 0 && longEntry < price && (price-longEntry) <= maxDev {
-				entry = math.Round((longEntry+longEntry*0.0003)*100) / 100 // 0.03% above GPT support
+				blended := price - (price-longEntry)*0.33
+				entry = math.Round(blended*100) / 100
+				if entry > fallback { entry = fallback } // never worse than fallback
 			} else {
-				entry = math.Round((prevClose-entryBuf)*100) / 100 // prevClose - buffer
+				entry = fallback
 			}
 			entry = math.Round(entry*100) / 100
 			// LONG TP target = GPT resistance (shortEntry) — where sellers step in
@@ -698,13 +702,15 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			if math.Abs(s.longPos.entryPrice-price) < minSpread { shortConf = 0 }
 		}
 		if shortConf > 0 {
+			// SHORT entry: blend between prevClose and GPT resistance.
 			var entry float64
-			// SHORT entry: prevClose + buffer (previous candle's close as resistance)
-			// If GPT gives a better resistance level, use that instead.
+			fallback := math.Round((prevClose+entryBuf)*100) / 100
 			if shortEntry > 0 && shortEntry > price && (shortEntry-price) <= maxDev {
-				entry = math.Round((shortEntry-shortEntry*0.0003)*100) / 100 // 0.03% below GPT resistance
+				blended := price + (shortEntry-price)*0.33
+				entry = math.Round(blended*100) / 100
+				if entry < fallback { entry = fallback } // never worse than fallback
 			} else {
-				entry = math.Round((prevClose+entryBuf)*100) / 100 // prevClose + buffer
+				entry = fallback
 			}
 			entry = math.Round(entry*100) / 100
 			// SHORT TP target = GPT support (longEntry) — where buyers step in

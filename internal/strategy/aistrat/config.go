@@ -330,7 +330,7 @@ func DefaultConfig() Config {
 		// ─── 入场微调 ─────────────────────────────────────────────
 		EntryOffsetPct: 0.00068,     // 入场 buffer ≈ $1.5（prevClose ± $1.5，保证 Maker 挂单）
 		LongEntryOffsetPct: 0.00068, // 同上，LONG/SHORT 统一用 $1.5 buffer
-		MaxEntryDevPct: 0.005,   // GPT入场价最大偏差 0.5%
+		MaxEntryDevPct: 0.010,   // GPT入场价最大偏差 1.0%
 		PosSizePct: 0.40,        // 单笔最大margin占比 40%
 		ConfQtyScale: false,     // 不按confidence缩放qty
 		FeeDragPct: 0.0004,      // 手续费 Maker 0.02% × 2 = 0.04% round-trip
