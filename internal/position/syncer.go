@@ -34,6 +34,10 @@ type Syncer struct {
 	// PositionClosedExternally is set when SyncFromExchange detects a position was closed
 	// on the exchange (SL hit, manual close, etc.). Strategy reads and clears this flag.
 	PositionClosedExternally atomic.Bool
+
+	// IgnoreUntracked: if true, don't adopt exchange positions that aren't in Redis.
+	// Prevents engine from interfering with user's manual positions.
+	IgnoreUntracked bool
 }
 
 // SyncerConfig holds dependencies for creating a Syncer.
@@ -147,6 +151,11 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 
 		if current == nil {
 			// Exchange has position but we don't → untracked (likely from before restart)
+			if s.IgnoreUntracked {
+				s.log.Info("syncer: ignoring untracked position (manual trading mode)",
+					zap.String("side", side), zap.Float64("qty", math.Abs(r.Size)))
+				continue
+			}
 			pos := &StrategyPosition{
 				ExchangePosition: ExchangePosition{
 					Symbol: r.Symbol, Side: side,

@@ -24,8 +24,8 @@ func (e *Engine) recoverFromDB(ctx context.Context, symbol string) bool {
 		return false
 	}
 	if len(activeOrders) == 0 {
-		e.log.Info("DB recovery: no active orders found, proceeding normally")
-		return true // no clean-slate needed either
+		e.log.Info("DB recovery: no active orders in DB, will run clean-slate cancel for exchange orphans")
+		return false // run clean-slate to cancel any orphan orders on exchange
 	}
 
 	sc, hasChecker := e.broker.orderClient.(exchange.OrderStatusChecker)

@@ -1,7 +1,7 @@
 #!/bin/bash
-# Quantix — build, start, health check, auto-start engine
-# Usage: ./scripts/start-quantix.sh
-# Logs: ./logs/quantix-YYYYMMDD.log
+# Quantix — build, start, health check
+# Engine auto-starts from DB session (auto-restart mechanism).
+# If no session exists, manually start via API.
 
 set -e
 cd "$(dirname "$0")/.."
@@ -31,7 +31,8 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/quantix-$(date +%Y%m%d).log"
 
 echo "=== Engine start: $(date) ===" >> "$LOG_FILE"
-nohup ./bin/quantix-api -config config/config.yaml >> "$LOG_FILE" 2>&1 &
+# stdout goes to /dev/null — logger writes directly to log file (no duplicates)
+nohup ./bin/quantix-api -config config/config.yaml > /dev/null 2>&1 &
 PID=$!
 echo "quantix-api started (pid: $PID)"
 
@@ -45,26 +46,24 @@ for i in $(seq 1 10); do
   fi
   if [ $i -eq 10 ]; then
     echo "ERROR: health check failed after 10s"
-    tail -20 "$LOG_FILE"
     exit 1
   fi
 done
 
-# ─── Auto-start engine (if session exists, auto-restart handles it) ──────────
-# Check if there's an active engine session — if so, auto-restart will pick it up.
-# If not, start one manually.
-sleep 3
+# ─── Wait for auto-restart ───────────────────────────────────────────────────
+# Auto-restart runs 2s after API start. Wait 5s then check.
+# Do NOT call engine/start manually — it creates a second klineCh that conflicts.
+sleep 5
 TOKEN=$(printf '{"username":"stresstest","password":"StressTest123!"}' | \
   curl -s -X POST "$API/api/auth/login" -H 'Content-Type: application/json' -d @- 2>/dev/null | \
   python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token',''))" 2>/dev/null || true)
 
 if [ -n "$TOKEN" ]; then
-  # Check if engine is already running (auto-restarted from session)
   STATUS=$(curl -s -H "Authorization: Bearer $TOKEN" "$API/api/engine/status" 2>/dev/null || true)
   if echo "$STATUS" | grep -q '"running"'; then
-    echo "Engine already running (auto-restart from session)"
+    echo "Engine running (auto-restart from session)"
   else
-    echo "Starting AI engine..."
+    echo "No active session — starting engine..."
     RESULT=$(printf '{
       "credential_id": 2,
       "strategy_id": "ai",
@@ -80,7 +79,7 @@ if [ -n "$TOKEN" ]; then
     echo "Engine: $RESULT"
   fi
 else
-  echo "Note: could not login — engine needs manual start via API or will auto-restart from session"
+  echo "Note: login failed — engine will auto-restart from session if available"
 fi
 
 echo ""

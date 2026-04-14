@@ -114,13 +114,15 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	s.checkDayReset(ctx, price)
 
-	// Check syncer for externally closed positions
+	// Check syncer for externally closed positions (only for FILLED positions).
+	// Pending (unfilled) limit orders don't show as exchange positions — skip them
+	// to avoid false "externally closed" that creates ghost positions.
 	if s.syncer != nil {
-		if s.longPos != nil && !s.syncer.HasPosition("LONG") {
+		if s.longPos != nil && s.longPos.filled && !s.syncer.HasPosition("LONG") {
 			s.log.Warn("AI: LONG externally closed — clearing posState")
 			s.longPos = nil
 		}
-		if s.shortPos != nil && !s.syncer.HasPosition("SHORT") {
+		if s.shortPos != nil && s.shortPos.filled && !s.syncer.HasPosition("SHORT") {
 			s.log.Warn("AI: SHORT externally closed — clearing posState")
 			s.shortPos = nil
 		}
@@ -159,6 +161,17 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// dayHalted blocks NEW entries only — existing position management above must still run.
 	if s.dayHalted { return }
 
+	// ── Night session block: 01:00-06:00 UTC+8 — direction accuracy ~0% in this window ──
+	nowUTC8 := time.Now().In(time.FixedZone("UTC+8", 8*3600))
+	hour := nowUTC8.Hour()
+	if hour >= 1 && hour < 6 && s.longPos == nil && s.shortPos == nil {
+		if s.barCount%12 == 0 {
+			s.log.Info("AI: skip — night session block (01:00-06:00 UTC+8)",
+				zap.Int("hour", hour), zap.Float64("price", price))
+		}
+		return
+	}
+
 	// Track if we have pending orders (for post-GPT cancel logic)
 	hasPendingLong := s.longPos != nil && !s.longPos.filled
 	hasPendingShort := s.shortPos != nil && !s.shortPos.filled
@@ -177,15 +190,19 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			s.cacheSignal(bar, sig)
 			s.lastCallBar = s.barCount
 			s.totalCall++
-			// Update accumulation (with counter-trend halving, same as main loop).
+			// Update accumulation (with counter-trend halving + cap + cancel, same as main loop).
 			la, sa := 0.0, 0.0
-			if sig.Long != nil && sig.Long.Confidence > 0.3 { la = sig.Long.Confidence - 0.3 }
-			if sig.Short != nil && sig.Short.Confidence > 0.3 { sa = sig.Short.Confidence - 0.3 }
+			if sig.Long != nil && sig.Long.Confidence > s.cfg.AccumBaseThresh { la = sig.Long.Confidence - s.cfg.AccumBaseThresh }
+			if sig.Short != nil && sig.Short.Confidence > s.cfg.AccumBaseThresh { sa = sig.Short.Confidence - s.cfg.AccumBaseThresh }
 			if s.lastTrendDir < 0 { la *= 0.5 }
 			if s.lastTrendDir > 0 { sa *= 0.5 }
 			s.accumLong += la; s.accumShort += sa
 			if s.accumLong > s.cfg.SignalAccumMax { s.accumLong = s.cfg.SignalAccumMax }
 			if s.accumShort > s.cfg.SignalAccumMax { s.accumShort = s.cfg.SignalAccumMax }
+			if s.accumLong > 0 && s.accumShort > 0 {
+				diff := s.accumLong - s.accumShort
+				if diff > 0 { s.accumLong = diff; s.accumShort = 0 } else { s.accumShort = -diff; s.accumLong = 0 }
+			}
 		}
 		// Don't open new position on SL bar — let next bar handle it.
 		return
@@ -201,6 +218,27 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	regime := s.detectRegime()
 	s.lastRegime = regime
+
+	// ── EXPANSION cooldown: wait 3 bars (15min) after breakout bar before entry ──
+	// EXPANSION bars trigger FOMO entries at the worst price; let the retracement play out.
+	if regime == RegimeExpansion {
+		s.expansionBar = s.barCount
+	}
+	expansionCooldown := 3
+	if s.expansionBar > 0 && s.barCount-s.expansionBar < expansionCooldown && s.longPos == nil && s.shortPos == nil {
+		if s.barCount%6 == 0 || s.barCount-s.expansionBar == 0 {
+			s.log.Info("AI: skip — EXPANSION cooldown",
+				zap.Int("bars_since", s.barCount-s.expansionBar),
+				zap.Int("cooldown", expansionCooldown),
+				zap.Float64("price", price))
+		}
+		// Still decay signals during cooldown
+		s.accumLong *= s.cfg.SignalDecay
+		s.accumShort *= s.cfg.SignalDecay
+		if s.accumLong < 0.01 { s.accumLong = 0 }
+		if s.accumShort < 0.01 { s.accumShort = 0 }
+		return
+	}
 
 	// Decay signal accumulation every bar (not just on GPT call),
 	// so stale signals fade even when regime blocks GPT calls.
@@ -291,14 +329,31 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 
+	// ── Hard clamp: GPT often ignores counter-trend cap in prompt ──
+	if s.lastTrendDir < 0 && longConf > s.cfg.CounterTrendCap { longConf = s.cfg.CounterTrendCap }
+	if s.lastTrendDir > 0 && shortConf > s.cfg.CounterTrendCap { shortConf = s.cfg.CounterTrendCap }
+
+	// ── Hybrid direction: replace GPT LONG with technical signal ──
+	// GPT SELL accuracy = 82.7% (keep). GPT BUY accuracy = 12.4% (replace).
+	// Technical BUY uses EMA9/21 crossover + RSI + MACD confirmation.
+	techLongConf, techLongEntry := s.techBuySignal()
+	if techLongConf > longConf {
+		s.log.Info("AI: technical BUY override",
+			zap.Float64("gpt_long", longConf), zap.Float64("tech_long", techLongConf),
+			zap.Float64("tech_entry", techLongEntry))
+		longConf = techLongConf
+		longEntry = techLongEntry
+		longReason = "technical: EMA9>EMA21 crossover + RSI/MACD confirmation"
+	}
+
 	// ── Signal accumulation: rolling confidence across bars ──
 	// Decay already applied at regime detection (every bar).
 	// Counter-trend accumulation is halved to prevent GPT bias from building up
 	// against the detected trend direction.
 	cap := s.cfg.SignalAccumMax
 	longAdd, shortAdd := 0.0, 0.0
-	if longConf > 0.3 { longAdd = longConf - 0.3 }
-	if shortConf > 0.3 { shortAdd = shortConf - 0.3 }
+	if longConf > s.cfg.AccumBaseThresh { longAdd = longConf - s.cfg.AccumBaseThresh }
+	if shortConf > s.cfg.AccumBaseThresh { shortAdd = shortConf - s.cfg.AccumBaseThresh }
 	// Halve counter-trend accumulation
 	if s.lastTrendDir < 0 { longAdd *= 0.5 }  // bearish: slow long accumulation
 	if s.lastTrendDir > 0 { shortAdd *= 0.5 }  // bullish: slow short accumulation
@@ -354,6 +409,30 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	rawShortConf := shortConf
 	longConf = effectiveLong
 	shortConf = effectiveShort
+
+	// ── EMA slope filter: block BUY when EMA20 is falling, block SELL when EMA20 is rising ──
+	// GPT BUY accuracy was 12.4% — this filter prevents most false BUY signals in downtrends.
+	emaSlopeCloses := s.getCloses()
+	if len(emaSlopeCloses) >= 22 {
+		ema20vals := indicator.EMA(emaSlopeCloses, s.cfg.EMAFast)
+		if len(ema20vals) >= 2 {
+			emaSlope := ema20vals[len(ema20vals)-1] - ema20vals[len(ema20vals)-2]
+			if emaSlope < 0 && longConf > 0 {
+				s.log.Info("AI: BUY blocked — EMA20 slope negative",
+					zap.Float64("slope", r2(emaSlope)), zap.Float64("conf", longConf))
+				longConf = 0
+				s.accumLong = 0 // also clear accumulated long signal to prevent re-trigger
+			}
+			if emaSlope > 0 && shortConf > 0 && s.lastTrendDir >= 0 {
+				// Only block counter-trend SHORT when EMA rising AND trend is bullish.
+				// Don't block with-trend SHORT in bearish trend (EMA can have temporary upticks).
+				s.log.Info("AI: SELL blocked — EMA20 slope positive + bullish trend",
+					zap.Float64("slope", r2(emaSlope)), zap.Float64("conf", shortConf))
+				shortConf = 0
+				s.accumShort = 0
+			}
+		}
+	}
 
 	// Summary line for quick scanning
 	action := "HOLD"
@@ -475,15 +554,14 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Swing/MTF boosts must respect trend direction:
 	// In bearish STRONG_TREND, don't boost LONG; in bullish STRONG_TREND, don't boost SHORT.
 	swingLongMTFOk := mtfScore >= -1 && s.lastTrendDir >= 0
-	swingConfMin := 0.60
-	if price > 0 && swLow > 0 && (price-swLow)/price < s.cfg.SwingProximity && longConf >= swingConfMin && longConf < entryConfLong && s.longPos == nil && swingLongMTFOk {
+	if price > 0 && swLow > 0 && (price-swLow)/price < s.cfg.SwingProximity && longConf >= s.cfg.BoostMinConf && longConf < entryConfLong && s.longPos == nil && swingLongMTFOk {
 		s.log.Info("AI: boost long — price near swing low",
 			zap.Float64("price", price), zap.Float64("swing_low", swLow), zap.Int("mtf", mtfScore))
 		longConf = entryConfLong
 		if longEntry <= 0 { longEntry = swLow }
 	}
 	swingShortMTFOk := mtfScore <= 1 && s.lastTrendDir <= 0
-	if price > 0 && swHigh > 0 && (swHigh-price)/price < s.cfg.SwingProximity && shortConf >= swingConfMin && shortConf < entryConfShort && s.shortPos == nil && swingShortMTFOk {
+	if price > 0 && swHigh > 0 && (swHigh-price)/price < s.cfg.SwingProximity && shortConf >= s.cfg.BoostMinConf && shortConf < entryConfShort && s.shortPos == nil && swingShortMTFOk {
 		s.log.Info("AI: boost short — price near swing high",
 			zap.Float64("price", price), zap.Float64("swing_high", swHigh), zap.Int("mtf", mtfScore))
 		shortConf = entryConfShort
@@ -491,13 +569,13 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 
 	// ── MTF momentum boost (Trend only, with-trend direction only) ──
-	if mtfScore >= 2 && s.lastTrendDir >= 0 && longConf > 0 && longConf >= 0.50 && longConf < entryConfLong && s.longPos == nil {
+	if mtfScore >= 2 && s.lastTrendDir >= 0 && longConf > 0 && longConf >= s.cfg.BoostMinConf && longConf < entryConfLong && s.longPos == nil {
 		s.log.Info("AI: MTF momentum boost → LONG",
 			zap.Float64("conf_before", longConf), zap.Int("mtf", mtfScore))
 		longConf = entryConfLong
-		if longEntry <= 0 { longEntry = price - price*s.cfg.EntryOffsetPct }
+		if longEntry <= 0 { longEntry = price - price*s.cfg.LongEntryOffsetPct }
 	}
-	if mtfScore <= -2 && s.lastTrendDir <= 0 && shortConf > 0 && shortConf >= 0.50 && shortConf < entryConfShort && s.shortPos == nil {
+	if mtfScore <= -2 && s.lastTrendDir <= 0 && shortConf > 0 && shortConf >= s.cfg.BoostMinConf && shortConf < entryConfShort && s.shortPos == nil {
 		s.log.Info("AI: MTF momentum boost → SHORT",
 			zap.Float64("conf_before", shortConf), zap.Int("mtf", mtfScore))
 		shortConf = entryConfShort
@@ -551,14 +629,20 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 
-	// Entry: pick the better of GPT price vs 0.10% offset
-	// LONG: lower is better; SHORT: higher is better
-	entryOffset := price * s.cfg.EntryOffsetPct
+	// Entry: anchor to previous bar's close (real support/resistance level)
+	// LONG: prevClose - buffer (buy at previous support on pullback)
+	// SHORT: prevClose + buffer (sell at previous resistance on bounce)
+	bars := s.primaryBars()
+	prevClose := price // fallback to current price if no bars
+	if len(bars) >= 2 {
+		prevClose = bars[len(bars)-2].Close
+	}
+	entryBuf := price * s.cfg.LongEntryOffsetPct // small buffer (~0.10% ≈ $2)
 	maxDev := price * s.cfg.MaxEntryDevPct // cap GPT entry within configured % of current price
 
 	// ── Update pending limit orders if better entry available ──
 	if s.longPos != nil && !s.longPos.filled && longConf >= entryConfLong {
-		newEntry := price - entryOffset
+		newEntry := prevClose - entryBuf
 		if longEntry > 0 && longEntry < newEntry && (price-longEntry) <= maxDev { newEntry = longEntry }
 		newEntry = math.Round(newEntry*100) / 100
 		// Replace if new entry is closer to current price (more likely to fill)
@@ -570,7 +654,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 	if s.shortPos != nil && !s.shortPos.filled && shortConf >= entryConfShort {
-		newEntry := price + entryOffset
+		newEntry := prevClose + entryBuf
 		if shortEntry > 0 && shortEntry > newEntry && (shortEntry-price) <= maxDev { newEntry = shortEntry }
 		newEntry = math.Round(newEntry*100) / 100
 		if math.Abs(price-newEntry) < math.Abs(price-s.shortPos.entryPrice) {
@@ -587,33 +671,22 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			if math.Abs(s.shortPos.entryPrice-price) < minSpread { longConf = 0 }
 		}
 		if longConf > 0 {
+			// LONG entry: prevClose - buffer (previous candle's close as support)
+			// If GPT gives a better support level, use that instead.
 			var entry float64
-			// LONG wants to buy LOW. GPT entry (support) is typically below current price.
-			// Use GPT entry if it's below current price (better deal); otherwise market entry.
-			offsetEntry := price - entryOffset
-			entry = offsetEntry
-			if longEntry > 0 && longEntry < entry && (price-longEntry) <= maxDev {
-				entry = longEntry // GPT found a better support level
-			}
-			// Regime-based entry mode
-			switch regime {
-			case RegimeStrongTrend, RegimeExpansion:
-				entry = price // market entry — trend/breakout won't wait
-				s.log.Info("AI: market entry", zap.String("side", "LONG"),
-					zap.String("regime", string(regime)), zap.Float64("conf", longConf))
-			default: // SLOW_TREND
-				// Use limit entry; strong MTF or high conf → market
-				if longConf >= s.cfg.MarketEntryConf || (mtfScore >= 3 && longConf >= entryConfLong) {
-					entry = price
-					s.log.Info("AI: market entry (conf/MTF)", zap.String("side", "LONG"), zap.Float64("conf", longConf), zap.Int("mtf", mtfScore))
-				}
+			if longEntry > 0 && longEntry < price && (price-longEntry) <= maxDev {
+				entry = math.Round((longEntry+longEntry*0.0003)*100) / 100 // 0.03% above GPT support
+			} else {
+				entry = math.Round((prevClose-entryBuf)*100) / 100 // prevClose - buffer
 			}
 			entry = math.Round(entry*100) / 100
+			// LONG TP target = GPT resistance (shortEntry) — where sellers step in
+			gptTP := shortEntry
 			if hedgeAllowed && s.shortPos != nil {
 				s.openHedgeScalp(ctx, "LONG", price, entry, atr, s.shortPos)
 			} else {
 				s.lastConf = longConf
-				s.openTrend(ctx, "LONG", price, entry, atr)
+				s.openTrend(ctx, "LONG", price, entry, atr, gptTP)
 				if s.longPos != nil { s.longPos.entryRegime = regime }
 			}
 		}
@@ -626,32 +699,21 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 		if shortConf > 0 {
 			var entry float64
-			// SHORT wants to sell HIGH. GPT entry (resistance) is typically above current price.
-			// Use GPT entry if it's above current price (better deal); otherwise market entry.
-			offsetEntry := price + entryOffset
-			entry = offsetEntry
-			if shortEntry > 0 && shortEntry > entry && (shortEntry-price) <= maxDev {
-				entry = shortEntry // GPT found a better resistance level
-			}
-			// Regime-based entry mode
-			switch regime {
-			case RegimeStrongTrend, RegimeExpansion:
-				entry = price // market entry — trend/breakout won't wait
-				s.log.Info("AI: market entry", zap.String("side", "SHORT"),
-					zap.String("regime", string(regime)), zap.Float64("conf", shortConf))
-			default: // SLOW_TREND
-				// Use limit entry; strong MTF or high conf → market
-				if shortConf >= s.cfg.MarketEntryConf || (mtfScore <= -3 && shortConf >= entryConfShort) {
-					entry = price
-					s.log.Info("AI: market entry (conf/MTF)", zap.String("side", "SHORT"), zap.Float64("conf", shortConf), zap.Int("mtf", mtfScore))
-				}
+			// SHORT entry: prevClose + buffer (previous candle's close as resistance)
+			// If GPT gives a better resistance level, use that instead.
+			if shortEntry > 0 && shortEntry > price && (shortEntry-price) <= maxDev {
+				entry = math.Round((shortEntry-shortEntry*0.0003)*100) / 100 // 0.03% below GPT resistance
+			} else {
+				entry = math.Round((prevClose+entryBuf)*100) / 100 // prevClose + buffer
 			}
 			entry = math.Round(entry*100) / 100
+			// SHORT TP target = GPT support (longEntry) — where buyers step in
+			gptTP := longEntry
 			if hedgeAllowed && s.longPos != nil {
 				s.openHedgeScalp(ctx, "SHORT", price, entry, atr, s.longPos)
 			} else {
 				s.lastConf = shortConf
-				s.openTrend(ctx, "SHORT", price, entry, atr)
+				s.openTrend(ctx, "SHORT", price, entry, atr, gptTP)
 				if s.shortPos != nil { s.shortPos.entryRegime = regime }
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,10 @@ type EngineConfig struct {
 	// Optional real-time push callbacks (set by API engine manager to wire WS hub).
 	OnFill   func(userID int, fill *data.Fill) // called after each DB-persisted fill
 	OnEquity func(userID int, equity float64)  // called after each equity snapshot
+
+	// SkipCleanSlate skips cancelling all exchange orders on startup.
+	// Set to true when user has manual positions/orders that should not be touched.
+	SkipCleanSlate bool
 }
 
 // Engine drives live trading:
@@ -75,6 +80,9 @@ type Engine struct {
 	equityQuerier   exchange.EquityQuerier
 	lastEquityQuery time.Time
 	cachedEquityBits atomic.Uint64 // float64 stored as bits for lock-free access
+
+	// Non-trade balance adjustment (transfer/deposit/funding fee)
+	equityAdjusted atomic.Value // float64; set by UDS goroutine, consumed by bar goroutine
 
 	// Stale bar detection
 	lastBarTime  time.Time // last time a kline was received
@@ -221,7 +229,10 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 
 	// Clean-slate: only cancel open orders when DB recovery was NOT performed
 	// (i.e. when Store is nil or recovery fell back to cancel-all for this exchange).
-	if !recovered {
+	// Skip if SkipCleanSlate is set or QUANTIX_SKIP_CLEAN_SLATE env var is set.
+	// Use env var when user has manual positions that should not be touched.
+	skipClean := e.cfg.SkipCleanSlate || os.Getenv("QUANTIX_SKIP_CLEAN_SLATE") == "true"
+	if !recovered && !skipClean {
 		if oc, ok := e.broker.orderClient.(exchange.OpenOrdersCanceller); ok {
 			cleanCtx, cleanFn := context.WithTimeout(ctx, 10*time.Second)
 			if symbol != "" {
@@ -265,7 +276,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	// Start User Data Stream for real-time fill + account + position updates.
 	if uds, ok := e.broker.orderClient.(exchange.UserDataSubscriber); ok {
 		e.log.Info("user data stream: starting subscription")
-		onAccountUpdate := func(walletBalance, crossUnPnl float64) {
+		onAccountUpdate := func(walletBalance, crossUnPnl float64, reason string) {
 			equity := walletBalance + crossUnPnl
 			e.cachedEquityBits.Store(math.Float64bits(equity))
 			e.lastEquityQuery = time.Now()
@@ -273,6 +284,21 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			// Also update syncer
 			if e.posSyncer != nil {
 				e.posSyncer.OnEquityUpdate(ctx, walletBalance, crossUnPnl)
+			}
+			// User-initiated balance changes (transfer in/out) — adjust risk baseline
+			// so risk manager doesn't mistake transfers for trading losses.
+			// FUNDING_FEE is a trading cost, not a transfer — don't adjust.
+			isTransfer := reason == "DEPOSIT" || reason == "WITHDRAW" ||
+				reason == "ADMIN_DEPOSIT" || reason == "ADJUSTMENT"
+			if isTransfer {
+				e.log.Info("account balance change (transfer)",
+					zap.String("reason", reason),
+					zap.Float64("wallet", walletBalance),
+					zap.Float64("equity", equity))
+				e.risk.AdjustDayStart(equity)
+				// Notify strategy to adjust dayStartEquity (picked up on next OnBar).
+				// Use atomic store to avoid race with strategy goroutine reading Extra map.
+				e.equityAdjusted.Store(equity)
 			}
 		}
 		onPositionUpdate := func(symbol, side string, qty, entryPrice float64) {
@@ -358,6 +384,11 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// ── Watchdog: close ALL open positions at market price before stopping ──
+			// Prevents orphaned positions from accumulating losses while engine is offline.
+			// This was added after a $305 loss from positions held during engine downtime.
+			e.closeAllPositionsOnShutdown()
+
 			// Cancel all open exchange orders before stopping to prevent orphaned
 			// stop-loss / take-profit orders from continuing to execute.
 			cancelCtx, cancelFn := context.WithTimeout(context.Background(), 10*time.Second)
@@ -390,6 +421,9 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				klineCh = nil
 				continue
 			}
+			e.log.Info("engine: bar received",
+				zap.String("symbol", kline.Symbol), zap.String("interval", kline.Interval),
+				zap.Float64("close", kline.Close), zap.Bool("closed", kline.IsClosed))
 			e.onBar(kline)
 
 		case tickPrice, ok := <-e.tickCh:
@@ -411,9 +445,87 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			e.persistEquitySnapshot()
 			e.omsInst.PruneTerminal(30 * time.Minute)
 
+			// Stale bar watchdog: if no bar received for 10 minutes, WS is dead.
+			// Force engine to stop — auto-restart will recreate WS connections.
+			if !e.lastBarTime.IsZero() && time.Since(e.lastBarTime) > 10*time.Minute && !e.staleAlerted {
+				e.staleAlerted = true
+				e.log.Error("CRITICAL: no kline data for 10+ minutes — forcing engine restart",
+					zap.Duration("since_last_bar", time.Since(e.lastBarTime)))
+				if e.notifier != nil {
+					e.notifier.SystemAlert("CRITICAL",
+						fmt.Sprintf("⚠️ No kline data for %s — auto-restarting engine",
+							time.Since(e.lastBarTime).Round(time.Second)))
+				}
+				// Return error to trigger engine restart via auto-restart mechanism
+				return fmt.Errorf("stale kline data: no bars for %s", time.Since(e.lastBarTime).Round(time.Second))
+			}
+
 		case <-dailyTicker.C:
 			e.sendDailySummary()
 		}
+	}
+}
+
+// closeAllPositionsOnShutdown market-closes all open positions before engine stops.
+// Prevents orphaned positions from accumulating losses while engine is offline.
+func (e *Engine) closeAllPositionsOnShutdown() {
+	if e.posSyncer == nil {
+		e.log.Info("shutdown watchdog: no position syncer, skipping position close")
+		return
+	}
+
+	symbol := ""
+	if parts := strings.SplitN(e.cfg.StrategyID, "-", 2); len(parts) > 0 {
+		symbol = parts[0]
+	}
+
+	closed := 0
+
+	// Close LONG if exists
+	if lp := e.posSyncer.GetLong(); lp != nil && lp.Qty > 0 {
+		e.log.Warn("shutdown watchdog: closing LONG position at market",
+			zap.String("symbol", symbol), zap.Float64("qty", lp.Qty),
+			zap.Float64("entry", lp.EntryPrice))
+		req := strategy.OrderRequest{
+			Symbol: symbol, Side: strategy.SideSell,
+			PositionSide: strategy.PositionSideLong, Qty: lp.Qty,
+		}
+		if id := e.stratCtx.PlaceOrder(req); id != "" {
+			closed++
+			e.log.Info("shutdown watchdog: LONG close order placed", zap.String("id", id))
+		} else {
+			e.log.Error("shutdown watchdog: failed to close LONG position")
+		}
+	}
+
+	// Close SHORT if exists
+	if sp := e.posSyncer.GetShort(); sp != nil && sp.Qty > 0 {
+		e.log.Warn("shutdown watchdog: closing SHORT position at market",
+			zap.String("symbol", symbol), zap.Float64("qty", sp.Qty),
+			zap.Float64("entry", sp.EntryPrice))
+		req := strategy.OrderRequest{
+			Symbol: symbol, Side: strategy.SideBuy,
+			PositionSide: strategy.PositionSideShort, Qty: sp.Qty,
+		}
+		if id := e.stratCtx.PlaceOrder(req); id != "" {
+			closed++
+			e.log.Info("shutdown watchdog: SHORT close order placed", zap.String("id", id))
+		} else {
+			e.log.Error("shutdown watchdog: failed to close SHORT position")
+		}
+	}
+
+	if closed > 0 {
+		// Give exchange time to process market orders
+		time.Sleep(3 * time.Second)
+		e.log.Warn("shutdown watchdog: closed positions before stop",
+			zap.Int("count", closed))
+		if e.notifier != nil {
+			e.notifier.SystemAlert("WARN", fmt.Sprintf(
+				"⚠️ Watchdog: closed %d position(s) at market on engine shutdown", closed))
+		}
+	} else {
+		e.log.Info("shutdown watchdog: no open positions to close")
 	}
 }
 
@@ -456,6 +568,12 @@ func (e *Engine) onBar(bar exchange.Kline) {
 			e.notifier.RiskAlert(e.cfg.StrategyID, err.Error(), equity, drawdown)
 		}
 		return
+	}
+
+	// Pass non-trade balance adjustment to strategy (thread-safe via atomic).
+	if adj, ok := e.equityAdjusted.Load().(float64); ok && adj > 0 {
+		e.stratCtx.Extra["equity_adjusted"] = adj
+		e.equityAdjusted.Store(float64(0)) // consumed
 	}
 
 	e.strategy.OnBar(e.stratCtx, bar)

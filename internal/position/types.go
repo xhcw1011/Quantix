@@ -26,6 +26,8 @@ type StrategyPosition struct {
 	Trailing   float64 `json:"trailing"`
 	PeakPrice  float64 `json:"peak_price"`
 	R          float64 `json:"r"`
+	EntryATR   float64 `json:"entry_atr,omitempty"`    // ATR at entry time for trailing calculation
+	GptTPPrice float64 `json:"gpt_tp_price,omitempty"` // GPT support/resistance level for TP
 	InitQty    float64 `json:"init_qty"`
 	TP1Hit     bool    `json:"tp1_hit"`
 	BarsHeld   int     `json:"bars_held"`

@@ -512,7 +512,8 @@ func (b *OrderBroker) GetOrderStatus(ctx context.Context, symbol, orderID string
 // events to the handler. Auto-renews the listenKey every 30 minutes.
 // Blocks until ctx is cancelled.
 // SubscribeUserData implements exchange.UserDataSubscriber.
-func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill exchange.OrderFill, clientOrderID string, status string), accountHandler func(walletBalance float64, crossUnPnl float64), positionHandler func(symbol, side string, qty, entryPrice float64)) {
+func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill exchange.OrderFill, clientOrderID string, status string), accountHandler func(walletBalance float64, crossUnPnl float64, reason string), positionHandler func(symbol, side string, qty, entryPrice float64)) {
+	firstConnect := true
 	for {
 		select {
 		case <-ctx.Done():
@@ -526,7 +527,11 @@ func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill e
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		b.log.Info("user data stream: listenKey created")
+		if firstConnect {
+			b.log.Info("user data stream: listenKey created")
+		} else {
+			b.log.Debug("user data stream: listenKey created (reconnect)")
+		}
 
 		// Keepalive ticker: renew every 30 minutes
 		keepalive := time.NewTicker(30 * time.Minute)
@@ -538,13 +543,12 @@ func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill e
 
 			// ACCOUNT_UPDATE: balance + position changes
 			if event.Event == goBinance.UserDataEventTypeAccountUpdate {
+				reason := string(event.AccountUpdate.Reason)
 				if accountHandler != nil {
 					for _, bal := range event.AccountUpdate.Balances {
 						if bal.Asset == "USDT" {
 							wb, _ := strconv.ParseFloat(bal.Balance, 64)
-							crossPnl, _ := strconv.ParseFloat(bal.CrossWalletBalance, 64)
-							_ = crossPnl
-							accountHandler(wb, 0)
+							accountHandler(wb, 0, reason) // unrealized PnL sourced from position updates, not balance
 							break
 						}
 					}
@@ -615,7 +619,12 @@ func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill e
 			continue
 		}
 
-		b.log.Info("user data stream: connected")
+		if firstConnect {
+			b.log.Info("user data stream: connected")
+		} else {
+			b.log.Debug("user data stream: reconnected")
+		}
+		firstConnect = false
 
 		// Wait for disconnect or ctx cancel
 	loop:

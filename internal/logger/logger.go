@@ -67,9 +67,9 @@ func New(env, level, logDir string) (*zap.Logger, error) {
 		lvl,
 	)
 
-	// Tee: write to both stdout and file
-	tee := zapcore.NewTee(consoleCore, fileCore)
-	return zap.New(tee, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel)), nil
+	// When logDir is set, write ONLY to file (not stdout).
+	// This prevents duplicate lines when nohup redirects stdout to the same file.
+	return zap.New(fileCore, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel)), nil
 }
 
 // openLogFile ensures the log directory exists and returns the log file path for today.

@@ -103,7 +103,18 @@ func init() {
 		if v, ok := params["BBStdDev"]; ok { cfg.BBStdDev = toFloat(v) }
 		if v, ok := params["ATRPeriod"]; ok { cfg.ATRPeriod = toInt(v) }
 		if v, ok := params["VolMAPeriod"]; ok { cfg.VolMAPeriod = toInt(v) }
+		if v, ok := params["TrendEfficiencyMin"]; ok { cfg.TrendEfficiencyMin = toFloat(v) }
+		if v, ok := params["SwingSLMinATR"]; ok { cfg.SwingSLMinATR = toFloat(v) }
+		if v, ok := params["SwingSLMaxATR"]; ok { cfg.SwingSLMaxATR = toFloat(v) }
+		if v, ok := params["GptTPMinR"]; ok { cfg.GptTPMinR = toFloat(v) }
+		if v, ok := params["GptTPMaxR"]; ok { cfg.GptTPMaxR = toFloat(v) }
+		if v, ok := params["CounterTrendCap"]; ok { cfg.CounterTrendCap = toFloat(v) }
+		if v, ok := params["AccumBaseThresh"]; ok { cfg.AccumBaseThresh = toFloat(v) }
+		if v, ok := params["BoostMinConf"]; ok { cfg.BoostMinConf = toFloat(v) }
+		if v, ok := params["BounceTPR"]; ok { cfg.BounceTPR = toFloat(v) }
+		if v, ok := params["EmergencyPnlR"]; ok { cfg.EmergencyPnlR = toFloat(v) }
 		if v, ok := params["EntryOffsetPct"]; ok { cfg.EntryOffsetPct = toFloat(v) }
+		if v, ok := params["LongEntryOffsetPct"]; ok { cfg.LongEntryOffsetPct = toFloat(v) }
 		if v, ok := params["MaxEntryDevPct"]; ok { cfg.MaxEntryDevPct = toFloat(v) }
 		if v, ok := params["LimitTimeoutBars"]; ok { cfg.LimitTimeoutBars = toInt(v) }
 		if v, ok := params["MinHoldBars"]; ok { cfg.MinHoldBars = toInt(v) }
@@ -160,10 +171,23 @@ type Config struct {
 	Leverage   float64 // exchange leverage multiplier (default 10)
 	PosSizePct float64 // fraction of equity used as margin per trade (default 0.40 = 40%)
 
-	// Trend mode
-	RiskPerTrade float64 // 1% of equity per trade
-	ATRK         float64 // stop-loss ATR multiplier
-	TrailingATRK float64 // trailing ATR multiplier
+	// ── Trend mode — core risk parameters ──
+	RiskPerTrade  float64 // fraction of equity risked per trade (default 0.03 = 3%)
+	ATRK          float64 // SLOW_TREND stop-loss = ATR × ATRK (default 1.2)
+	SwingSLMinATR float64 // STRONG_TREND swing SL floor as ATR multiple (default 1.2)
+	SwingSLMaxATR float64 // STRONG_TREND swing SL cap as ATR multiple (default 1.8)
+	TrailingATRK  float64 // trailing distance = entryATR × TrailingATRK (default 2.0; safety net, not primary exit)
+
+	// ── GPT TP targeting — use market structure for profit targets ──
+	GptTPMinR float64 // min GPT TP distance as R-multiple; floor to cover fees (default 0.5)
+	GptTPMaxR float64 // max GPT TP distance as R-multiple; cap to stay reachable (default 1.5)
+
+	// ── Signal quality filtering ──
+	CounterTrendCap float64 // hard cap on counter-trend GPT confidence (default 0.40)
+	AccumBaseThresh float64 // min GPT conf to contribute to accumulation: add = conf - thresh (default 0.30)
+	BoostMinConf    float64 // min GPT conf for swing proximity / MTF momentum boost (default 0.70)
+	BounceTPR       float64 // bounce TP: close remaining qty when price retreats this × R from peak (default 0.8)
+	EmergencyPnlR   float64 // trigger emergency GPT reversal check when pnlR below this (default -0.9)
 
 	// Range/scalp mode (percentage of entry price)
 	RangeTPPct float64 // take-profit % (default 0.004 = 0.4%)
@@ -228,8 +252,9 @@ type Config struct {
 	SlowTrendDirScore     float64 // min direction score for SLOW_TREND (default 0.60)
 	ExpansionATRK         float64 // bar range > ATR * this = breakout candidate (default 2.0)
 	ExpansionBodyK        float64 // bar body > ATR * this = confirmed breakout (default 1.0)
-	RegimeEntryConf       float64 // GPT confidence threshold when STRONG_TREND/EXPANSION (default 0.60)
-	RangeEntryConf        float64 // GPT confidence threshold when RANGE (default 0.75)
+	TrendEfficiencyMin    float64 // min efficiency ratio (|net|/sum|moves|) to classify as trend; below = RANGE (default 0.30)
+	RegimeEntryConf       float64 // GPT confidence threshold for with-trend entry in STRONG_TREND/EXPANSION (default 0.80)
+	RangeEntryConf        float64 // GPT confidence threshold when RANGE; 0 = disabled (default 0)
 
 	// Technical indicator periods
 	RSIPeriod   int     // RSI lookback (default 14)
@@ -244,7 +269,8 @@ type Config struct {
 	VolMAPeriod int     // Volume MA period (default 20)
 
 	// Entry/exit tuning
-	EntryOffsetPct   float64       // limit entry offset from current price (default 0.0013)
+	EntryOffsetPct      float64    // SHORT limit entry offset (default 0.0040 = 0.40%)
+	LongEntryOffsetPct  float64    // LONG limit entry offset (default 0.0010 = 0.10%), smaller to avoid catching falling knives
 	MaxEntryDevPct   float64       // max GPT entry deviation from spot (default 0.005)
 	LimitTimeoutBars int           // bars to wait for limit fill (default 2)
 	MinHoldBars      int           // minimum bars before TP/SL checks (default 3)
@@ -262,39 +288,86 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
+		// ─── 基础 ──────────────────────────────────────────────────────
 		Symbol: "ETHUSDT", Model: "gpt-5.4-mini",
-		ConfidenceThreshold: 0.82, LookbackBars: 60,
-		CallIntervalBars: 1, RangeCallIntervalBars: 3, EnableShort: true,
-		Leverage: 10, PosSizePct: 0.20, // 40%→20%: halve position size to reduce per-trade risk
-		RiskPerTrade: 0.02, ATRK: 2.0, TrailingATRK: 1.5,
-		RangeTPPct: 0.012, RangeSLPct: 0.010,
-		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
-		TPLevels: []float64{0.50, 1.50},       // TP1=0.5R (easy to reach, triggers breakeven)
-		TPQtySplits: []float64{0.30, 0.30},   // TP1 only 30%, keep 40% for trailing
-		TrendTPLevels: []float64{0.50, 2.00},  // trend: same TP1, wider TP2 for momentum
-		TrendTPQtySplits: []float64{0.30, 0.30},
-		TrendBreakevenR: 0.80,                // 0.50→0.80: don't move to breakeven too early
-		BreakevenR: 0.80, BreakevenBuf: 0.001,
-		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015,
-		TrailFloorPct: 0.005, MinSLDistPct: 0.008,
-		ReversalConf: 0.75, MarketEntryConf: 0.90, // 0.60→0.75: much harder to trigger reversal close
-		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
-		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
-		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
+		Leverage: 10, EnableShort: true, ForceTrend: true,
+
+		// ─── 核心风险参数（最常调整）─────────────────────────────────
+		RiskPerTrade:  0.03,  // 每笔风险 3% equity
+		ATRK:          3.0,   // SLOW_TREND SL = ATR × 3.0
+		SwingSLMinATR: 2.5,   // STRONG_TREND SL 下限 = ATR × 2.5（放宽：给swing SL足够空间）
+		SwingSLMaxATR: 4.0,   // STRONG_TREND SL 上限 = ATR × 4.0（放宽：强趋势需要更多回撤空间）
+		TrailingATRK:  3.0,   // trailing = entryATR × 3.0
+
+		// ─── 入场门槛 ─────────────────────────────────────────────
+		ConfidenceThreshold: 0.82,  // 默认/逆趋势 GPT conf 门槛
+		RegimeEntryConf:     0.75,  // STRONG_TREND/EXPANSION 顺趋势门槛
+		RangeEntryConf:      0.0,   // RANGE 入场门槛（0=禁用）
+		CounterTrendCap:     0.25,  // 逆趋势 GPT conf 硬上限（从0.40降低：防止accumulator叠加逆趋势信号到触发阈值）
+		BoostMinConf:        0.70,  // swing/MTF boost 最低 GPT conf
+		ReversalConf:        0.75,  // GPT reversal 平仓门槛
+		MarketEntryConf:     0.90,  // 市价入场门槛（未使用）
+
+		// ─── 信号积累 ─────────────────────────────────────────────
+		AccumBaseThresh: 0.30,  // conf > 0.30 才积累：add = conf - 0.30
+		SignalDecay:     0.80,  // 每bar衰减 × 0.80
+		SignalAccumMax:  0.85,  // 积累上限（降低：溢出信号准确率仅20%）
+		CallIntervalBars: 1, RangeCallIntervalBars: 3, LookbackBars: 60,
+
+		// ─── TP 获利 ──────────────────────────────────────────────
+		TPLevels: []float64{0.7}, TPQtySplits: []float64{0.60},             // 默认 TP: 0.7R 平 60%，剩余 40% trailing 跟趋势
+		TrendTPLevels: []float64{0.7}, TrendTPQtySplits: []float64{0.60}, // 趋势 TP: 同上
+		GptTPMinR: 0.30,  // GPT支撑/阻力位做TP：有效范围 0.3R ~ 1.0R（缩小配合0.5R TP）
+		GptTPMaxR: 1.00,
+		BounceTPR: 0.40,  // TP部分成交后，价格从peak回撤 0.4R 平掉剩余（缩小配合0.5R TP）
+
+		// ─── 保护机制 ─────────────────────────────────────────────
+		TrendBreakevenR: 0.0, BreakevenR: 0.0, BreakevenBuf: 0.001, // 关闭保本线（0=禁用）：短线TP才0.7R，保本线反而提前扫出
+		EmergencyPnlR: -0.9,  // 亏损超 0.9R 触发紧急GPT检查
+		MinSLDistPct: 0.008,  // SL最小距离 0.8%
+		MaxRPercent: 0.015,   // R/price > 1.5% 跳过交易（放宽：旧1%在宽SL下会误拦）
+
+		// ─── 入场微调 ─────────────────────────────────────────────
+		EntryOffsetPct: 0.00068,     // 入场 buffer ≈ $1.5（prevClose ± $1.5，保证 Maker 挂单）
+		LongEntryOffsetPct: 0.00068, // 同上，LONG/SHORT 统一用 $1.5 buffer
+		MaxEntryDevPct: 0.005,   // GPT入场价最大偏差 0.5%
+		PosSizePct: 0.40,        // 单笔最大margin占比 40%
+		ConfQtyScale: false,     // 不按confidence缩放qty
+		FeeDragPct: 0.0004,      // 手续费 Maker 0.02% × 2 = 0.04% round-trip
+
+		// ─── 时间控制 ─────────────────────────────────────────────
+		LimitTimeoutBars: 2,  // 限价单超时 2 bars (10min)
+		MinHoldBars: 3,       // 最少持仓 3 bars (15min)
+		MinTrendBars: 5,      // 趋势管理启动 5 bars (25min)
+
+		// ─── Regime 检测 ──────────────────────────────────────────
+		RegimeN: 20, StrongTrendThreshold: 2.5, StrongTrendMinVol: 0.001,
+		SlowTrendThreshold: 1.5, SlowTrendDirScore: 0.60,
+		ExpansionATRK: 2.0, ExpansionBodyK: 1.0,
+		TrendEfficiencyMin: 0.25, // 效率比<0.25=震荡市→强制RANGE不交易
+
+		// ─── MTF 评分 ─────────────────────────────────────────────
 		MTFStrongTrend: 0.01, MTFWeakTrend: 0.002,
 		MTFBullRSI: 60, MTFBearRSI: 40, MTF1mThreshold: 0.001,
 		MTFQtyScaleHard: 0.70, MTFQtyScaleSoft: 0.85, SwingProximity: 0.0015,
-		ConfQtyScale: true, ForceTrend: true, MaxRPercent: 0.01, FeeDragPct: 0.0014,
-		SignalDecay: 0.80, SignalAccumMax: 1.0,  // 0.90→0.80: faster decay; 1.5→1.0: lower cap
-		RegimeN: 20, StrongTrendThreshold: 2.5, StrongTrendMinVol: 0.001,  // 12→20: longer window for trend detection
-		SlowTrendThreshold: 1.5, SlowTrendDirScore: 0.60,
-		ExpansionATRK: 2.0, ExpansionBodyK: 1.0, RegimeEntryConf: 0.65, RangeEntryConf: 0.0, // Range: 0.75→0.0 = DISABLED (don't trade in RANGE)
+
+		// ─── 技术指标周期 ─────────────────────────────────────────
 		RSIPeriod: 14, MACDFast: 12, MACDSlow: 26, MACDSignal: 9,
 		EMAFast: 20, EMASlow: 50, BBPeriod: 20, BBStdDev: 2.0,
 		ATRPeriod: 60, VolMAPeriod: 20,
-		EntryOffsetPct: 0.0005, MaxEntryDevPct: 0.005,
-		LimitTimeoutBars: 2, MinHoldBars: 3, MinTrendBars: 5,
+
+		// ─── GPT 调用 ─────────────────────────────────────────────
 		GPTTemperature: 0.1, GPTMaxTokens: 200, GPTTimeout: 15 * time.Second,
+
+		// ─── Range模式（当前禁用）────────────────────────────────
+		RangeTPPct: 0.012, RangeSLPct: 0.010,
+		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
+		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
+		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
+		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
+		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
+
+		// ─── 风控 ─────────────────────────────────────────────────
 		MaxDailyLossPct: 0.10, MaxConsecLoss: 5,
 		HedgeOnDrawdown: false, HedgeDrawdownPct: 0.005,
 		HedgeCooldown: 15 * time.Minute, HedgeQtyRatio: 0.3, HedgeTPRatio: 0.5,

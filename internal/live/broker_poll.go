@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -61,9 +62,12 @@ func (b *Broker) pollOrderUntilFilled(ctx context.Context, sc exchange.OrderStat
 						Timestamp:    time.Now(),
 					}
 					if fillErr := b.omsInst.Fill(ordID, stratFill); fillErr != nil {
-						b.log.Warn("poll fill: OMS fill failed",
-							zap.String("order_id", ordID),
-							zap.Error(fillErr))
+						// "already FILLED" = UDS fill arrived before poll — normal, ignore.
+						if !strings.Contains(fillErr.Error(), "FILLED") {
+							b.log.Warn("poll fill: OMS fill failed",
+								zap.String("order_id", ordID),
+								zap.Error(fillErr))
+						}
 					} else {
 						b.log.Info("poll confirmed order filled",
 							zap.String("order_id", ordID),

@@ -49,9 +49,9 @@ CONFIDENCE TABLE:
   trend + structure agree, 5m weak → with-trend: 0.70-0.85
   trend only (structure neutral)  → with-trend: 0.55-0.70
   no trend (flat/range)           → both sides: 0.40-0.60
-  COUNTER-TREND (any scenario)    → HARD CAP: 0.40
+  COUNTER-TREND (any scenario)    → HARD CAP: 0.25
 
-NEVER score counter-trend > 0.40. A bounce against the trend is noise, not signal.
+NEVER score counter-trend > 0.25. When trend_dir=-1, long MUST be ≤0.25. When trend_dir=+1, short MUST be ≤0.25. A bounce against the trend is noise, not signal.
 
 ENTRY: long=nearest support below price, short=nearest resistance above. Within 0.3% of price.`
 

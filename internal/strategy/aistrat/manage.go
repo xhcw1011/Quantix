@@ -88,7 +88,10 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 				zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
 				zap.Float64("tp", g.tp), zap.Float64("price", price),
 				zap.Float64("qty", g.qty), zap.Int("layer", i+1))
-			s.placeCloseOrder(ctx, p.side, g.qty, false)
+			if !s.placeCloseOrder(ctx, p.side, g.qty, false) {
+				s.log.Warn("AI: grid close order failed", zap.Int("layer", i+1))
+				continue // skip removal, retry next bar
+			}
 			p.remainQty -= g.qty
 			// Remove this grid order
 			p.gridOrders = append(p.gridOrders[:i], p.gridOrders[i+1:]...)
@@ -154,7 +157,7 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 	if p.barsHeld < s.cfg.MinTrendBars { return }
 
 	price := bar.Close
-	atr := s.calcATR()
+	liveATR := s.calcATR()
 
 	// R-based profit measurement
 	pnlR := 0.0
@@ -163,50 +166,36 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
 	}
 
-	// ── Trailing stop (R-based progressive tightening) ──
-	// Breakeven threshold adapts to entry regime:
-	//   STRONG_TREND/EXPANSION → TrendBreakevenR (wider, default 0.80)
-	//   Default → BreakevenR (tighter, default 0.40)
-	beR := s.cfg.BreakevenR
-	if (p.entryRegime == RegimeStrongTrend || p.entryRegime == RegimeExpansion) && s.cfg.TrendBreakevenR > 0 {
-		beR = s.cfg.TrendBreakevenR
-	}
-	atrTrailR := beR + 0.5 // ATR trailing starts half-R above breakeven
-
+	// ── Progressive trailing stop (active from entry, no breakeven phase) ──
+	// Trail = peak - ATR * TrailingATRK, floor at SL.
+	// Use entry-time ATR to prevent trail tightening when live ATR shrinks.
+	atr := math.Max(p.entryATR, liveATR)
+	trailDist := atr * s.cfg.TrailingATRK
 	var newTrail float64
-	moved := false
-
-	if pnlR >= atrTrailR {
-		trailDist := atr * s.cfg.TrailingATRK
-		if p.side == "LONG" {
-			newTrail = p.peakPrice - trailDist
-		} else {
-			newTrail = p.peakPrice + trailDist
-		}
-		if p.side == "LONG" && newTrail < p.entryPrice { newTrail = p.entryPrice }
-		if p.side == "SHORT" && newTrail > p.entryPrice { newTrail = p.entryPrice }
-		moved = true
-	} else if pnlR >= beR && !p.tp1RHit {
-		newTrail = p.entryPrice
-		p.tp1RHit = true
-		moved = true
-		s.log.Info("AI: trailing → breakeven", zap.String("side", p.side), zap.Float64("pnlR", pnlR), zap.Float64("beR", beR))
+	if p.side == "LONG" {
+		newTrail = p.peakPrice - trailDist
+		if newTrail < p.stopLoss { newTrail = p.stopLoss } // floor at original SL
+	} else {
+		newTrail = p.peakPrice + trailDist
+		if newTrail > p.stopLoss { newTrail = p.stopLoss }
 	}
+	newTrail = math.Round(newTrail*100) / 100
 
+	// Only tighten, never widen
+	moved := false
+	if p.side == "LONG" && newTrail > p.trailing {
+		p.trailing = newTrail
+		moved = true
+	}
+	if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
+		p.trailing = newTrail
+		moved = true
+	}
 	if moved {
-		newTrail = math.Round(newTrail*100) / 100
-		// Only tighten, never widen
-		if p.side == "LONG" && newTrail > p.trailing {
-			p.trailing = newTrail
-			if s.stagedEP != nil {
-				s.stagedEP.ReplaceSLOrder(s.cfg.Symbol, "LONG", "SELL", p.remainQty, p.trailing)
-			}
-		}
-		if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
-			p.trailing = newTrail
-			if s.stagedEP != nil {
-				s.stagedEP.ReplaceSLOrder(s.cfg.Symbol, "SHORT", "BUY", p.remainQty, p.trailing)
-			}
+		if s.stagedEP != nil {
+			closeSide := "SELL"
+			if p.side == "SHORT" { closeSide = "BUY" }
+			s.stagedEP.ReplaceSLOrder(s.cfg.Symbol, p.side, closeSide, p.remainQty, p.trailing)
 		}
 		s.syncToRedis(p)
 	}
@@ -215,7 +204,7 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 	// Detects trend exhaustion — price made a new extreme then reversed.
 	// 0.8R (~14 points ETH) gives enough room for normal oscillation without premature exit.
 	if p.remainQty < p.initQty && p.remainQty > 0 { // only after some TPs filled
-		bounceThreshold := 0.8 * p.R
+		bounceThreshold := s.cfg.BounceTPR * p.R
 		if p.side == "LONG" && p.peakPrice-price >= bounceThreshold && pnlR > 0 {
 			s.log.Info("AI: bounce TP — price retreated from peak",
 				zap.Float64("peak", p.peakPrice), zap.Float64("price", price), zap.Float64("pnlR", pnlR))
@@ -266,8 +255,8 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 
 	// Update signal accumulation (with counter-trend halving, same as main loop).
 	la, sa := 0.0, 0.0
-	if signal.Long != nil && signal.Long.Confidence > 0.3 { la = signal.Long.Confidence - 0.3 }
-	if signal.Short != nil && signal.Short.Confidence > 0.3 { sa = signal.Short.Confidence - 0.3 }
+	if signal.Long != nil && signal.Long.Confidence > s.cfg.AccumBaseThresh { la = signal.Long.Confidence - s.cfg.AccumBaseThresh }
+	if signal.Short != nil && signal.Short.Confidence > s.cfg.AccumBaseThresh { sa = signal.Short.Confidence - s.cfg.AccumBaseThresh }
 	if s.lastTrendDir < 0 { la *= 0.5 }
 	if s.lastTrendDir > 0 { sa *= 0.5 }
 	s.accumLong += la; s.accumShort += sa
@@ -310,6 +299,9 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 		s.log.Info("AI: reversal → close "+p.side,
 			zap.Float64("conf", reverseConf))
 		s.closePos(ctx, p, pptr, "gpt_reversal")
+		// Allow signal.go to open new position on this same bar.
+		// Reset lastCallBar so the interval check doesn't block entry.
+		s.lastCallBar = s.barCount - s.cfg.CallIntervalBars
 	}
 }
 

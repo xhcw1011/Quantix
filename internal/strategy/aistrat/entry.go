@@ -75,20 +75,43 @@ func (s *AIStrategy) openHedgeScalp(ctx *strategy.Context, side string, currentP
 }
 
 
-func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice, entryPrice, atr float64) {
+func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice, entryPrice, atr, gptTP float64) {
 	entryPrice = math.Round(entryPrice*100) / 100
-	atrDist := atr * s.cfg.ATRK
+
+	// SL based on swing structure (real support/resistance), not just ATR.
+	// STRONG_TREND/EXPANSION: use swing low/high as SL (wider, survives pullbacks).
+	// SLOW_TREND: use ATR-based SL (tighter).
+	var stopLoss float64
+	atrDist := atr * s.cfg.ATRK // default ATR-based SL
 	minDist := entryPrice * s.cfg.MinSLDistPct
 	if atrDist < minDist { atrDist = minDist }
 
-	var stopLoss float64
-	if side == "LONG" {
-		stopLoss = entryPrice - atrDist
-		if stopLoss >= entryPrice { return }
+	if s.lastRegime == RegimeStrongTrend || s.lastRegime == RegimeExpansion {
+		// Swing-based SL: set SL below swing low (LONG) or above swing high (SHORT).
+		// This places SL at real support/resistance, not arbitrary ATR distance.
+		buffer := atr * 0.5 // small buffer below/above swing
+		if side == "LONG" {
+			swLow := s.findSwingLow(20)
+			stopLoss = math.Round((swLow-buffer)*100) / 100
+			if entryPrice-stopLoss < atr*s.cfg.SwingSLMinATR { stopLoss = entryPrice - atr*s.cfg.SwingSLMinATR }
+			if entryPrice-stopLoss > atr*s.cfg.SwingSLMaxATR { stopLoss = entryPrice - atr*s.cfg.SwingSLMaxATR }
+		} else {
+			swHigh := s.findSwingHigh(20)
+			stopLoss = math.Round((swHigh+buffer)*100) / 100
+			if stopLoss-entryPrice < atr*s.cfg.SwingSLMinATR { stopLoss = entryPrice + atr*s.cfg.SwingSLMinATR }
+			if stopLoss-entryPrice > atr*s.cfg.SwingSLMaxATR { stopLoss = entryPrice + atr*s.cfg.SwingSLMaxATR }
+		}
 	} else {
-		stopLoss = entryPrice + atrDist
-		if stopLoss <= entryPrice { return }
+		// ATR-based SL for non-trending regimes
+		if side == "LONG" {
+			stopLoss = entryPrice - atrDist
+		} else {
+			stopLoss = entryPrice + atrDist
+		}
 	}
+	stopLoss = math.Round(stopLoss*100) / 100
+	if side == "LONG" && stopLoss >= entryPrice { return }
+	if side == "SHORT" && stopLoss <= entryPrice { return }
 
 	R := math.Abs(entryPrice - stopLoss)
 	if R <= 0 { return }
@@ -104,38 +127,15 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 		equity = pf.Equity(map[string]float64{s.cfg.Symbol: currentPrice})
 	}
 
-	// Leverage-based position sizing: notional = equity × PosSizePct × Leverage
-	leverage := s.cfg.Leverage
-	if leverage <= 0 { leverage = 10 }
-	posPct := s.cfg.PosSizePct
-	if posPct <= 0 { posPct = 0.40 }
-	qty := math.Floor(equity*posPct*leverage/entryPrice*1000) / 1000
+	// R-based position sizing: fixed dollar risk per trade.
+	// qty = (equity × RiskPerTrade) / R
+	// SL wider → smaller position → same $ loss. SL tighter → bigger position → same $ loss.
+	riskAmount := equity * s.cfg.RiskPerTrade // e.g. $85 * 2% = $1.70
+	qty := math.Floor(riskAmount/R*1000) / 1000
 
-	// In hedge mode (opposite position exists), halve the size
-	if side == "LONG" && s.shortPos != nil && s.shortPos.filled { qty = math.Floor(qty*0.5*1000) / 1000 }
-	if side == "SHORT" && s.longPos != nil && s.longPos.filled { qty = math.Floor(qty*0.5*1000) / 1000 }
-
-	// MTF headwind scaling
-	mtfScale := s.mtfLongScale; if side == "SHORT" { mtfScale = s.mtfShortScale }
-	if mtfScale > 0 && mtfScale < 1.0 { qty = math.Floor(qty*mtfScale*1000) / 1000 }
-
-	// Confidence scaling (floor raised to 0.7 to avoid excessive reduction)
-	if s.cfg.ConfQtyScale && s.lastConf > 0 {
-		baseConf := s.cfg.ConfidenceThreshold
-		switch s.lastRegime {
-		case RegimeStrongTrend, RegimeExpansion:
-			baseConf = s.cfg.RegimeEntryConf
-		case RegimeSlowTrend:
-			baseConf = (s.cfg.RegimeEntryConf + s.cfg.ConfidenceThreshold) / 2
-		}
-		confScale := (s.lastConf - baseConf) / (1.0 - baseConf)
-		if confScale < 0.7 { confScale = 0.7 }
-		if confScale > 1.0 { confScale = 1.0 }
-		qty = math.Floor(qty*confScale*1000) / 1000
-	}
-
-	// Safety cap: margin must not exceed 80% of equity
-	maxQty := math.Floor(equity*0.8*leverage/entryPrice*1000) / 1000
+	// Safety cap: margin must not exceed 60% of equity
+	leverage := s.cfg.Leverage; if leverage <= 0 { leverage = 10 }
+	maxQty := math.Floor(equity*0.6*leverage/entryPrice*1000) / 1000
 	if qty > maxQty { qty = maxQty }
 	if qty <= 0 { return }
 
@@ -146,7 +146,8 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	filledAt := time.Time{}
 	if !useLimit { filledAt = time.Now() }
 	pos := &posState{
-		side: side, mode: modeTrend, entryPrice: entryPrice,
+		side: side, mode: modeTrend, entryPrice: entryPrice, entryATR: atr,
+		gptTPPrice: gptTP,
 		initQty: qty, remainQty: qty,
 		R: R, stopLoss: stopLoss, trailing: stopLoss, peakPrice: entryPrice,
 		filled: !useLimit, filledAt: filledAt, orderID: omsID, limitBar: s.barCount,
@@ -178,9 +179,9 @@ func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty f
 	return ctx.PlaceOrder(req)
 }
 
-// placeCloseOrder places a close order. Uses limit order (maker fee) unless useMarket is true.
-// Limit close price: sell at current+$0.01 (LONG), buy at current-$0.01 (SHORT) to get maker fee.
-func (s *AIStrategy) placeCloseOrder(ctx *strategy.Context, side string, qty float64, useMarket bool) {
+// placeCloseOrder places a close order. Returns true if order was submitted.
+// Uses limit order (maker fee) unless useMarket is true.
+func (s *AIStrategy) placeCloseOrder(ctx *strategy.Context, side string, qty float64, useMarket bool) bool {
 	closeSide := strategy.SideSell
 	psSide := strategy.PositionSideLong
 	if side == "SHORT" {
@@ -206,7 +207,9 @@ func (s *AIStrategy) placeCloseOrder(ctx *strategy.Context, side string, qty flo
 	if id := ctx.PlaceOrder(req); id == "" {
 		s.log.Error("placeCloseOrder failed", zap.String("side", side),
 			zap.Float64("qty", qty), zap.Bool("market", useMarket))
+		return false
 	}
+	return true
 }
 
 // addGPTGrid adds the GPT-suggested support/resistance price as a grid order for future fill.

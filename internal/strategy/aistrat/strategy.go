@@ -56,6 +56,7 @@ type AIStrategy struct {
 	consecLoss     int
 	dayHalted      bool
 	stopBar        int // bar index when last stop-loss fired — skip opening same bar
+	expansionBar   int // bar index when last EXPANSION detected — cooldown before entry
 	lastMTFScore    int     // multi-timeframe score from latest signal check
 	mtfLongScale    float64 // position size multiplier for LONG (0.7-1.0)
 	mtfShortScale   float64 // position size multiplier for SHORT (0.7-1.0)
@@ -70,12 +71,15 @@ type AIStrategy struct {
 	replaySignals   []gptSignal // cached signals for backtest replay
 	replayIdx       int         // current index into replaySignals
 
+	lastCloseFailAt time.Time // throttle close retries after failure (prevent tick-level spam)
+
 	// Post-SL immediate reversal: set by tickManage when SL fires on tick data.
 	// Cleared on next OnBar when the urgent GPT check runs.
 	postSLReeval    bool
 	postSLSide      string    // which side was closed ("LONG"/"SHORT")
 	postSLPrice     float64   // tick price at SL trigger
 	lastEmergencyAt time.Time // throttle emergency GPT calls (max 1 per 30s)
+	tpCooldownBar   int       // bar index when TP filled — block new entries for 3 bars
 
 	// Async emergency GPT: the goroutine sends results here, OnTick consumes.
 	emergencyCh     chan emergencySignal
@@ -159,6 +163,11 @@ func (s *AIStrategy) throttledReplaceSL(symbol, posSide, closeSide string, qty, 
 }
 
 func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posState, pptr **posState) {
+	// Throttle after close failure: don't retry for 10s to prevent tick-level spam.
+	if !s.lastCloseFailAt.IsZero() && time.Since(s.lastCloseFailAt) < 10*time.Second {
+		return
+	}
+
 	// ── 1. Real-time SL check (must be instant, not wait for bar close) ──
 	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
 		closedSide := p.side
@@ -184,49 +193,32 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		if p.side == "LONG" { pnlR = (price - p.entryPrice) / p.R }
 		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
 
-		// Trailing thresholds must match manageTrend (use same config values).
-		beR := s.cfg.BreakevenR
-		if (p.entryRegime == RegimeStrongTrend || p.entryRegime == RegimeExpansion) && s.cfg.TrendBreakevenR > 0 {
-			beR = s.cfg.TrendBreakevenR
+		// Progressive trailing: peak - ATR * TrailingATRK, floor at SL.
+		// Use entry-time ATR to prevent trail tightening when live ATR shrinks.
+		liveATR := s.calcATR()
+		atr := math.Max(p.entryATR, liveATR) // never tighter than entry-time ATR
+		trailDist := atr * s.cfg.TrailingATRK
+		var newTrail float64
+		if p.side == "LONG" {
+			newTrail = p.peakPrice - trailDist
+			if newTrail < p.stopLoss { newTrail = p.stopLoss }
+		} else {
+			newTrail = p.peakPrice + trailDist
+			if newTrail > p.stopLoss { newTrail = p.stopLoss }
 		}
-		atrTrailR := beR + 0.5
-
-		// Phase 2: pnlR >= atrTrailR → ATR trailing
-		if pnlR >= atrTrailR {
-			atr := s.calcATR()
-			trailDist := atr * s.cfg.TrailingATRK
-			var newTrail float64
-			if p.side == "LONG" {
-				newTrail = p.peakPrice - trailDist
-				if newTrail < p.entryPrice { newTrail = p.entryPrice }
-			} else {
-				newTrail = p.peakPrice + trailDist
-				if newTrail > p.entryPrice { newTrail = p.entryPrice }
-			}
-			newTrail = math.Round(newTrail*100) / 100
-			if p.side == "LONG" && newTrail > p.trailing {
-				p.trailing = newTrail
-				s.throttledReplaceSL(s.cfg.Symbol, "LONG", "SELL", p.remainQty, p.trailing)
-			}
-			if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
-				p.trailing = newTrail
-				s.throttledReplaceSL(s.cfg.Symbol, "SHORT", "BUY", p.remainQty, p.trailing)
-			}
+		newTrail = math.Round(newTrail*100) / 100
+		if p.side == "LONG" && newTrail > p.trailing {
+			p.trailing = newTrail
+			s.throttledReplaceSL(s.cfg.Symbol, "LONG", "SELL", p.remainQty, p.trailing)
 		}
-		// Phase 1: pnlR >= beR → breakeven
-		if pnlR >= beR && !p.tp1RHit {
-			p.trailing = p.entryPrice
-			p.tp1RHit = true
-			closeSide := "SELL"
-			if p.side == "SHORT" { closeSide = "BUY" }
-			s.throttledReplaceSL(s.cfg.Symbol, p.side, closeSide, p.remainQty, p.trailing)
-			s.log.Info("TICK: trailing → breakeven", zap.String("side", p.side),
-				zap.Float64("pnlR", pnlR), zap.Float64("beR", beR))
+		if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
+			p.trailing = newTrail
+			s.throttledReplaceSL(s.cfg.Symbol, "SHORT", "BUY", p.remainQty, p.trailing)
 		}
 
 		// ── 4. Real-time bounce TP (remaining position) ──
 		if p.remainQty < p.initQty && p.remainQty > 0 && pnlR > 0 {
-			bounceThreshold := 0.8 * p.R
+			bounceThreshold := s.cfg.BounceTPR * p.R
 			if p.side == "LONG" && p.peakPrice-price >= bounceThreshold {
 				s.log.Info("TICK: bounce TP", zap.String("side", p.side),
 					zap.Float64("peak", p.peakPrice), zap.Float64("price", price))
@@ -245,7 +237,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 
 		// ── 4b. Emergency reversal: if losing > 0.9R, trigger async GPT check ──
 		// Raised from -0.8R to -0.9R, cooldown 30s→60s to avoid premature cuts.
-		if pnlR < -0.9 && time.Since(s.lastEmergencyAt) > 60*time.Second {
+		if pnlR < s.cfg.EmergencyPnlR && time.Since(s.lastEmergencyAt) > 60*time.Second {
 			s.emergencyReversalCheck(ctx, price, p)
 		}
 	}
@@ -397,11 +389,14 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 		s.consecLoss = 0
 		s.accumLong = 0
 		s.accumShort = 0
+		// TP cooldown: block new entries for 3 bars (15 min) to avoid
+		// immediate re-entry in the same trend at worse price + extra fees.
+		s.tpCooldownBar = s.barCount
 		s.syncRemove(pos.side)
 		*pptr = nil
 	} else {
-		// TP1 filled → move SL to breakeven immediately.
-		// This ensures the remaining position can't turn a profitable trade into a loss.
+		// TP filled → move SL to breakeven immediately.
+		// Remaining 50% position can't turn a profitable trade into a loss.
 		if !pos.tp1RHit {
 			pos.tp1RHit = true
 			pos.trailing = pos.entryPrice
@@ -414,8 +409,6 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 			if pos.side == "SHORT" { closeSide = "BUY" }
 			s.stagedEP.ReplaceSLOrder(s.cfg.Symbol, pos.side, closeSide, pos.remainQty, pos.trailing)
 		}
-		// Dynamic TP tightening: if oscillating, move far TPs closer to the fill price.
-		s.maybeTightenTPs(pos, fill.Price)
 		s.syncToRedis(pos)
 	}
 	return true
@@ -443,76 +436,3 @@ func (s *AIStrategy) markTPFilled(pos *posState, fillPrice, fillQty float64) {
 	s.saveStagedTPsToRedis(pos)
 }
 
-// maybeTightenTPs moves unfilled far TPs closer to the last fill price in oscillation.
-// In trending markets (|MTF| >= 2), TPs are kept to let profits run.
-func (s *AIStrategy) maybeTightenTPs(pos *posState, lastFillPrice float64) {
-	if s.stagedEP == nil { return }
-	if math.Abs(float64(s.lastMTFScore)) >= 2 {
-		s.log.Info("AI: keeping far TPs — trending market", zap.Int("mtf", s.lastMTFScore))
-		return
-	}
-
-	// Count unfilled TPs
-	var unfilled []int
-	for i, tp := range pos.stagedTPs {
-		if tp.Status == "pending" { unfilled = append(unfilled, i) }
-	}
-	if len(unfilled) == 0 { return }
-
-	// Calculate new tighter prices: space them ATR×0.3 apart from the fill price
-	atr := s.calcATR()
-	spacing := atr * 0.3
-	if spacing < 1.0 { spacing = 1.0 } // minimum $1 spacing
-
-	// Floor: never tighten below 1.0R from entry — preserve meaningful profit target.
-	minTPDist := pos.R
-	if minTPDist < 5.0 { minTPDist = 5.0 }
-
-	needsReplace := false
-	for j, idx := range unfilled {
-		offset := spacing * float64(j+1)
-		var newPrice float64
-		if pos.side == "LONG" {
-			newPrice = math.Round((lastFillPrice+offset)*100) / 100
-			floor := math.Round((pos.entryPrice+minTPDist)*100) / 100
-			if newPrice < floor { newPrice = floor }
-		} else {
-			newPrice = math.Round((lastFillPrice-offset)*100) / 100
-			floor := math.Round((pos.entryPrice-minTPDist)*100) / 100
-			if newPrice > floor { newPrice = floor }
-		}
-		old := pos.stagedTPs[idx].Price
-		if pos.side == "LONG" && newPrice > old { continue }
-		if pos.side == "SHORT" && newPrice < old { continue }
-		if math.Abs(newPrice-old) < 0.5 { continue }
-		pos.stagedTPs[idx].Price = newPrice
-		needsReplace = true
-	}
-
-	if !needsReplace { return }
-
-	// Cancel all existing TPs and re-place with new prices
-	posSide := "LONG"
-	closeSide := "SELL"
-	if pos.side == "SHORT" {
-		posSide = "SHORT"
-		closeSide = "BUY"
-	}
-	s.stagedEP.CancelAllProtective(s.cfg.Symbol, posSide)
-
-	// Re-place SL + new TPs
-	var tps []strategy.StagedTP
-	for _, tp := range pos.stagedTPs {
-		if tp.Status == "pending" {
-			tps = append(tps, strategy.StagedTP{Price: tp.Price, Qty: tp.Qty})
-		}
-	}
-	if len(tps) > 0 {
-		s.stagedEP.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, pos.stopLoss, pos.remainQty, tps)
-		s.log.Info("AI: tightened staged TPs (oscillation)",
-			zap.String("side", pos.side),
-			zap.Float64("fill_price", lastFillPrice),
-			zap.Any("new_tps", tps))
-	}
-	s.saveStagedTPsToRedis(pos)
-}

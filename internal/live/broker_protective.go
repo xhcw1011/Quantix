@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -122,6 +123,7 @@ func (b *Broker) RebuildProtectiveOrders(orders []*data.OrderRecord) {
 			ids.stopID = rec.ExchangeID
 		} else if rec.OrderRole == "staged_tp" {
 			ids.tpIDs = append(ids.tpIDs, rec.ExchangeID)
+			ids.tpOmsIDs = append(ids.tpOmsIDs, rec.ID) // OMS ID for cancel sync
 		} else {
 			ids.tpID = rec.ExchangeID
 		}
@@ -168,14 +170,21 @@ func (b *Broker) cancelProtectiveOrders(ctx context.Context, symbol, posSide str
 			b.log.Info("take-profit order cancelled", zap.String("tp_id", ids.tpID))
 		}
 	}
-	for _, tpID := range ids.tpIDs {
+	for i, tpID := range ids.tpIDs {
 		if err := b.orderClient.CancelOrder(ctx, symbol, tpID); err != nil {
-			b.log.Warn("cancel staged TP order failed",
-				zap.String("symbol", symbol),
-				zap.String("tp_id", tpID),
-				zap.Error(err))
+			// -2011 "Unknown order" = already filled/cancelled/expired — safe to ignore.
+			if !strings.Contains(err.Error(), "Unknown order") {
+				b.log.Warn("cancel staged TP order failed",
+					zap.String("symbol", symbol),
+					zap.String("tp_id", tpID),
+					zap.Error(err))
+			}
 		} else {
 			b.log.Info("staged TP order cancelled", zap.String("tp_id", tpID))
+		}
+		// Cancel in OMS too — prevents "duplicate order blocked" when placing close order.
+		if i < len(ids.tpOmsIDs) {
+			b.omsInst.Cancel(ids.tpOmsIDs[i]) //nolint:errcheck
 		}
 	}
 }
@@ -236,6 +245,7 @@ func (b *Broker) PlaceStagedTPOrders(ctx context.Context, symbol, posSide string
 		b.omsInst.SetExchangeID(tpOrd.ID, tpID)
 		b.omsInst.Accept(tpOrd.ID)
 		ids.tpIDs = append(ids.tpIDs, tpID)
+		ids.tpOmsIDs = append(ids.tpOmsIDs, tpOrd.ID)
 
 		// Launch fill poller so processFills detects when this TP fires.
 		if sc, ok := b.orderClient.(exchange.OrderStatusChecker); ok {

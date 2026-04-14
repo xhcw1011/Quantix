@@ -2,163 +2,166 @@
 
 ETHUSDT Futures | 10x Leverage | 5m Primary Interval
 
-## Architecture
+## Core Design
 
-```
-Every 5m bar:
-  detectRegime(20 bars) → STRONG_TREND / SLOW_TREND / EXPANSION / RANGE
-  ↓
-  RANGE → skip (no trading)
-  Others → GPT call → signal accumulation → confidence threshold → entry
-  ↓
-  Tick-level management: SL / trailing / bounce TP / emergency
-```
+Two operating modes based on regime detection:
+
+| | STRONG_TREND / EXPANSION | SLOW_TREND |
+|---|---|---|
+| SL | Swing low/high (wide, survives pullbacks) | ATR × 1.5 (tight) |
+| TP | None — trailing rides the trend | 1.0R fixed TP (100% qty) |
+| Sizing | Fixed $ risk / R (smaller position) | Fixed $ risk / R (larger position) |
+| Breakeven | ATR × 1.5 profit | 0.8R profit |
+| Trailing | ATR × 2.5 profit → peak ± ATR × 1.2 | 1.3R profit → peak ± ATR × 1.2 |
+| RANGE | No trading (disabled) | — |
 
 ## 1. Regime Detection
 
-Computed every bar from the last 20 primary bars.
+Every bar, computed from last 20 primary (5m) bars.
 
-| Regime | Condition | Entry Threshold |
-|--------|-----------|-----------------|
-| EXPANSION | Bar range > ATR*2, body > ATR*1, directional close, trend-aligned, prev bar confirms | 0.65 (with-trend) / 0.82 (counter) |
-| STRONG_TREND | trendStrength > 2.5 AND ATR/price > 0.1% | 0.65 (with-trend) / 0.82 (counter) |
-| SLOW_TREND | trendStrength > 1.5 AND directionScore > 0.60 | 0.735 (with-trend) / 0.82 (counter) |
-| RANGE | Default | No trading (disabled) |
+```
+trendStrength = |price_now - price_20bars_ago| / ATR
+directionScore = % of bars moving with overall direction
+trendDir = +1 (bullish) / -1 (bearish) / 0 (neutral)
+```
 
-- `trendStrength = |price_now - price_20bars_ago| / ATR`
-- `directionScore = % of bars moving with overall direction`
-- `trendDir = +1 (bullish) / -1 (bearish) / 0 (neutral)` based on price change vs ATR*0.5
+| Regime | Condition |
+|--------|-----------|
+| EXPANSION | Bar range > ATR×2, body > ATR×1, directional, trend-aligned, prev bar confirms |
+| STRONG_TREND | trendStrength > 2.5 AND ATR/price > 0.1% |
+| SLOW_TREND | trendStrength > 1.5 AND directionScore > 0.60 |
+| RANGE | Default → no trading |
 
-**Key rule: thresholds are directional.** STRONG_TREND bearish lowers SHORT threshold to 0.65, but LONG stays at 0.82. Prevents counter-trend entries.
-
-## 2. Signal Flow
+## 2. Entry Signal
 
 ### GPT Call
-- Every bar (CallIntervalBars=1) in trend regimes
-- Returns `long.confidence`, `short.confidence`, entry prices, reasoning
-- Model: gpt-5.4-mini, temperature 0.3, timeout 15s
+- Every bar (CallIntervalBars=1), temperature 0.1, max 200 tokens
+- Prompt: scorer role — rates trend_dir quality, counter-trend hard cap 0.40
+- Code-level clamp: if trend_dir=-1, longConf capped at 0.40 (vice versa)
+
+### Confidence Thresholds (directional)
+| Regime | With-trend | Counter-trend |
+|--------|-----------|---------------|
+| STRONG_TREND / EXPANSION | 0.65 | 0.82 |
+| SLOW_TREND | 0.735 | 0.82 |
+| RANGE | disabled | disabled |
 
 ### Signal Accumulation
 - Each GPT call adds `conf - 0.3` to accumLong/accumShort
-- Decays by 0.80x every bar (including non-GPT bars)
+- Counter-trend accumulation halved (× 0.5)
+- Decay 0.80 per bar, cap 1.0
 - Conflicting signals cancel (net only)
-- Cap: 1.0
-- Effective conf = max(raw GPT, accumulated)
-- **Reset to 0 on position close** (prevents stale signals triggering re-entry)
-
-### MTF Scoring (range -5 to +5)
-- 15m return (+-2) + 15m EMA structure (+-1) + 5m MACD/RSI (+-1) + 1m change (+-1)
-- Score <= -3: block LONG entirely
-- Score >= +3: block SHORT entirely
-- Score +-2: scale qty by 0.70; +-1: scale by 0.85
-
-### Boost Rules (with-trend only)
-- Swing proximity boost: price near swing low/high + conf >= 0.60 → boost to threshold
-- MTF momentum boost: MTF score >= +-2 + conf >= 0.50 → boost to threshold
-
-## 3. Entry
-
-### Position Sizing
-```
-qty = equity * PosSizePct(20%) * Leverage(10) / entryPrice
-```
-Adjusted by: MTF scale, confidence scale (floor 0.70), margin cap (80% equity).
+- Reset to 0 on position close
 
 ### Entry Mode
-| Regime | Mode |
-|--------|------|
-| STRONG_TREND / EXPANSION | Market (taker) |
-| SLOW_TREND | Limit (offset 0.05%), market if conf >= 0.90 or MTF >= +-3 |
-| RANGE | N/A (disabled) |
+| Regime | Order Type |
+|--------|-----------|
+| STRONG_TREND / EXPANSION | Aggressive limit ±0.02% (maker fee) |
+| SLOW_TREND | Limit ±0.05%, market if conf ≥ 0.90 |
 
-### SL Calculation
-```
-SL = entry +- ATR * ATRK(2.0)
-R = |entry - SL|
-MinSLDistPct = 0.8% floor
-MaxRPercent = 1% ceiling
-```
+## 3. Position Sizing
 
-## 4. Take Profit (ATR-Adaptive)
+**R-based: fixed dollar risk per trade.**
 
-TP distances adapt to current volatility:
 ```
-dist = min(R * level, ATR * atrMult)
-floor = 0.3 * R (must cover fees)
+riskAmount = equity × RiskPerTrade (3%)
+qty = riskAmount / R
 ```
 
-| Mode | TP1 | TP2 | Remaining |
-|------|-----|-----|-----------|
-| Default | 0.7R / ATR*1.5 (50%) | 1.5R / ATR*3.0 (30%) | 20% trailing |
-| Trend (STRONG/EXPANSION) | 0.8R / ATR*1.5 (40%) | 2.0R / ATR*3.0 (30%) | 30% trailing |
+- SL wider → smaller position → same $ loss
+- SL tighter → larger position → same $ loss
+- Safety cap: margin ≤ 60% of equity
 
-**TP1 fill → auto breakeven:** Trailing immediately moves to entry price. Remaining position cannot lose.
+Example ($85 equity):
+- STRONG_TREND (R=30pt): qty=0.085, loss=$2.55, margin=$19
+- SLOW_TREND (R=12pt): qty=0.213, loss=$2.55, margin=$47
 
-## 5. Position Management
+## 4. Stop Loss
 
-### Trailing Stop (tick + bar level, synchronized)
+### STRONG_TREND / EXPANSION
+Swing-based: SL below swing low (LONG) / above swing high (SHORT) with ATR×0.5 buffer.
+```
+LONG:  SL = swingLow_20 - ATR × 0.5
+SHORT: SL = swingHigh_20 + ATR × 0.5
+Cap:   1.5 ATR ≤ SL distance ≤ 4 ATR
+```
+
+### SLOW_TREND
+ATR-based: `SL = entry ± ATR × 1.5`
+
+## 5. Take Profit
+
+### STRONG_TREND / EXPANSION
+**No TP order.** Trailing stop handles exit. One trade rides the entire trend.
+
+### SLOW_TREND
+Single TP at 1.0R (100% qty). ATR-adaptive: `dist = min(1.0R, ATR×3)`. Floor: 0.5R.
+
+## 6. Trailing Stop
+
+### STRONG_TREND / EXPANSION (ATR-based distances)
 | Phase | Condition | Action |
 |-------|-----------|--------|
-| Breakeven | pnlR >= BreakevenR (0.80) | SL → entry price |
-| ATR Trail | pnlR >= BreakevenR + 0.5 | SL → peak +- ATR * 1.5, floor at entry |
+| Breakeven | profit ≥ ATR × 1.5 | SL → entry |
+| ATR Trail | profit ≥ ATR × 2.5 | SL → peak ± ATR × 1.2 |
+
+### SLOW_TREND (R-based distances)
+| Phase | Condition | Action |
+|-------|-----------|--------|
+| Breakeven | profit ≥ 0.8R | SL → entry |
+| ATR Trail | profit ≥ 1.3R | SL → peak ± ATR × 1.2 |
 
 - Trailing only tightens, never widens
-- Exchange SL updated via `ReplaceSLOrder` (throttled: max 1 per 3s)
-- Tick-level and bar-level use identical config values
+- Exchange SL updated via ReplaceSLOrder (throttled: max 1 per 3s)
+- Tick-level and bar-level use identical logic
 
-### Bounce TP
-- After partial TP fill (remainQty < initQty)
-- Peak retreat >= 0.8R → close remaining at market
-- Requires pnlR > 0 (only for profitable positions)
+### Bounce TP (SLOW_TREND only, after partial TP fill)
+- Peak retreat ≥ 0.8R → close remaining at market
 
-### Emergency Reversal
+## 7. Exit
+
+### Reversal (bar-level)
+- Only when pnlR < 1.0 (don't cut profitable trends)
+- conf ≥ 0.75 → close at market, no flip
+- After close, same bar can open new direction (lastCallBar reset)
+
+### Emergency (tick-level)
 - Trigger: pnlR < -0.9, cooldown 60s
-- Async GPT call (non-blocking)
-- Threshold: ReversalConf (0.75)
-- Action: close only (no flip)
+- Async GPT call, threshold = ReversalConf (0.75)
+- Close at market, no flip
 
-### GPT Reversal (bar-level)
-- Only when pnlR < 1.0 (don't cut winners)
-- Threshold: ReversalConf (0.75)
-- Action: close only, let next bar decide new direction
+### All closes use market order (no ghost positions).
 
-### Post-SL Recovery
-- SL fires → postSLReeval flag → next bar runs GPT to update accumulation
-- No immediate re-entry on SL bar (stopBar check)
-- Next bar: normal regime + entry flow decides new direction
-
-## 6. Risk Management
+## 8. Risk Management
 
 | Parameter | Value |
 |-----------|-------|
+| RiskPerTrade | 3% of equity |
 | MaxDailyLossPct | 10% |
 | MaxConsecLoss | 5 |
-| Position size | 20% equity margin |
-| SL width | ATR * 2.0 |
-| Max R/price | 1% |
+| Max SL distance | 4 × ATR |
+| Max margin | 60% of equity |
 
-## 7. Key Config Defaults
+## 9. GPT Prompt (scorer role)
 
 ```
-ConfidenceThreshold: 0.82   RegimeEntryConf: 0.65
-ReversalConf: 0.75          BreakevenR: 0.80
-TrendBreakevenR: 0.80       TrailingATRK: 1.5
-SignalDecay: 0.80            SignalAccumMax: 1.0
-RegimeN: 20                 ATRK: 2.0
-PosSizePct: 0.20             Leverage: 10
-CallIntervalBars: 1          ATRPeriod: 60
+- trend_dir is PRIMARY signal
+- 15m structure CONFIRMS trend_dir
+- 5m indicators fine-tune timing
+- COUNTER-TREND HARD CAP: 0.40
+- Code-level clamp enforces this regardless of GPT output
 ```
 
-## 8. File Structure
+## 10. File Structure
 
-| File | Responsibility |
-|------|---------------|
-| `types.go` | Regime enum, posState, stagedTPRecord |
-| `config.go` | All parameters + defaults + registry |
-| `signal.go` | OnBar: regime detection, GPT call, accumulation, entry decisions |
-| `strategy.go` | OnFill, OnTick: tickManage, emergency reversal, TP fill handling |
-| `manage.go` | Bar-level: managePos, manageTrend, checkReversal |
-| `entry.go` | openTrend, openHedgeScalp, placeOrder, placeCloseOrder |
-| `exit.go` | placeStagedExitOrders, closePos, checkDayReset |
-| `helpers.go` | detectRegime, calcATR, recovery, Redis sync |
-| `gpt.go` | GPT API, buildContext, signal caching |
+| File | Lines | Responsibility |
+|------|-------|---------------|
+| types.go | ~70 | Regime enum, posState, stagedTPRecord |
+| config.go | ~305 | All parameters + defaults + registry |
+| signal.go | ~660 | OnBar: regime, GPT, accumulation, entry |
+| strategy.go | ~450 | OnFill, OnTick: trailing, emergency, TP fill |
+| manage.go | ~260 | Bar-level: trailing, bounce, reversal |
+| entry.go | ~230 | openTrend, sizing, placeOrder |
+| exit.go | ~180 | placeStagedExitOrders, closePos |
+| helpers.go | ~320 | detectRegime, calcATR, recovery, Redis |
+| gpt.go | ~250 | GPT API, buildContext, signal caching |

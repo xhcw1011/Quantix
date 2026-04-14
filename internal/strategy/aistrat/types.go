@@ -25,6 +25,8 @@ type posState struct {
 	side       string  // "LONG" or "SHORT"
 	mode       posMode
 	entryPrice float64
+	entryATR   float64 // ATR at entry time — used for trailing so it never tightens when live ATR shrinks
+	gptTPPrice float64 // GPT support/resistance level used as TP target (0 = use R-based default)
 	initQty    float64
 	remainQty  float64
 	R          float64

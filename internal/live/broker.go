@@ -24,9 +24,10 @@ const filledEps = 1e-9
 // protectiveIDs holds exchange order IDs for stop-loss and take-profit orders
 // that were auto-placed after an entry fill.
 type protectiveIDs struct {
-	stopID string
-	tpID   string
-	tpIDs  []string // staged TP: multiple reduce-only limit orders
+	stopID    string
+	tpID      string
+	tpIDs     []string // staged TP: exchange order IDs
+	tpOmsIDs  []string // staged TP: OMS order IDs (parallel to tpIDs)
 }
 
 // Broker submits real orders via an exchange.OrderClient and tracks fills via the OMS.
@@ -115,7 +116,14 @@ func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
 	if existing := b.omsInst.FindPending(req.Symbol, req.Side); existing != nil {
 		// Stale pending orders (>5min) from DB recovery should not block new orders
 		if time.Since(existing.CreatedAt) > 5*time.Minute {
-			b.log.Info("clearing stale OMS order", zap.String("id", existing.ID))
+			b.log.Info("clearing stale OMS order — cancelling on exchange too", zap.String("id", existing.ID))
+			// Cancel on exchange FIRST to prevent ghost fills
+			if existing.ExchangeID != "" {
+				if err := b.orderClient.CancelOrder(b.engineCtx, req.Symbol, existing.ExchangeID); err != nil {
+					b.log.Warn("stale order: exchange cancel failed (may already be filled)",
+						zap.String("exchange_id", existing.ExchangeID), zap.Error(err))
+				}
+			}
 			b.omsInst.Cancel(existing.ID)
 		} else {
 			b.log.Warn("duplicate order blocked — pending order already exists",

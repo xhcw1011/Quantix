@@ -24,6 +24,14 @@ func (e *Engine) printStatus() {
 	}
 	elapsed := time.Since(e.startTime).Truncate(time.Second)
 
+	// Count positions: OMS-tracked + syncer-recovered (syncer positions may not be in OMS)
+	openPos := len(positions)
+	if e.posSyncer != nil {
+		if e.posSyncer.HasPosition("LONG") { openPos = max(openPos, 1) }
+		if e.posSyncer.HasPosition("SHORT") { openPos = max(openPos, 1) }
+		if e.posSyncer.HasPosition("LONG") && e.posSyncer.HasPosition("SHORT") { openPos = max(openPos, 2) }
+	}
+
 	e.log.Info("──── Live Trading Status ────",
 		zap.Duration("uptime", elapsed),
 		zap.Float64("wallet_balance", e.broker.WalletBalance()),
@@ -31,7 +39,7 @@ func (e *Engine) printStatus() {
 		zap.Float64("equity", equity),
 		zap.Float64("total_return_pct", totalReturn),
 		zap.Float64("realized_pnl", rpnl),
-		zap.Int("open_positions", len(positions)),
+		zap.Int("open_positions", openPos),
 		zap.Bool("risk_halted", e.risk.Halted()),
 	)
 
@@ -72,13 +80,19 @@ func (e *Engine) publishStatus() {
 	e.fillMu.Lock()
 	rpnl := e.realizedPnL
 	e.fillMu.Unlock()
+	openPos := len(e.positions.All())
+	if e.posSyncer != nil {
+		if e.posSyncer.HasPosition("LONG") { openPos = max(openPos, 1) }
+		if e.posSyncer.HasPosition("SHORT") { openPos = max(openPos, 1) }
+		if e.posSyncer.HasPosition("LONG") && e.posSyncer.HasPosition("SHORT") { openPos = max(openPos, 2) }
+	}
 	e.bus.PublishStatus(bus.StatusMsg{ //nolint:errcheck
 		StrategyID:     e.cfg.StrategyID,
 		Cash:           e.broker.Cash(),
 		Equity:         equity,
 		RealizedPnL:    rpnl,
 		TotalReturnPct: totalReturnPct,
-		OpenPositions:  len(e.positions.All()),
+		OpenPositions:  openPos,
 		RiskHalted:     e.risk.Halted(),
 	})
 }

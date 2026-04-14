@@ -9,18 +9,19 @@ import (
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
-// placeStagedExitOrders places exchange-native staged TP limit orders.
+// placeStagedExitOrders places a single exchange-native TP limit order.
 //
-// TP distances are ATR-adaptive: min(R*level, ATR*mult), so TPs tighten in low volatility.
-// Default: TP1=0.7R (50%), TP2=1.5R (30%). Trend: TP1=0.8R (40%), TP2=2.0R (30%).
-// Remaining qty managed by trailing stop + bounce TP.
+// Default: TP at 1.5R (50% qty). Trend: TP at 2.0R (50% qty).
+// ATR-adaptive: min(R*level, ATR*3) — tightens in low volatility.
+// Remaining 50% managed by trailing stop + bounce TP.
+// Breakeven triggered by pnlR >= BreakevenR (code-level, not TP-dependent).
 func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState) {
 	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
 	if !ok {
 		s.log.Warn("staged exit placer not available (paper/backtest mode), using local management")
 		return
 	}
-	s.stagedEP = ep // cache for handleStagedTPFill (no ctx available there)
+	s.stagedEP = ep
 
 	R := pos.R
 	if R <= 0 { return }
@@ -51,25 +52,23 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 		return
 	}
 
-	// ATR-adaptive TP: use max(R*level, ATR*atrMultiplier) so TPs tighten in low volatility.
-	// This prevents the common problem of TP never being reached in quiet markets.
-	atr := s.calcATR()
-	atrTP1Mult := 1.5 // TP1 = ATR * 1.5 (~1-2 bars of movement)
-	atrTP2Mult := 3.0 // TP2 = ATR * 3.0 (~3-4 bars of sustained trend)
-
+	// TP distance: prefer GPT support/resistance level, fallback to R × level.
 	tps := make([]strategy.StagedTP, 0, len(levels))
 	for i, lvl := range levels {
-		// R-based distance (original)
-		rDist := lvl * R
-		// ATR-based distance (adaptive to current volatility)
-		atrMult := atrTP1Mult
-		if i >= 1 { atrMult = atrTP2Mult }
-		atrDist := atr * atrMult
-		// Use the SMALLER of the two — ensures TP is reachable in low vol,
-		// but doesn't give away too much in high vol.
-		dist := math.Min(rDist, atrDist)
-		// Floor: at least 0.3R to cover fees
-		if dist < 0.3*R { dist = 0.3 * R }
+		dist := lvl * R // default R-based
+		// Use GPT TP if available and in valid range
+		if pos.gptTPPrice > 0 {
+			var gptDist float64
+			if pos.side == "LONG" {
+				gptDist = pos.gptTPPrice - entry
+			} else {
+				gptDist = entry - pos.gptTPPrice
+			}
+			if gptDist >= s.cfg.GptTPMinR*R && gptDist <= s.cfg.GptTPMaxR*R {
+				dist = gptDist
+			}
+		}
+		if dist < s.cfg.GptTPMinR*R { dist = s.cfg.GptTPMinR * R }
 
 		var tpPrice float64
 		if pos.side == "LONG" {
@@ -83,7 +82,8 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 	}
 
 	s.log.Info("AI: TP calculation",
-		zap.Float64("R", R), zap.Float64("ATR", atr),
+		zap.Float64("R", R), zap.Float64("entryATR", pos.entryATR),
+		zap.Float64("gptTP", pos.gptTPPrice),
 		zap.Any("levels", levels), zap.Any("tp_prices", tps))
 
 	ok = ep.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, pos.stopLoss, qty, tps)
@@ -120,7 +120,17 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 	if s.syncer != nil && s.syncer.PositionClosedExternally.Load() && !s.syncer.HasPosition(p.side) {
 		s.log.Info("AI: position already closed by exchange — skipping close order",
 			zap.String("side", p.side), zap.String("reason", reason))
-		s.syncer.PositionClosedExternally.Store(false) // consume the flag
+		s.syncer.PositionClosedExternally.Store(false)
+		// Still cancel any TP/SL orders on exchange (they're now orphaned)
+		if p.stagedTPPlaced {
+			if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+				posSide := "LONG"
+				if p.side == "SHORT" { posSide = "SHORT" }
+				ep.CancelAllProtective(s.cfg.Symbol, posSide)
+			}
+		}
+		s.accumLong = 0
+		s.accumShort = 0
 		s.syncRemove(p.side)
 		*pptr = nil
 		return
@@ -148,7 +158,25 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 
 	// All closes use market order (must fill immediately to avoid ghost positions).
 	useMarket := true
-	s.placeCloseOrder(ctx, p.side, qty, useMarket)
+	if !s.placeCloseOrder(ctx, p.side, qty, useMarket) {
+		// Close order FAILED. Check syncer: if exchange has no position,
+		// the position was already closed (manual, liquidation, etc.) — safe to clear state.
+		if s.syncer != nil && !s.syncer.HasPosition(p.side) {
+			s.log.Warn("AI: CLOSE FAILED but exchange has no position — clearing state",
+				zap.String("side", p.side), zap.String("reason", reason))
+			s.accumLong = 0
+			s.accumShort = 0
+			s.syncRemove(p.side)
+			*pptr = nil
+			return
+		}
+		// Exchange still has position — keep state for retry, but throttle.
+		s.log.Error("AI: CLOSE FAILED — keeping position state, re-placing TP",
+			zap.String("side", p.side), zap.String("reason", reason))
+		p.stagedTPPlaced = false
+		s.lastCloseFailAt = time.Now()
+		return
+	}
 	bars := s.primaryBars()
 	closePrice := 0.0
 	if len(bars) > 0 { closePrice = bars[len(bars)-1].Close }
@@ -171,6 +199,7 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 	// Reset signal accumulation on close so next entry requires fresh signals.
 	s.accumLong = 0
 	s.accumShort = 0
+	s.lastCloseFailAt = time.Time{} // clear throttle on success
 
 	s.syncRemove(p.side)
 	*pptr = nil
@@ -188,6 +217,30 @@ func (s *AIStrategy) checkDayReset(ctx *strategy.Context, price float64) {
 		s.dayHalted = false
 		s.consecLoss = 0
 		s.log.Info("AI: new day", zap.Float64("equity", s.dayStartEquity))
+	}
+	// Check for transfer-related balance changes — adjust dayStart
+	// to prevent false daily-loss halts when user moves funds in/out.
+	if adj, ok := ctx.Extra["equity_adjusted"].(float64); ok && adj > 0 {
+		old := s.dayStartEquity
+		s.log.Info("AI: dayStartEquity adjusted for transfer",
+			zap.Float64("old", old), zap.Float64("new", adj))
+		s.dayStartEquity = adj
+		// Only auto-clear halt if equity INCREASED (deposit), not on withdraw
+		if s.dayHalted && adj > old {
+			s.dayHalted = false
+			s.log.Info("AI: daily halt cleared — equity increased (deposit)")
+		}
+		delete(ctx.Extra, "equity_adjusted")
+	}
+	// Sanity check: if equity is much lower than dayStartEquity but we haven't traded,
+	// it's likely a transfer out or manual close — reset dayStart to avoid false halt.
+	if pf := ctx.Portfolio; pf != nil && s.dayStartEquity > 0 {
+		equity := pf.Equity(map[string]float64{s.cfg.Symbol: price})
+		if equity > 0 && equity < s.dayStartEquity*0.5 && s.longPos == nil && s.shortPos == nil {
+			s.log.Warn("AI: dayStartEquity seems stale (>50% drop with no positions) — resetting",
+				zap.Float64("old_start", s.dayStartEquity), zap.Float64("current", equity))
+			s.dayStartEquity = equity
+		}
 	}
 	// Check daily loss limit
 	if !s.dayHalted && s.dayStartEquity > 0 && s.cfg.MaxDailyLossPct > 0 {

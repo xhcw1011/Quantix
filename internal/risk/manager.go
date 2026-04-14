@@ -128,3 +128,24 @@ func (m *Manager) Reset(equity float64) {
 	m.peakEquity = equity
 	m.log.Warn("risk manager reset", zap.Float64("equity", equity))
 }
+
+// AdjustDayStart updates the peak equity baseline after a non-trade balance change
+// (e.g., transfer in/out, funding fee). Prevents false circuit-breaker triggers.
+func (m *Manager) AdjustDayStart(newEquity float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	old := m.peakEquity
+	// Deposits (equity up): raise baseline so drawdown is measured from new high.
+	// Withdrawals (equity down): keep old baseline — don't allow smaller baseline
+	// to bypass drawdown limits.
+	if newEquity > m.peakEquity {
+		m.peakEquity = newEquity
+	}
+	if m.halted && newEquity > old {
+		// Un-halt only if equity increased (deposit)
+		m.halted = false
+	}
+	m.log.Info("risk manager: baseline adjusted (transfer)",
+		zap.Float64("old_peak", old), zap.Float64("new_equity", newEquity),
+		zap.Float64("peak", m.peakEquity))
+}

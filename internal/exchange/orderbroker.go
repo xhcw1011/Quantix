@@ -110,6 +110,6 @@ type OrderClient interface {
 type UserDataSubscriber interface {
 	SubscribeUserData(ctx context.Context,
 		handler func(fill OrderFill, clientOrderID string, status string),
-		accountHandler func(walletBalance float64, crossUnPnl float64),
+		accountHandler func(walletBalance float64, crossUnPnl float64, reason string),
 		positionHandler func(symbol, side string, qty, entryPrice float64))
 }

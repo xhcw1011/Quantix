@@ -11,6 +11,7 @@ import (
 
 	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/exchange"
+	"github.com/Quantix/quantix/internal/indicator"
 	"github.com/Quantix/quantix/internal/position"
 )
 
@@ -97,26 +98,31 @@ func (s *AIStrategy) detectRegime() Regime {
 		return RegimeExpansion
 	}
 
-	// ── 2. Trend strength = |close_now - close_N| / ATR ──
+	// ── 2. Efficiency ratio = |net move| / sum(|bar moves|) ──
+	// Low efficiency = choppy market (big moves cancel out). Force RANGE.
+	totalMoves := 0.0
+	for i := 1; i < len(recentBars); i++ {
+		totalMoves += math.Abs(recentBars[i].Close - recentBars[i-1].Close)
+	}
+	efficiency := 0.0
+	if totalMoves > 0 {
+		efficiency = math.Abs(priceChange) / totalMoves
+	}
+	if efficiency < s.cfg.TrendEfficiencyMin {
+		return RegimeRange
+	}
+
+	// ── 3. Trend strength = |close_now - close_N| / ATR ──
 	trendStrength := math.Abs(priceChange) / atr
 
-	// ── 3. Direction score ──
+	// ── 4. Direction score ──
 	dirScore := calcDirectionScore(recentBars)
 
-	// ── 4. Classify ──
+	// ── 5. Classify ──
 	if trendStrength > s.cfg.StrongTrendThreshold && atr/price > s.cfg.StrongTrendMinVol {
 		return RegimeStrongTrend
 	}
 	if trendStrength > s.cfg.SlowTrendThreshold && dirScore > s.cfg.SlowTrendDirScore {
-		return RegimeSlowTrend
-	}
-
-	// Signal accumulation override: sustained directional GPT signals
-	// imply a trend even when price-based metrics show RANGE.
-	if trendDir > 0 && s.accumLong > 0.5 {
-		return RegimeSlowTrend
-	}
-	if trendDir < 0 && s.accumShort > 0.5 {
 		return RegimeSlowTrend
 	}
 
@@ -168,7 +174,8 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		if tp == 0 { tp = entry + entry*s.cfg.RangeTPPct }
 
 		s.longPos = &posState{
-			side: "LONG", mode: posMode(0), entryPrice: entry,
+			side: "LONG", mode: posMode(0), entryPrice: entry, entryATR: lp.EntryATR,
+			gptTPPrice: lp.GptTPPrice,
 			initQty: lp.InitQty, remainQty: lp.Qty,
 			R: lp.R, stopLoss: sl, takeProfit: tp,
 			trailing: lp.Trailing, peakPrice: lp.PeakPrice,
@@ -176,6 +183,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		}
 		if s.longPos.initQty == 0 { s.longPos.initQty = lp.Qty }
 		if s.longPos.R == 0 { s.longPos.R = math.Abs(entry - sl) }
+		if s.longPos.entryATR == 0 { s.longPos.entryATR = atr } // fallback to current ATR
 		// R = |entry - SL|, no cap. Consistent with "only ATR determines risk, never limits profit".
 		if s.longPos.peakPrice == 0 { s.longPos.peakPrice = currentPrice }
 		if s.longPos.trailing == 0 { s.longPos.trailing = sl }
@@ -211,7 +219,8 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		if tp == 0 { tp = entry - entry*s.cfg.RangeTPPct }
 
 		s.shortPos = &posState{
-			side: "SHORT", mode: posMode(0), entryPrice: entry,
+			side: "SHORT", mode: posMode(0), entryPrice: entry, entryATR: sp.EntryATR,
+			gptTPPrice: sp.GptTPPrice,
 			initQty: sp.InitQty, remainQty: sp.Qty,
 			R: sp.R, stopLoss: sl, takeProfit: tp,
 			trailing: sp.Trailing, peakPrice: sp.PeakPrice,
@@ -219,6 +228,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		}
 		if s.shortPos.initQty == 0 { s.shortPos.initQty = sp.Qty }
 		if s.shortPos.R == 0 { s.shortPos.R = math.Abs(entry - sl) }
+		if s.shortPos.entryATR == 0 { s.shortPos.entryATR = atr } // fallback to current ATR
 		if s.shortPos.peakPrice == 0 { s.shortPos.peakPrice = currentPrice }
 		if s.shortPos.trailing == 0 { s.shortPos.trailing = sl }
 		if sp.Mode == "trend" { s.shortPos.mode = modeTrend }
@@ -253,7 +263,7 @@ func (s *AIStrategy) syncToRedis(pos *posState) {
 		},
 		Mode: modeStr, StopLoss: pos.stopLoss, TakeProfit: pos.takeProfit,
 		Trailing: pos.trailing, PeakPrice: pos.peakPrice,
-		R: pos.R, InitQty: pos.initQty,
+		R: pos.R, EntryATR: pos.entryATR, GptTPPrice: pos.gptTPPrice, InitQty: pos.initQty,
 		TP1Hit: pos.tp1RHit, BarsHeld: pos.barsHeld,
 		OrderID: pos.orderID, Filled: pos.filled,
 		EntryRegime: string(pos.entryRegime),
@@ -301,6 +311,91 @@ func (s *AIStrategy) loadStagedTPsFromRedis(pos *posState) {
 func (s *AIStrategy) deleteStagedTPsFromRedis(side string) {
 	if s.rdb == nil { return }
 	s.rdb.Del(context.Background(), s.stagedTPRedisKey(side))
+}
+
+// ─── Technical BUY Signal (replaces GPT for LONG direction) ─────────────────
+// techBuySignal generates a confidence score for LONG entries using pure technicals.
+// Returns confidence (0-1) and suggested entry price.
+// Criteria: EMA9 crosses above EMA21, RSI above 40 and below 70, MACD histogram positive.
+// This replaces GPT's BUY direction which had only 12.4% accuracy.
+func (s *AIStrategy) techBuySignal() (conf float64, entry float64) {
+	closes := s.getCloses()
+	if len(closes) < 30 { return 0, 0 }
+
+	price := closes[len(closes)-1]
+
+	// EMA20 slope guard: if overall trend is falling, don't buy
+	// This prevents techBuySignal from bypassing the EMA slope filter in signal.go
+	ema20 := indicator.EMA(closes, 20)
+	if len(ema20) >= 2 {
+		slope := ema20[len(ema20)-1] - ema20[len(ema20)-2]
+		if slope < 0 { return 0, 0 } // trend is down, skip LONG
+	}
+
+	// EMA crossover: 9-period crosses above 21-period
+	ema9 := indicator.EMA(closes, 9)
+	ema21 := indicator.EMA(closes, 21)
+	if len(ema9) < 2 || len(ema21) < 2 { return 0, 0 }
+
+	ema9Now := ema9[len(ema9)-1]
+	ema9Prev := ema9[len(ema9)-2]
+	ema21Now := ema21[len(ema21)-1]
+	ema21Prev := ema21[len(ema21)-2]
+
+	// Fresh crossover: was below, now above (or very recently crossed)
+	freshCross := ema9Prev <= ema21Prev && ema9Now > ema21Now
+	aboveEMA := ema9Now > ema21Now // already above (continuation)
+
+	if !freshCross && !aboveEMA { return 0, 0 }
+
+	// RSI filter: not overbought, not oversold
+	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
+	rsi := indicator.Last(rsiVals)
+	if rsi < 40 || rsi > 70 { return 0, 0 }
+
+	// MACD histogram must be positive (momentum confirmation)
+	macd := indicator.MACD(closes, s.cfg.MACDFast, s.cfg.MACDSlow, s.cfg.MACDSignal)
+	macdHist := indicator.Last(macd.Histogram)
+	if macdHist <= 0 { return 0, 0 }
+
+	// Build confidence based on signal strength
+	conf = 0.70 // base confidence for technical signal
+
+	if freshCross {
+		conf += 0.10 // fresh crossover is stronger
+	}
+	if rsi > 50 && rsi < 65 {
+		conf += 0.05 // sweet spot RSI
+	}
+	if macdHist > 0.5 {
+		conf += 0.05 // strong momentum
+	}
+
+	// 15m trend confirmation
+	bars15 := s.barsForInterval("15m")
+	if len(bars15) >= 10 {
+		c15 := make([]float64, len(bars15))
+		for i, b := range bars15 { c15[i] = b.Close }
+		ema10_15 := indicator.Last(indicator.EMA(c15, 10))
+		ema30_15 := 0.0
+		if len(c15) >= 30 { ema30_15 = indicator.Last(indicator.EMA(c15, 30)) }
+		if ema30_15 > 0 && ema10_15 > ema30_15 {
+			conf += 0.05 // 15m structure bullish
+		}
+	}
+
+	if conf > 0.95 { conf = 0.95 }
+
+	// Entry: previous bar's close - $1 buffer (real support level)
+	bars := s.primaryBars()
+	if len(bars) >= 2 {
+		prevClose := bars[len(bars)-2].Close
+		entry = math.Round((prevClose - prevClose*s.cfg.LongEntryOffsetPct) * 100) / 100
+	} else {
+		entry = math.Round((price - price*s.cfg.LongEntryOffsetPct) * 100) / 100
+	}
+
+	return conf, entry
 }
 
 func r2(v float64) float64 { return math.Round(v*100) / 100 }
