@@ -271,6 +271,17 @@ func (b *Broker) PlaceExchangeSL(ctx context.Context, symbol, posSide string, cl
 	qty = math.Floor(qty*1000) / 1000
 	key := brokerPosKey(symbol, posSide)
 
+	// Cancel existing exchange SL before placing new one (prevents duplicates after restart).
+	b.protMu.Lock()
+	oldIDs, hasOld := b.protectiveOrders[key]
+	b.protMu.Unlock()
+	if hasOld && oldIDs.stopID != "" {
+		b.log.Info("PlaceExchangeSL: cancelling old SL before re-placement", zap.String("old_sl", oldIDs.stopID))
+		if err := b.orderClient.CancelOrder(ctx, symbol, oldIDs.stopID); err != nil {
+			b.log.Warn("PlaceExchangeSL: cancel old SL failed (may already be triggered)", zap.Error(err))
+		}
+	}
+
 	slID, err := b.orderClient.PlaceStopMarketOrder(ctx, symbol, closeSide, posSide, qty, stopPrice, "")
 	if err != nil {
 		// "would immediately trigger" = price already past SL → local SL will handle it
@@ -288,6 +299,26 @@ func (b *Broker) PlaceExchangeSL(ctx context.Context, symbol, posSide string, cl
 	b.log.Info("Range SL placed on exchange",
 		zap.String("sl_id", slID), zap.Float64("stop", stopPrice), zap.Float64("qty", qty))
 	return true
+}
+
+// CancelExchangeSL cancels only the exchange SL order for a position, preserving TP orders.
+func (b *Broker) CancelExchangeSL(ctx context.Context, symbol, posSide string) {
+	key := brokerPosKey(symbol, posSide)
+	b.protMu.Lock()
+	ids, ok := b.protectiveOrders[key]
+	if ok && ids.stopID != "" {
+		slID := ids.stopID
+		ids.stopID = ""
+		b.protectiveOrders[key] = ids
+		b.protMu.Unlock()
+		if err := b.orderClient.CancelOrder(ctx, symbol, slID); err != nil {
+			b.log.Warn("cancel exchange SL failed", zap.String("sl_id", slID), zap.Error(err))
+		} else {
+			b.log.Info("exchange SL cancelled", zap.String("sl_id", slID))
+		}
+	} else {
+		b.protMu.Unlock()
+	}
 }
 
 // ReplaceSLOrder cancels the current SL and places a new one at newStopPrice.

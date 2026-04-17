@@ -146,21 +146,32 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 		p.stagedTPPlaced = false
 	}
 
-	// Log grid orders being closed with base
+	// Cancel unfilled grid orders on exchange + log filled ones
 	if len(p.gridOrders) > 0 {
 		gridQty := 0.0
-		for _, g := range p.gridOrders { if g.filled { gridQty += g.qty } }
+		for _, g := range p.gridOrders {
+			if g.filled {
+				gridQty += g.qty
+			} else if g.orderID != "" {
+				ctx.CancelOrder(g.orderID)
+				s.log.Info("AI: cancelled unfilled grid order", zap.String("id", g.orderID))
+			}
+		}
 		if gridQty > 0 {
 			s.log.Info("AI: closing grid orders with base",
 				zap.Int("layers", len(p.gridOrders)), zap.Float64("grid_qty", gridQty))
 		}
 	}
 
-	// All closes use market order (must fill immediately to avoid ghost positions).
+	// Grid TP: price is at our target, use limit order for maker fee (0.02% vs 0.05%).
+	// All other exits (SL, trailing, regime_exit): use market for guaranteed fill.
 	useMarket := true
+	if reason == "grid_tp" {
+		useMarket = false
+	}
 	if !s.placeCloseOrder(ctx, p.side, qty, useMarket) {
 		// Close order FAILED. Check syncer: if exchange has no position,
-		// the position was already closed (manual, liquidation, etc.) — safe to clear state.
+		// the position was already closed (manual, liquidation, TP fill, etc.) — safe to clear state.
 		if s.syncer != nil && !s.syncer.HasPosition(p.side) {
 			s.log.Warn("AI: CLOSE FAILED but exchange has no position — clearing state",
 				zap.String("side", p.side), zap.String("reason", reason))
@@ -170,10 +181,22 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 			*pptr = nil
 			return
 		}
-		// Exchange still has position — keep state for retry, but throttle.
-		s.log.Error("AI: CLOSE FAILED — keeping position state, re-placing TP",
-			zap.String("side", p.side), zap.String("reason", reason))
-		p.stagedTPPlaced = false
+		// Syncer still shows position — could be stale (UDS delay).
+		// Track consecutive failures. After 3 failures (30s), assume position is gone
+		// to prevent ReduceOnly reject spam (Binance -2022).
+		p.closeFailCount++
+		if p.closeFailCount >= 3 {
+			s.log.Warn("AI: CLOSE FAILED 3x — assuming position closed externally, clearing state",
+				zap.String("side", p.side), zap.String("reason", reason))
+			s.accumLong = 0
+			s.accumShort = 0
+			s.syncRemove(p.side)
+			*pptr = nil
+			return
+		}
+		s.log.Error("AI: CLOSE FAILED — will retry",
+			zap.String("side", p.side), zap.String("reason", reason),
+			zap.Int("fail_count", p.closeFailCount))
 		s.lastCloseFailAt = time.Now()
 		return
 	}

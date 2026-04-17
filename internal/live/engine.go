@@ -186,6 +186,10 @@ func (a *stagedExitAdapter) ReplaceSLOrder(symbol, posSide, closeSide string, re
 	return a.broker.ReplaceSLOrder(a.ctx, symbol, posSide, exchange.OrderSide(closeSide), remainQty, newStopPrice)
 }
 
+func (a *stagedExitAdapter) CancelExchangeSL(symbol, posSide string) {
+	a.broker.CancelExchangeSL(a.ctx, symbol, posSide)
+}
+
 func (a *stagedExitAdapter) CancelAllProtective(symbol, posSide string) {
 	a.broker.cancelProtectiveOrders(a.ctx, symbol, posSide)
 }
@@ -384,16 +388,9 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	for {
 		select {
 		case <-ctx.Done():
-			// ── Watchdog: close ALL open positions at market price before stopping ──
-			// Prevents orphaned positions from accumulating losses while engine is offline.
-			// This was added after a $305 loss from positions held during engine downtime.
-			e.closeAllPositionsOnShutdown()
-
-			// Cancel all open exchange orders before stopping to prevent orphaned
-			// stop-loss / take-profit orders from continuing to execute.
-			cancelCtx, cancelFn := context.WithTimeout(context.Background(), 10*time.Second)
-			e.broker.CancelAllPendingOrders(cancelCtx)
-			cancelFn()
+			// Positions and protective orders (TP/SL) are preserved on shutdown.
+			// On restart, recoverFromDB reconciles OMS with exchange and
+			// the strategy reloads position state from Redis.
 
 			// Wait for in-flight DB writes (fill inserts, order upserts) to complete.
 			// Use a timeout to avoid hanging shutdown indefinitely.

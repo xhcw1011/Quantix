@@ -34,6 +34,18 @@ type StrategyPosition struct {
 	OrderID      string  `json:"order_id"`
 	Filled       bool    `json:"filled"`
 	EntryRegime  string  `json:"entry_regime,omitempty"`
+
+	// Grid layer persistence (range/grid mode only)
+	GridOrders []GridOrderRecord `json:"grid_orders,omitempty"`
+}
+
+// GridOrderRecord is the serializable form of a grid layer order.
+type GridOrderRecord struct {
+	EntryPrice float64 `json:"entry_price"`
+	Qty        float64 `json:"qty"`
+	TP         float64 `json:"tp"`
+	Filled     bool    `json:"filled"`
+	OrderID    string  `json:"order_id"`
 }
 
 // PositionEvent describes a change detected by the syncer.

@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Quantix/quantix/internal/exchange"
+	"github.com/Quantix/quantix/internal/indicator"
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
@@ -38,24 +39,55 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price }
 	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price }
 
-	// ── Stop-loss (always check locally — Trend has no exchange SL) ──
-	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
-		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
-		closedSide := p.side
-		s.closePos(ctx, p, pptr, "stop_loss")
-		s.consecLoss++
-		s.stopBar = s.barCount
-		s.postSLReeval = true
-		s.postSLSide = closedSide
-		s.postSLPrice = price
-		return
+	// ── Stop-loss (trend only — grid positions have no SL, ride the range) ──
+	if p.mode != modeRange {
+		if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
+			s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+			closedSide := p.side
+			s.closePos(ctx, p, pptr, "stop_loss")
+			s.consecLoss++
+			s.stopBar = s.barCount
+			s.postSLReeval = true
+			s.postSLSide = closedSide
+			s.postSLPrice = price
+			return
+		}
 	}
 
 	if p.barsHeld < s.cfg.MinHoldBars { return } // minimum hold
 
+	// Range/grid positions: check TP + manage grid layers (no trailing)
+	if p.mode == modeRange {
+		s.manageRange(ctx, bar, p, pptr)
+		return
+	}
 	s.manageTrend(ctx, bar, p, pptr)
 }
 
+
+// manageRange handles Range/grid positions: fixed TP at BB middle, grid layers on drawdown.
+// No SL — grid rides the range. Risk managed by small qty per layer + max layers cap + regime exit.
+func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
+	price := bar.Close
+
+	// ── Base position TP check ──
+	if p.takeProfit > 0 {
+		tpHit := false
+		if p.side == "LONG" && price >= p.takeProfit { tpHit = true }
+		if p.side == "SHORT" && price <= p.takeProfit { tpHit = true }
+		if tpHit {
+			s.log.Info("AI: GRID TP hit",
+				zap.String("side", p.side), zap.Float64("entry", p.entryPrice),
+				zap.Float64("tp", p.takeProfit), zap.Float64("price", price))
+			s.closePos(ctx, p, pptr, "grid_tp")
+			s.consecLoss = 0
+			return
+		}
+	}
+
+	// ── Grid layer management: add layers on drawdown, close on layer TP ──
+	s.manageGrid(ctx, bar, p, pptr)
+}
 
 func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
 	if s.cfg.GridMaxLayers <= 0 { return }
@@ -65,12 +97,12 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	for i := len(p.gridOrders) - 1; i >= 0; i-- {
 		g := p.gridOrders[i]
 
-		// Pending grid order — check if filled (limit order)
+		// Pending grid order — check if filled (limit order hit price level)
 		if !g.filled {
-			// Check if price reached the grid entry
 			if (p.side == "LONG" && price <= g.entryPrice) || (p.side == "SHORT" && price >= g.entryPrice) {
 				g.filled = true
 				g.filledAt = time.Now()
+				p.remainQty += g.qty // only count qty after confirmed fill
 				s.log.Info("AI: grid order filled",
 					zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
 					zap.Float64("qty", g.qty), zap.Int("layer", i+1))
@@ -101,53 +133,62 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	// 2. Open new grid order if price moved far enough from last level
 	if len(p.gridOrders) >= s.cfg.GridMaxLayers { return }
 	if !p.filled { return } // base must be filled first
-
-	// Grids only apply to Range regime (disabled in Trend-only mode)
 	if s.cfg.ForceTrend { return }
 
-	// Determine the reference price (last grid entry or base entry)
+	// Dynamic grid spacing: compute FRESH BB each bar (not stale lastBB values).
+	spacing := p.entryPrice * s.cfg.GridSpacingPct
+	closes := s.getCloses()
+	if len(closes) >= 20 {
+		bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
+		if len(bb.Upper) > 0 && len(bb.Lower) > 0 {
+			bbWidth := bb.Upper[len(bb.Upper)-1] - bb.Lower[len(bb.Lower)-1]
+			dynamicSpacing := bbWidth / float64(s.cfg.GridMaxLayers+1)
+			if dynamicSpacing > 0 { spacing = dynamicSpacing }
+		}
+	}
+
 	refPrice := p.entryPrice
 	if len(p.gridOrders) > 0 {
 		last := p.gridOrders[len(p.gridOrders)-1]
 		refPrice = last.entryPrice
 	}
 
-	spacing := p.entryPrice * s.cfg.GridSpacingPct
 	shouldAdd := false
 	var gridEntry, gridTP float64
 
 	if p.side == "LONG" && price <= refPrice-spacing {
 		gridEntry = math.Round(price*100) / 100
-		gridTP = math.Round((gridEntry+gridEntry*s.cfg.GridTPPct)*100) / 100
+		// Grid layer TP: base position's TP (BB middle), not fixed percentage
+		gridTP = p.takeProfit
+		if gridTP <= gridEntry { gridTP = math.Round((gridEntry+spacing)*100) / 100 }
 		shouldAdd = true
 	}
 	if p.side == "SHORT" && price >= refPrice+spacing {
 		gridEntry = math.Round(price*100) / 100
-		gridTP = math.Round((gridEntry-gridEntry*s.cfg.GridTPPct)*100) / 100
+		gridTP = p.takeProfit
+		if gridTP >= gridEntry { gridTP = math.Round((gridEntry-spacing)*100) / 100 }
 		shouldAdd = true
 	}
 
 	if !shouldAdd { return }
 
-	// Check total position won't exceed safe limits
 	gridQty := math.Floor(p.initQty*s.cfg.GridQtyRatio*1000) / 1000
 	if gridQty <= 0 { return }
-	// Cap: total position (base + grids) must not exceed 2x initial qty
 	totalQty := p.remainQty + gridQty
 	if totalQty > p.initQty*2 { return }
 
-	// Place grid order as market (price already at the level)
-	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, false)
+	// Use limit order for grid layers (maker fee, 60% cheaper than market)
+	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, true)
 	if omsID == "" { return }
 
 	g := &gridOrder{
 		entryPrice: gridEntry, qty: gridQty, tp: gridTP,
-		filled: true, filledAt: time.Now(), orderID: omsID,
+		filled: false, orderID: omsID, limitBar: s.barCount,
 	}
 	p.gridOrders = append(p.gridOrders, g)
-	p.remainQty += gridQty
+	// Don't add to remainQty yet — wait for fill confirmation in the price check loop above.
 
-	s.log.Info("AI: grid order opened",
+	s.log.Info("AI: grid order placed (limit)",
 		zap.String("side", p.side), zap.Float64("entry", gridEntry),
 		zap.Float64("tp", gridTP), zap.Float64("qty", gridQty),
 		zap.Int("layer", len(p.gridOrders)))
@@ -166,35 +207,97 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
 	}
 
-	// ── Progressive trailing stop (active from entry, no breakeven phase) ──
-	// Trail = peak - ATR * TrailingATRK, floor at SL.
-	// Use entry-time ATR to prevent trail tightening when live ATR shrinks.
+	// ── 1h mode-based trailing (bar-level, mirrors tickManage) ──
 	atr := math.Max(p.entryATR, liveATR)
-	trailDist := atr * s.cfg.TrailingATRK
-	var newTrail float64
-	if p.side == "LONG" {
-		newTrail = p.peakPrice - trailDist
-		if newTrail < p.stopLoss { newTrail = p.stopLoss } // floor at original SL
-	} else {
-		newTrail = p.peakPrice + trailDist
-		if newTrail > p.stopLoss { newTrail = p.stopLoss }
-	}
-	newTrail = math.Round(newTrail*100) / 100
+	hMode := s.detectHourlyMode(p.side)
 
-	// Only tighten, never widen
-	moved := false
-	if p.side == "LONG" && newTrail > p.trailing {
-		p.trailing = newTrail
-		moved = true
+	// Time-based exit: close if held > 3h and NOT in strong trend.
+	// Prevents slow grind losses in weak/range markets.
+	if p.filled && hMode != hourlyTrendStrong && time.Since(p.filledAt) > 3*time.Hour {
+		s.log.Warn("BAR: time exit — held >3h in weak/exit mode",
+			zap.String("side", p.side), zap.Float64("pnlR", pnlR))
+		s.closePos(ctx, p, pptr, "time_exit")
+		if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
+		return
 	}
-	if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
-		p.trailing = newTrail
-		moved = true
+
+	updateTrail := true
+	var trailDist float64
+	floor := p.stopLoss
+
+	switch hMode {
+	case hourlyTrendStrong:
+		// Two-tier trailing: tight (1ATR) when pnlR<2, wide (3ATR) when pnlR≥2.
+		if pnlR > 0 && math.Abs(price-p.entryPrice) < atr {
+			updateTrail = false
+		}
+		tier := 1
+		trailDist = atr
+		if pnlR >= 2.0 {
+			tier = 2
+			trailDist = atr * s.cfg.TrailingATRK
+		}
+		// Use SL as floor initially; only upgrade to breakeven after 0.3R profit.
+		// Prevents immediate breakeven stop when position hasn't moved in favor yet.
+		floor = p.stopLoss
+		if pnlR >= 0.3 {
+			floor = p.entryPrice // breakeven floor
+		}
+		// Tier upgrade: allow trailing to widen.
+		if tier > p.trailTier && p.trailTier > 0 {
+			// Reset trailing to wide value (computed in block below).
+			var wideTrail float64
+			if p.side == "LONG" {
+				wideTrail = p.peakPrice - trailDist
+				if wideTrail < floor { wideTrail = floor }
+			} else {
+				wideTrail = p.peakPrice + trailDist
+				if wideTrail > floor { wideTrail = floor }
+			}
+			p.trailing = math.Round(wideTrail*100) / 100
+			s.syncToRedis(p)
+		}
+		p.trailTier = tier
+	case hourlyExitMode:
+		trailDist = atr * 1.0 // tighter than WEAK (1.5) but not so tight it jump-triggers
+		if pnlR >= 0.3 {
+			lockR := math.Max(pnlR*0.5, 0.02)
+			if p.side == "LONG" { floor = p.entryPrice + lockR*p.R }
+			if p.side == "SHORT" { floor = p.entryPrice - lockR*p.R }
+		}
+	default: // hourlyTrendWeak — profit < 1 ATR → skip trailing
+		if pnlR > 0 && math.Abs(price-p.entryPrice) < atr {
+			updateTrail = false
+		}
+		trailDist = atr * s.cfg.TrailingATRK * 0.5
+		if s.cfg.BreakevenR > 0 && p.R > 0 {
+			lockR := 0.0
+			switch {
+			case pnlR >= 0.8: lockR = 0.4
+			case pnlR >= 0.5: lockR = 0.2
+			case pnlR >= 0.3: lockR = 0.02
+			}
+			if lockR > 0 {
+				if p.side == "LONG" { floor = p.entryPrice + lockR*p.R }
+				if p.side == "SHORT" { floor = p.entryPrice - lockR*p.R }
+			}
+		}
 	}
-	if moved {
-		// No exchange SL — local trailing handles exits (tick + bar level).
-		// Exchange SL algo orders caused orphan issues and conflicts with local trailing.
-		s.syncToRedis(p)
+
+	if updateTrail {
+		var newTrail float64
+		if p.side == "LONG" {
+			newTrail = p.peakPrice - trailDist
+			if newTrail < floor { newTrail = floor }
+		} else {
+			newTrail = p.peakPrice + trailDist
+			if newTrail > floor { newTrail = floor }
+		}
+		newTrail = math.Round(newTrail*100) / 100
+		moved := false
+		if p.side == "LONG" && newTrail > p.trailing { p.trailing = newTrail; moved = true }
+		if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) { p.trailing = newTrail; moved = true }
+		if moved { s.syncToRedis(p) }
 	}
 
 	// ── Bounce TP: if price bounced 0.8R from extreme, close remaining ──
@@ -230,74 +333,32 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		return
 	}
 
-	// ── GPT reversal check — only when losing (pnlR < 1.0) ──
-	if pnlR < 1.0 && s.barCount-s.lastCallBar >= s.cfg.CallIntervalBars && p.barsHeld >= s.cfg.MinTrendBars {
+	// ── Tech reversal check — only when losing, and not on first few bars after restart ──
+	// barCount < 3 after restart: regime/1h mode not yet stable, skip reversal.
+	if pnlR < 1.0 && s.barCount >= 3 && p.barsHeld >= s.cfg.MinTrendBars {
 		s.checkReversal(ctx, bar, p, pptr)
 	}
 }
 
 func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
-	var signal gptSignal
-	var err error
-	if len(s.replaySignals) > 0 {
-		signal, err = s.nextReplaySignal()
-	} else {
-		mktCtx := s.buildContext(ctx, bar)
-		signal, err = s.callGPT(mktCtx)
-		if err == nil { s.cacheSignal(bar, signal) }
-	}
-	if err != nil { s.lastCallBar = s.barCount; return }
-	s.lastCallBar = s.barCount
-	s.totalCall++
-
-	// Update signal accumulation (with counter-trend halving, same as main loop).
-	la, sa := 0.0, 0.0
-	if signal.Long != nil && signal.Long.Confidence > s.cfg.AccumBaseThresh { la = signal.Long.Confidence - s.cfg.AccumBaseThresh }
-	if signal.Short != nil && signal.Short.Confidence > s.cfg.AccumBaseThresh { sa = signal.Short.Confidence - s.cfg.AccumBaseThresh }
-	if s.lastTrendDir < 0 { la *= 0.5 }
-	if s.lastTrendDir > 0 { sa *= 0.5 }
-	s.accumLong += la; s.accumShort += sa
-	if s.accumLong > s.cfg.SignalAccumMax { s.accumLong = s.cfg.SignalAccumMax }
-	if s.accumShort > s.cfg.SignalAccumMax { s.accumShort = s.cfg.SignalAccumMax }
-	if s.accumLong > 0 && s.accumShort > 0 {
-		diff := s.accumLong - s.accumShort
-		if diff > 0 { s.accumLong = diff; s.accumShort = 0 } else { s.accumShort = -diff; s.accumLong = 0 }
-	}
-
-	// Extract reversal signal from new dual format
+	// Technical reversal: check if the opposite direction's tech signal is strong.
 	reverseConf := 0.0
-	reverseReason := ""
-	if p.side == "LONG" && signal.Short != nil {
-		reverseConf = signal.Short.Confidence
-		reverseReason = signal.Short.Reasoning
-	}
-	if p.side == "SHORT" && signal.Long != nil {
-		reverseConf = signal.Long.Confidence
-		reverseReason = signal.Long.Reasoning
-	}
-	// Backward compat: old single-signal format
-	if signal.Action != "" {
-		if p.side == "LONG" && signal.Action == "SELL" { reverseConf = signal.Confidence; reverseReason = signal.Reasoning }
-		if p.side == "SHORT" && signal.Action == "BUY" { reverseConf = signal.Confidence; reverseReason = signal.Reasoning }
+	if p.side == "LONG" {
+		reverseConf, _ = s.techSellSignal()
+	} else {
+		reverseConf, _ = s.techBuySignal()
 	}
 
-	s.log.Info("AI reversal check",
-		zap.String("holding", p.side),
-		zap.Float64("reverse_conf", reverseConf),
-		zap.String("reasoning", reverseReason))
+	// Also check 1h mode: EXIT_MODE is a strong reversal signal.
+	hMode := s.detectHourlyMode(p.side)
+	if hMode == hourlyExitMode && reverseConf < s.cfg.ReversalConf {
+		reverseConf = s.cfg.ReversalConf // 1h opposes → treat as reversal
+	}
 
-	// ── Simple reversal: close only, let next bar's normal flow decide new direction ──
-	// No flip (opening reverse immediately). Reasons:
-	// 1. GPT at trend inflection points is least reliable — opening reverse here is risky
-	// 2. Next bar (5 min) will re-evaluate with fresh regime detection + GPT
-	// 3. STRONG_TREND regime + 0.65 threshold ensures fast re-entry if trend truly reversed
-	// 4. Saves taker fee on the flip, reduces whipsaw in oscillation
 	if reverseConf >= s.cfg.ReversalConf {
-		s.log.Info("AI: reversal → close "+p.side,
+		s.log.Info("AI: tech reversal → close "+p.side,
 			zap.Float64("conf", reverseConf))
-		s.closePos(ctx, p, pptr, "gpt_reversal")
-		// Allow signal.go to open new position on this same bar.
-		// Reset lastCallBar so the interval check doesn't block entry.
+		s.closePos(ctx, p, pptr, "tech_reversal")
 		s.lastCallBar = s.barCount - s.cfg.CallIntervalBars
 	}
 }

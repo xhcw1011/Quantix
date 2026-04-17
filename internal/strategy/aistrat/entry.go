@@ -71,9 +71,99 @@ func (s *AIStrategy) openHedgeScalp(ctx *strategy.Context, side string, currentP
 		zap.Float64("tp_dist", tpDist))
 	s.logEvent("open", side, "hedge_scalp", currentPrice, entryPrice, qty, 0, 0,
 		fmt.Sprintf(`{"tp":%.2f,"sl":%.2f,"main_entry":%.2f}`, takeProfit, stopLoss, mainPos.entryPrice))
-	s.syncToRedis(pos)
+	if pos.filled { s.syncToRedis(pos) }
 }
 
+
+// openGrid opens a range/grid position. TP at BB middle, SL at range boundary.
+// No direction prediction — simply fades the extreme.
+func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, entryPrice, atr float64) {
+	entryPrice = math.Round(entryPrice*100) / 100
+
+	// Guard: BB levels must be available (set by reversionBuy/SellSignal)
+	if s.lastBBLower <= 0 || s.lastBBUpper <= 0 || s.lastBBMiddle <= 0 {
+		s.log.Warn("AI: openGrid skipped — BB levels not available")
+		return
+	}
+
+	// SL: outside the BB range boundary + buffer.
+	// Grid trades rely on the range holding — SL at range edge, not ATR.
+	buffer := atr * 0.5
+	minSL := entryPrice * s.cfg.MinSLDistPct
+	// TP = min(BB middle, entry ± GridMaxTPDist) — caps profit target when BB is wide.
+	maxTP := s.cfg.GridMaxTPDist
+	if maxTP <= 0 { maxTP = 8.0 }
+
+	var stopLoss, takeProfit float64
+	if side == "LONG" {
+		sl := s.lastBBLower - buffer
+		if entryPrice-sl < minSL { sl = entryPrice - minSL }
+		stopLoss = math.Round(sl*100) / 100
+		if s.lastBBMiddle > entryPrice {
+			takeProfit = math.Round(s.lastBBMiddle*100) / 100
+		} else {
+			takeProfit = math.Round((entryPrice+entryPrice*s.cfg.GridTPPct)*100) / 100
+		}
+		// Cap TP distance
+		if takeProfit-entryPrice > maxTP {
+			takeProfit = math.Round((entryPrice+maxTP)*100) / 100
+		}
+	} else {
+		sl := s.lastBBUpper + buffer
+		if sl-entryPrice < minSL { sl = entryPrice + minSL }
+		stopLoss = math.Round(sl*100) / 100
+		if s.lastBBMiddle > 0 && s.lastBBMiddle < entryPrice {
+			takeProfit = math.Round(s.lastBBMiddle*100) / 100
+		} else {
+			takeProfit = math.Round((entryPrice-entryPrice*s.cfg.GridTPPct)*100) / 100
+		}
+		if entryPrice-takeProfit > maxTP {
+			takeProfit = math.Round((entryPrice-maxTP)*100) / 100
+		}
+	}
+
+	R := math.Abs(entryPrice - stopLoss)
+	if R <= 0 { return }
+
+	// Position sizing: grid uses dedicated equity allocation
+	equity := 100.0
+	if pf := ctx.Portfolio; pf != nil {
+		equity = pf.Equity(map[string]float64{s.cfg.Symbol: currentPrice})
+	}
+	gridEquity := equity * s.cfg.GridEquityPct
+	riskAmount := gridEquity * s.cfg.GridRiskPerLayer
+	qty := math.Floor(riskAmount/R*1000) / 1000
+
+	// Safety cap: grid margin must not exceed grid equity allocation
+	leverage := s.cfg.Leverage; if leverage <= 0 { leverage = 10 }
+	maxQty := math.Floor(gridEquity*leverage/entryPrice*1000) / 1000
+	if qty > maxQty { qty = maxQty }
+	if qty <= 0 { return }
+
+	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
+	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit)
+	if omsID == "" { return }
+
+	filledAt := time.Time{}
+	if !useLimit { filledAt = time.Now() }
+	pos := &posState{
+		side: side, mode: modeRange, entryPrice: entryPrice, entryATR: atr,
+		initQty: qty, remainQty: qty,
+		R: R, stopLoss: stopLoss, takeProfit: takeProfit,
+		trailing: stopLoss, peakPrice: entryPrice,
+		filled: !useLimit, filledAt: filledAt, orderID: omsID, limitBar: s.barCount,
+	}
+	if side == "LONG" { s.longPos = pos } else { s.shortPos = pos }
+
+	s.log.Info("AI: OPEN GRID",
+		zap.String("side", side), zap.Float64("entry", entryPrice),
+		zap.Float64("tp", takeProfit), zap.Float64("sl", stopLoss),
+		zap.Float64("R", R), zap.Float64("qty", qty))
+	s.logEvent("open", side, "grid", currentPrice, entryPrice, qty, 0, 0,
+		fmt.Sprintf(`{"tp":%.2f,"sl":%.2f,"R":%.2f}`, takeProfit, stopLoss, R))
+	// Only sync to Redis after fill — unfilled limit orders cause phantom detection.
+	if pos.filled { s.syncToRedis(pos) }
+}
 
 func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice, entryPrice, atr, gptTP float64) {
 	entryPrice = math.Round(entryPrice*100) / 100
@@ -127,15 +217,23 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 		equity = pf.Equity(map[string]float64{s.cfg.Symbol: currentPrice})
 	}
 
-	// R-based position sizing: fixed dollar risk per trade.
-	// qty = (equity × RiskPerTrade) / R
-	// SL wider → smaller position → same $ loss. SL tighter → bigger position → same $ loss.
-	riskAmount := equity * s.cfg.RiskPerTrade // e.g. $85 * 2% = $1.70
+	// R-based position sizing: trend uses dedicated equity allocation.
+	trendEquity := equity * s.cfg.TrendEquityPct
+	riskAmount := trendEquity * s.cfg.TrendRiskPerTrade
 	qty := math.Floor(riskAmount/R*1000) / 1000
 
-	// Safety cap: margin must not exceed 60% of equity
+	// MTF + trend exhaustion scaling: reduce qty when headwind detected.
+	// Floor at 30% to avoid positions too small to matter.
+	mtfScale := s.mtfLongScale
+	if side == "SHORT" { mtfScale = s.mtfShortScale }
+	if mtfScale < 0.3 { mtfScale = 0.3 } // never below 30%
+	if mtfScale > 0 && mtfScale < 1.0 {
+		qty = math.Floor(qty*mtfScale*1000) / 1000
+	}
+
+	// Safety cap: margin must not exceed trend equity allocation
 	leverage := s.cfg.Leverage; if leverage <= 0 { leverage = 10 }
-	maxQty := math.Floor(equity*0.6*leverage/entryPrice*1000) / 1000
+	maxQty := math.Floor(trendEquity*leverage/entryPrice*1000) / 1000
 	if qty > maxQty { qty = maxQty }
 	if qty <= 0 { return }
 
@@ -159,7 +257,7 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 		zap.Float64("sl", stopLoss), zap.Float64("R", R), zap.Float64("qty", qty))
 	s.logEvent("open", side, "trend", currentPrice, entryPrice, qty, 0, 0,
 		fmt.Sprintf(`{"sl":%.2f,"R":%.2f}`, stopLoss, R))
-	s.syncToRedis(pos)
+	if pos.filled { s.syncToRedis(pos) }
 }
 
 func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty float64, useLimit bool) string {

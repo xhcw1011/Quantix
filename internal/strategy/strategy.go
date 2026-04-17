@@ -186,6 +186,8 @@ type StagedExitPlacer interface {
 	PlaceExchangeSL(symbol, posSide, closeSide string, qty, stopPrice float64) bool
 	// ReplaceSLOrder cancels the current SL and places a new one.
 	ReplaceSLOrder(symbol, posSide, closeSide string, remainQty, newStopPrice float64) bool
+	// CancelExchangeSL cancels only the exchange SL order (preserves TP orders).
+	CancelExchangeSL(symbol, posSide string)
 	// CancelAllProtective cancels all protective orders for a position.
 	CancelAllProtective(symbol, posSide string)
 }

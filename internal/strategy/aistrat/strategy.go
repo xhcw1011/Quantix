@@ -63,6 +63,13 @@ type AIStrategy struct {
 	lastHedgeClose  time.Time // when the last hedge position was closed (for cooldown)
 	lastConf        float64   // confidence of the signal that triggered current entry
 	lastRegime      Regime    // current detected regime (updated every signal check)
+	lastHourlyDir   int       // 1h EMA trend direction: +1 bullish, -1 bearish, 0 neutral
+	lastBBMiddle    float64   // BB middle band from last reversion signal (for TP)
+	lastBBLower     float64   // BB lower band (for grid SL)
+	lastBBUpper     float64   // BB upper band (for grid SL)
+	cachedHourlyLong  hourlyMode // cached 1h mode for LONG positions
+	cachedHourlyShort hourlyMode // cached 1h mode for SHORT positions
+	hourlyModeBars    int        // 15m bar count when cache was last updated
 	lastTrendDir    int       // +1 = bullish, -1 = bearish, 0 = neutral (from detectRegime)
 	lastSLReplace   time.Time // throttle ReplaceSLOrder calls (max 1 per 3s)
 	// Signal accumulation: tracks rolling GPT confidence across bars
@@ -122,6 +129,7 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 
 	pos.filled = true
 	pos.filledAt = time.Now()
+	pos.lastPeakAt = time.Now()
 	if fill.Price > 0 {
 		diff := fill.Price - pos.entryPrice
 		pos.entryPrice = fill.Price
@@ -136,7 +144,8 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 
 	s.syncToRedis(pos)
 
-	if !pos.stagedTPPlaced {
+	// Staged TP only for trend positions. Grid/range uses local TP check.
+	if pos.mode == modeTrend && !pos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, pos)
 	}
 }
@@ -145,7 +154,6 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 // Implements strategy.TickReceiver.
 func (s *AIStrategy) OnTick(ctx *strategy.Context, price float64) {
 	if !s.warmedUp { return }
-	s.processEmergencyResult(ctx, price)
 	if s.longPos != nil && s.longPos.filled {
 		s.tickManage(ctx, price, s.longPos, &s.longPos)
 	}
@@ -168,6 +176,33 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		return
 	}
 
+	// ── 0. Skip tick-level management during minimum hold period ──
+	if p.barsHeld < s.cfg.MinHoldBars { return }
+
+	// ── Range/grid mode: only check TP on tick (no SL, no trailing) ──
+	if p.mode == modeRange {
+		if p.takeProfit > 0 {
+			if (p.side == "LONG" && price >= p.takeProfit) || (p.side == "SHORT" && price <= p.takeProfit) {
+				s.log.Info("TICK GRID TP", zap.String("side", p.side),
+					zap.Float64("price", price), zap.Float64("tp", p.takeProfit))
+				s.closePos(ctx, p, pptr, "grid_tp")
+				s.consecLoss = 0
+			}
+		}
+		return
+	}
+
+	// Cancel safety-net exchange SL once local trailing is active.
+	// Only after MinHoldBars so the position is always protected.
+	if p.safetyNetSL && s.stagedEP != nil {
+		posSide := "LONG"
+		if p.side == "SHORT" { posSide = "SHORT" }
+		s.stagedEP.CancelExchangeSL(s.cfg.Symbol, posSide)
+		p.safetyNetSL = false
+		s.log.Info("AI: safety-net SL cancelled — local trailing active",
+			zap.String("side", p.side), zap.Float64("trailing", p.trailing))
+	}
+
 	// ── 1. Real-time SL check (must be instant, not wait for bar close) ──
 	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
 		closedSide := p.side
@@ -184,8 +219,8 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 	}
 
 	// ── 2. Real-time peak update ──
-	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price }
-	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price }
+	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price; p.lastPeakAt = time.Now() }
+	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price; p.lastPeakAt = time.Now() }
 
 	// ── 3. Real-time trailing calculation + check ──
 	if p.R > 0 {
@@ -193,25 +228,123 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		if p.side == "LONG" { pnlR = (price - p.entryPrice) / p.R }
 		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
 
-		// Progressive trailing: peak - ATR * TrailingATRK, floor at SL.
-		// Use entry-time ATR to prevent trail tightening when live ATR shrinks.
+		// ── 1h mode-based trailing ──
 		liveATR := s.calcATR()
-		atr := math.Max(p.entryATR, liveATR) // never tighter than entry-time ATR
-		trailDist := atr * s.cfg.TrailingATRK
-		var newTrail float64
-		if p.side == "LONG" {
-			newTrail = p.peakPrice - trailDist
-			if newTrail < p.stopLoss { newTrail = p.stopLoss }
-		} else {
-			newTrail = p.peakPrice + trailDist
-			if newTrail > p.stopLoss { newTrail = p.stopLoss }
+		atr := math.Max(p.entryATR, liveATR)
+		hMode := s.detectHourlyMode(p.side)
+
+		switch hMode {
+		case hourlyTrendStrong:
+			// Two-tier trailing: tight when profit small, wide when profit large.
+			// profit < 1ATR → no trailing (only hard SL).
+			// profit 1ATR ~ 2R → tight trail (1ATR), protect profit.
+			// profit ≥ 2R → wide trail (3ATR), ride the trend.
+			// On tier upgrade (1→2): reset trailing to wide value so ratchet doesn't block it.
+			if pnlR > 0 && math.Abs(price-p.entryPrice) < atr {
+				// Let the trade breathe — skip trailing update
+			} else {
+				tier := 1
+				trailDist := atr // tight: 1ATR
+				if pnlR >= 2.0 {
+					tier = 2
+					trailDist = atr * s.cfg.TrailingATRK // wide: 3ATR
+				}
+				// Use SL as floor initially; only upgrade to breakeven after 0.3R profit.
+				// Prevents immediate breakeven stop when position hasn't moved in favor yet.
+				floor := p.stopLoss
+				if pnlR >= 0.3 {
+					floor = p.entryPrice // breakeven floor
+				}
+				var newTrail float64
+				if p.side == "LONG" {
+					newTrail = p.peakPrice - trailDist
+					if newTrail < floor { newTrail = floor }
+				} else {
+					newTrail = p.peakPrice + trailDist
+					if newTrail > floor { newTrail = floor }
+				}
+				newTrail = math.Round(newTrail*100) / 100
+				// Tier upgrade: allow trailing to widen (reset ratchet for this transition).
+				if tier > p.trailTier && p.trailTier > 0 {
+					p.trailing = newTrail
+					s.log.Info("AI: trail tier upgrade — widening trailing for trend ride",
+						zap.String("side", p.side), zap.Float64("trailing", newTrail), zap.Float64("pnlR", pnlR))
+				}
+				p.trailTier = tier
+				// Normal ratchet: only tighten within the same tier.
+				if p.side == "LONG" && newTrail > p.trailing { p.trailing = newTrail }
+				if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) { p.trailing = newTrail }
+			}
+
+		case hourlyExitMode:
+			// 1h opposes: tighter trail + aggressive profit locking.
+			// ATR*1.0 (not 0.5) to avoid jump-trigger when switching from STRONG (trail=SL).
+			// Stale peak exit: no new high/low for 45 min → close immediately.
+			if !p.lastPeakAt.IsZero() && time.Since(p.lastPeakAt) > 45*time.Minute {
+				s.log.Warn("TICK: stale peak exit — 45m no new high/low in EXIT_MODE",
+					zap.String("side", p.side), zap.Float64("pnlR", pnlR))
+				s.closePos(ctx, p, pptr, "stale_peak_exit")
+				if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
+				return
+			}
+			trailDist := atr * 1.0
+			floor := p.stopLoss
+			if pnlR >= 0.3 {
+				lockR := math.Max(pnlR*0.5, 0.02)
+				if p.side == "LONG" { floor = p.entryPrice + lockR*p.R }
+				if p.side == "SHORT" { floor = p.entryPrice - lockR*p.R }
+			}
+			var newTrail float64
+			if p.side == "LONG" {
+				newTrail = p.peakPrice - trailDist
+				if newTrail < floor { newTrail = floor }
+			} else {
+				newTrail = p.peakPrice + trailDist
+				if newTrail > floor { newTrail = floor }
+			}
+			newTrail = math.Round(newTrail*100) / 100
+			if p.side == "LONG" && newTrail > p.trailing { p.trailing = newTrail }
+			if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) { p.trailing = newTrail }
+
+		default: // hourlyTrendWeak — medium trailing, profit < 1 ATR → skip trailing
+			if pnlR > 0 && math.Abs(price-p.entryPrice) < atr {
+				break // let the trade develop, only SL protects
+			}
+			trailDist := atr * s.cfg.TrailingATRK * 0.5
+			floor := p.stopLoss
+			if s.cfg.BreakevenR > 0 && p.R > 0 {
+				lockR := 0.0
+				switch {
+				case pnlR >= 0.8: lockR = 0.4
+				case pnlR >= 0.5: lockR = 0.2
+				case pnlR >= 0.3: lockR = 0.02
+				}
+				if lockR > 0 {
+					if p.side == "LONG" { floor = p.entryPrice + lockR*p.R }
+					if p.side == "SHORT" { floor = p.entryPrice - lockR*p.R }
+				}
+			}
+			var newTrail float64
+			if p.side == "LONG" {
+				newTrail = p.peakPrice - trailDist
+				if newTrail < floor { newTrail = floor }
+			} else {
+				newTrail = p.peakPrice + trailDist
+				if newTrail > floor { newTrail = floor }
+			}
+			newTrail = math.Round(newTrail*100) / 100
+			if p.side == "LONG" && newTrail > p.trailing { p.trailing = newTrail }
+			if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) { p.trailing = newTrail }
 		}
-		newTrail = math.Round(newTrail*100) / 100
-		if p.side == "LONG" && newTrail > p.trailing {
-			p.trailing = newTrail
-		}
-		if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
-			p.trailing = newTrail
+
+		// ── Time-based exit: close if held > 3h and NOT in strong trend ──
+		if p.filled && hMode != hourlyTrendStrong && time.Since(p.filledAt) > 3*time.Hour {
+			s.log.Warn("TICK: time exit — held >3h in weak/exit mode",
+				zap.String("side", p.side), zap.Float64("pnlR", pnlR),
+				zap.Duration("held", time.Since(p.filledAt)))
+			s.closePos(ctx, p, pptr, "time_exit")
+			if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
+			return
 		}
 
 		// ── 4. Real-time bounce TP (remaining position) ──
@@ -235,8 +368,12 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 
 		// ── 4b. Emergency reversal: if losing > 0.9R, trigger async GPT check ──
 		// Raised from -0.8R to -0.9R, cooldown 30s→60s to avoid premature cuts.
-		if pnlR < s.cfg.EmergencyPnlR && time.Since(s.lastEmergencyAt) > 60*time.Second {
-			s.emergencyReversalCheck(ctx, price, p)
+		if pnlR < s.cfg.EmergencyPnlR && hMode == hourlyExitMode {
+			s.log.Warn("TICK: emergency exit — losing >0.9R + 1h exit mode",
+				zap.String("side", p.side), zap.Float64("pnlR", pnlR))
+			s.closePos(ctx, p, pptr, "emergency_exit")
+			s.consecLoss++
+			return
 		}
 	}
 

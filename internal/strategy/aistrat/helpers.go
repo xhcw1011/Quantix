@@ -56,6 +56,97 @@ func (s *AIStrategy) findSwingHigh(n int) float64 {
 	return high
 }
 
+// ─── 1h Trend Direction ─────────────────────────────────────────────────────
+
+// hourlyTrendDir returns the 1h EMA trend direction: +1 bullish, -1 bearish, 0 neutral.
+// Uses 15m bars with EMA(80) ≈ 1h EMA(20).
+// Requires 2 consecutive 15m bars (30 min) of consistent direction to confirm a trend flip.
+// Filters out 15-minute fake pullbacks without being too slow for real reversals.
+func (s *AIStrategy) hourlyTrendDir() int {
+	bars15 := s.barsForInterval("15m")
+	if len(bars15) < 82 { return 0 }
+
+	closes := make([]float64, len(bars15))
+	for i, b := range bars15 { closes[i] = b.Close }
+
+	ema80 := indicator.EMA(closes, 80)
+	if len(ema80) < 2 { return 0 }
+
+	// Check last 2 EMA values: both must agree on direction.
+	n := len(ema80)
+	allBull, allBear := true, true
+	for i := 0; i < 2; i++ {
+		idx := n - 1 - i
+		priceAt := closes[len(closes)-1-i]
+		emaAt := ema80[idx]
+		slopeAt := ema80[idx] - ema80[idx-1]
+
+		if !(priceAt > emaAt && slopeAt > 0) { allBull = false }
+		if !(priceAt < emaAt && slopeAt < 0) { allBear = false }
+	}
+
+	if allBull { return 1 }
+	if allBear { return -1 }
+	return 0
+}
+
+// detectHourlyMode determines the 1h management mode for an open position.
+// TREND_STRONG: 1h EMA aligned with position + slope confirms → let profits run.
+// EXIT_MODE: price crossed 1h EMA against position → prepare to exit.
+// TREND_WEAK: everything else → normal management.
+// Results are cached and recomputed only when new 15m bars arrive.
+func (s *AIStrategy) detectHourlyMode(side string) hourlyMode {
+	bars15 := s.barsForInterval("15m")
+	nBars := len(bars15)
+
+	// Return cached value if 15m bars haven't changed
+	if nBars == s.hourlyModeBars {
+		if side == "LONG" { return s.cachedHourlyLong }
+		return s.cachedHourlyShort
+	}
+
+	// Recompute
+	if nBars < 82 {
+		s.hourlyModeBars = nBars
+		s.cachedHourlyLong = hourlyTrendWeak
+		s.cachedHourlyShort = hourlyTrendWeak
+		if side == "LONG" { return s.cachedHourlyLong }
+		return s.cachedHourlyShort
+	}
+
+	closes := make([]float64, nBars)
+	for i, b := range bars15 { closes[i] = b.Close }
+
+	ema80 := indicator.EMA(closes, 80)
+	if len(ema80) < 2 {
+		s.hourlyModeBars = nBars
+		s.cachedHourlyLong = hourlyTrendWeak
+		s.cachedHourlyShort = hourlyTrendWeak
+		if side == "LONG" { return s.cachedHourlyLong }
+		return s.cachedHourlyShort
+	}
+
+	price := closes[len(closes)-1]
+	emaNow := ema80[len(ema80)-1]
+	slope := ema80[len(ema80)-1] - ema80[len(ema80)-2]
+
+	// Compute for both sides at once
+	s.cachedHourlyLong = hourlyTrendWeak
+	if price > emaNow && slope > 0 { s.cachedHourlyLong = hourlyTrendStrong }
+	if price < emaNow { s.cachedHourlyLong = hourlyExitMode }
+
+	s.cachedHourlyShort = hourlyTrendWeak
+	if price < emaNow && slope < 0 { s.cachedHourlyShort = hourlyTrendStrong }
+	if price > emaNow { s.cachedHourlyShort = hourlyExitMode }
+
+	s.hourlyModeBars = nBars
+	// Also sync lastHourlyDir for consistency with signal.go filter
+	s.lastHourlyDir = s.hourlyTrendDir()
+
+	if side == "LONG" { return s.cachedHourlyLong }
+	return s.cachedHourlyShort
+}
+
 // ─── Regime Detection ────────────────────────────────────────────────────────
 
 // detectRegime identifies the current market structure and sets s.lastTrendDir.
@@ -73,8 +164,17 @@ func (s *AIStrategy) detectRegime() Regime {
 	prevBar := bars[len(bars)-2]
 	price := lastBar.Close
 
-	// ── Compute overall trend direction from N-bar window ──
-	recentBars := bars[len(bars)-s.cfg.RegimeN:]
+	// ── Compute overall trend direction ──
+	// Prefer 15m bars (8 bars = 2h) for stable regime detection.
+	// Falls back to primary (5m) bars if 15m not available.
+	var recentBars []exchange.Kline
+	bars15 := s.barsForInterval("15m")
+	regimeN := 8 // 8 × 15m = 2 hours
+	if len(bars15) >= regimeN+1 {
+		recentBars = bars15[len(bars15)-regimeN:]
+	} else {
+		recentBars = bars[len(bars)-s.cfg.RegimeN:]
+	}
 	priceChange := price - recentBars[0].Close
 	trendDir := 0
 	if priceChange > atr*0.5 { trendDir = 1 }   // bullish
@@ -157,12 +257,17 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 
 	atr := s.calcATR()
 
-	// Recover LONG
+	// Recover LONG — only if bot opened it (has strategy state in Redis: R > 0 or Mode set).
+	// Manual positions (opened via exchange UI) have no strategy state → skip them.
 	if lp := s.syncer.GetLong(); lp != nil && lp.Qty > 0 {
+		if lp.R == 0 && lp.Mode == "" {
+			s.log.Info("AI: skipping LONG recovery — manual position (no strategy state)",
+				zap.Float64("entry", lp.EntryPrice), zap.Float64("qty", lp.Qty))
+			goto recoverShort
+		}
 		entry := lp.EntryPrice
 		if entry == 0 { entry = currentPrice }
 
-		// Restore strategy-specific fields from syncer if available, else compute defaults
 		sl := lp.StopLoss
 		if sl == 0 {
 			slDist := atr * s.cfg.ATRK
@@ -195,16 +300,31 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			s.longPos.entryRegime = s.detectRegime()
 		}
 
+		// Recover grid layers
+		for _, gr := range lp.GridOrders {
+			s.longPos.gridOrders = append(s.longPos.gridOrders, &gridOrder{
+				entryPrice: gr.EntryPrice, qty: gr.Qty, tp: gr.TP,
+				filled: gr.Filled, orderID: gr.OrderID,
+			})
+		}
+
 		s.loadStagedTPsFromRedis(s.longPos)
 		s.log.Info("AI: recovered LONG from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", lp.Qty),
 			zap.Float64("stop", sl), zap.Float64("R", s.longPos.R),
 			zap.String("regime", string(s.longPos.entryRegime)),
-			zap.Int("staged_tps", len(s.longPos.stagedTPs)))
+			zap.Int("staged_tps", len(s.longPos.stagedTPs)),
+			zap.Int("grid_layers", len(s.longPos.gridOrders)))
 	}
 
-	// Recover SHORT
+recoverShort:
+	// Recover SHORT — only if bot opened it.
 	if sp := s.syncer.GetShort(); sp != nil && sp.Qty > 0 {
+		if sp.R == 0 && sp.Mode == "" {
+			s.log.Info("AI: skipping SHORT recovery — manual position (no strategy state)",
+				zap.Float64("entry", sp.EntryPrice), zap.Float64("qty", sp.Qty))
+			return
+		}
 		entry := sp.EntryPrice
 		if entry == 0 { entry = currentPrice }
 
@@ -239,12 +359,20 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			s.shortPos.entryRegime = s.detectRegime()
 		}
 
+		for _, gr := range sp.GridOrders {
+			s.shortPos.gridOrders = append(s.shortPos.gridOrders, &gridOrder{
+				entryPrice: gr.EntryPrice, qty: gr.Qty, tp: gr.TP,
+				filled: gr.Filled, orderID: gr.OrderID,
+			})
+		}
+
 		s.loadStagedTPsFromRedis(s.shortPos)
 		s.log.Info("AI: recovered SHORT from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", sp.Qty),
 			zap.Float64("stop", sl), zap.Float64("R", s.shortPos.R),
 			zap.String("regime", string(s.shortPos.entryRegime)),
-			zap.Int("staged_tps", len(s.shortPos.stagedTPs)))
+			zap.Int("staged_tps", len(s.shortPos.stagedTPs)),
+			zap.Int("grid_layers", len(s.shortPos.gridOrders)))
 	}
 }
 
@@ -255,6 +383,15 @@ func (s *AIStrategy) syncToRedis(pos *posState) {
 	}
 	modeStr := "range"
 	if pos.mode == modeTrend { modeStr = "trend" }
+
+	// Persist grid layers for recovery
+	var gridRecords []position.GridOrderRecord
+	for _, g := range pos.gridOrders {
+		gridRecords = append(gridRecords, position.GridOrderRecord{
+			EntryPrice: g.entryPrice, Qty: g.qty, TP: g.tp,
+			Filled: g.filled, OrderID: g.orderID,
+		})
+	}
 
 	sp := &position.StrategyPosition{
 		ExchangePosition: position.ExchangePosition{
@@ -267,6 +404,7 @@ func (s *AIStrategy) syncToRedis(pos *posState) {
 		TP1Hit: pos.tp1RHit, BarsHeld: pos.barsHeld,
 		OrderID: pos.orderID, Filled: pos.filled,
 		EntryRegime: string(pos.entryRegime),
+		GridOrders: gridRecords,
 	}
 	s.syncer.UpdatePosition(context.Background(), sp)
 }
@@ -293,9 +431,8 @@ func (s *AIStrategy) saveStagedTPsToRedis(pos *posState) {
 
 // loadStagedTPsFromRedis loads TP records on recovery.
 // Records are loaded for reference, but stagedTPPlaced is left FALSE so that
-// the next OnBar re-places all protective orders on the exchange.
-// The previous session's exchange orders are cancelled during engine shutdown,
-// so relying on them still being active would leave the position unprotected.
+// the next OnBar re-verifies protective orders on the exchange via recovery.
+// Exchange TP/SL orders are preserved across restarts (not cancelled on shutdown).
 func (s *AIStrategy) loadStagedTPsFromRedis(pos *posState) {
 	if s.rdb == nil || pos == nil { return }
 	val, err := s.rdb.Get(context.Background(), s.stagedTPRedisKey(pos.side)).Result()
@@ -303,8 +440,7 @@ func (s *AIStrategy) loadStagedTPsFromRedis(pos *posState) {
 	var records []stagedTPRecord
 	if err := json.Unmarshal([]byte(val), &records); err != nil { return }
 	pos.stagedTPs = records
-	// stagedTPPlaced stays false — exchange orders were cancelled on shutdown.
-	// OnBar will detect !stagedTPPlaced and re-place SL+TP on the exchange.
+	// stagedTPPlaced stays false — recovery flow will re-verify exchange orders.
 }
 
 // deleteStagedTPsFromRedis removes TP records when position is closed.
@@ -314,86 +450,198 @@ func (s *AIStrategy) deleteStagedTPsFromRedis(side string) {
 }
 
 // ─── Technical BUY Signal (replaces GPT for LONG direction) ─────────────────
-// techBuySignal generates a confidence score for LONG entries using pure technicals.
-// Returns confidence (0-1) and suggested entry price.
-// Criteria: EMA9 crosses above EMA21, RSI above 40 and below 70, MACD histogram positive.
-// This replaces GPT's BUY direction which had only 12.4% accuracy.
+// techBuySignal dispatches based on regime:
+// STRONG_TREND/EXPANSION/SLOW_TREND → breakout (directional markets need momentum signals)
+// RANGE → reversion (sideways markets need mean-reversion signals)
 func (s *AIStrategy) techBuySignal() (conf float64, entry float64) {
+	if s.lastRegime == RegimeRange {
+		return s.reversionBuySignal()
+	}
+	return s.breakoutBuySignal()
+}
+
+func (s *AIStrategy) techSellSignal() (conf float64, entry float64) {
+	if s.lastRegime == RegimeRange {
+		return s.reversionSellSignal()
+	}
+	return s.breakoutSellSignal()
+}
+
+// ─── Trend Breakout Signals (STRONG_TREND / EXPANSION) ──────────────────────
+// Low-lag: price breaks N-bar high/low + momentum confirmation.
+// No EMA crossover, no 15m confirmation — react to structure, not averages.
+
+func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
+	bars := s.primaryBars()
+	if len(bars) < 20 { return 0, 0 }
+
+	price := bars[len(bars)-1].Close
+	lookback := 10 // breakout window
+
+	// Find highest high of last N bars (excluding current)
+	highestHigh := 0.0
+	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
+		if i < 0 { continue }
+		if bars[i].High > highestHigh { highestHigh = bars[i].High }
+	}
+
+	// Price must break above recent high
+	if price <= highestHigh { return 0, 0 }
+
+	curBar := bars[len(bars)-1]
+
+	// RSI: must not be extremely overbought (> 80 = exhaustion)
+	closes := s.getCloses()
+	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
+	rsi := indicator.Last(rsiVals)
+	if rsi > 80 { return 0, 0 }
+
+	conf = 0.75
+	// Breakout strength
+	breakoutPct := (price - highestHigh) / highestHigh
+	if breakoutPct > 0.001 { conf += 0.05 }
+	if breakoutPct > 0.003 { conf += 0.05 }
+	// Bullish candle is a bonus, not a requirement
+	if curBar.Close > curBar.Open { conf += 0.05 }
+
+	// Volume confirmation
+	if len(bars) > 20 {
+		avgVol := 0.0
+		for i := len(bars) - 21; i < len(bars)-1; i++ { avgVol += bars[i].Volume }
+		avgVol /= 20
+		if curBar.Volume > avgVol*1.2 { conf += 0.05 }
+	}
+
+	if conf > 0.95 { conf = 0.95 }
+
+	// Breakout = urgency: enter at market price, don't wait for pullback.
+	entry = math.Round(price*100) / 100
+
+	return conf, entry
+}
+
+func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
+	bars := s.primaryBars()
+	if len(bars) < 20 { return 0, 0 }
+
+	price := bars[len(bars)-1].Close
+	lookback := 10
+
+	// Find lowest low of last N bars (excluding current)
+	lowestLow := math.MaxFloat64
+	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
+		if i < 0 { continue }
+		if bars[i].Low < lowestLow { lowestLow = bars[i].Low }
+	}
+
+	// Price must break below recent low
+	if price >= lowestLow { return 0, 0 }
+
+	curBar := bars[len(bars)-1]
+
+	// RSI: must not be extremely oversold (< 20 = exhaustion)
+	closes := s.getCloses()
+	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
+	rsi := indicator.Last(rsiVals)
+	if rsi < 20 { return 0, 0 }
+
+	conf = 0.75
+	breakoutPct := (lowestLow - price) / lowestLow
+	if breakoutPct > 0.001 { conf += 0.05 }
+	if breakoutPct > 0.003 { conf += 0.05 }
+	// Bearish candle is a bonus, not a requirement
+	if curBar.Close < curBar.Open { conf += 0.05 }
+
+	if len(bars) > 20 {
+		avgVol := 0.0
+		for i := len(bars) - 21; i < len(bars)-1; i++ { avgVol += bars[i].Volume }
+		avgVol /= 20
+		if curBar.Volume > avgVol*1.2 { conf += 0.05 }
+	}
+
+	if conf > 0.95 { conf = 0.95 }
+
+	// Breakout = urgency: enter at market price.
+	entry = math.Round(price*100) / 100
+
+	return conf, entry
+}
+
+// ─── Mean Reversion Signals (RANGE / SLOW_TREND) ────────────────────────────
+// Fade extremes: RSI oversold/overbought + Bollinger Band touch.
+// Counter-trend by design — profit from range oscillation.
+
+func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 	closes := s.getCloses()
 	if len(closes) < 30 { return 0, 0 }
 
 	price := closes[len(closes)-1]
 
-	// EMA20 slope guard: if overall trend is falling, don't buy
-	// This prevents techBuySignal from bypassing the EMA slope filter in signal.go
-	ema20 := indicator.EMA(closes, 20)
-	if len(ema20) >= 2 {
-		slope := ema20[len(ema20)-1] - ema20[len(ema20)-2]
-		if slope < 0 { return 0, 0 } // trend is down, skip LONG
-	}
+	// BB is the SOLE hard condition: price within 0.5% of lower band
+	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
+	if len(bb.Lower) == 0 { return 0, 0 }
+	bbLower := bb.Lower[len(bb.Lower)-1]
+	bbUpper := bb.Upper[len(bb.Upper)-1]
+	bbMiddle := bb.Middle[len(bb.Middle)-1]
 
-	// EMA crossover: 9-period crosses above 21-period
-	ema9 := indicator.EMA(closes, 9)
-	ema21 := indicator.EMA(closes, 21)
-	if len(ema9) < 2 || len(ema21) < 2 { return 0, 0 }
+	if price > bbLower*1.005 { return 0, 0 }
 
-	ema9Now := ema9[len(ema9)-1]
-	ema9Prev := ema9[len(ema9)-2]
-	ema21Now := ema21[len(ema21)-1]
-	ema21Prev := ema21[len(ema21)-2]
+	// Base confidence: 0.76 ensures entry when price touches BB band (RangeEntryConf=0.75).
+	// Bonuses from RSI and BB penetration push conf higher for stronger signals.
+	conf = 0.76
+	if price < bbLower { conf += 0.05 } // actually below band
 
-	// Fresh crossover: was below, now above (or very recently crossed)
-	freshCross := ema9Prev <= ema21Prev && ema9Now > ema21Now
-	aboveEMA := ema9Now > ema21Now // already above (continuation)
-
-	if !freshCross && !aboveEMA { return 0, 0 }
-
-	// RSI filter: not overbought, not oversold
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
-	if rsi < 40 || rsi > 70 { return 0, 0 }
-
-	// MACD histogram must be positive (momentum confirmation)
-	macd := indicator.MACD(closes, s.cfg.MACDFast, s.cfg.MACDSlow, s.cfg.MACDSignal)
-	macdHist := indicator.Last(macd.Histogram)
-	if macdHist <= 0 { return 0, 0 }
-
-	// Build confidence based on signal strength
-	conf = 0.70 // base confidence for technical signal
-
-	if freshCross {
-		conf += 0.10 // fresh crossover is stronger
-	}
-	if rsi > 50 && rsi < 65 {
-		conf += 0.05 // sweet spot RSI
-	}
-	if macdHist > 0.5 {
-		conf += 0.05 // strong momentum
-	}
-
-	// 15m trend confirmation
-	bars15 := s.barsForInterval("15m")
-	if len(bars15) >= 10 {
-		c15 := make([]float64, len(bars15))
-		for i, b := range bars15 { c15[i] = b.Close }
-		ema10_15 := indicator.Last(indicator.EMA(c15, 10))
-		ema30_15 := 0.0
-		if len(c15) >= 30 { ema30_15 = indicator.Last(indicator.EMA(c15, 30)) }
-		if ema30_15 > 0 && ema10_15 > ema30_15 {
-			conf += 0.05 // 15m structure bullish
-		}
-	}
+	if rsi < 40 { conf += 0.03 }
+	if rsi < 35 { conf += 0.03 }
+	if rsi < 30 { conf += 0.03 }
 
 	if conf > 0.95 { conf = 0.95 }
 
-	// Entry: previous bar's close - $1 buffer (real support level)
-	bars := s.primaryBars()
-	if len(bars) >= 2 {
-		prevClose := bars[len(bars)-2].Close
-		entry = math.Round((prevClose - prevClose*s.cfg.LongEntryOffsetPct) * 100) / 100
-	} else {
-		entry = math.Round((price - price*s.cfg.LongEntryOffsetPct) * 100) / 100
-	}
+	atr := s.calcATR()
+	entryBuf := atr * 0.2
+	entry = math.Round((price-entryBuf)*100) / 100
+
+	s.lastBBMiddle = bbMiddle
+	s.lastBBLower = bbLower
+	s.lastBBUpper = bbUpper
+
+	return conf, entry
+}
+
+func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
+	closes := s.getCloses()
+	if len(closes) < 30 { return 0, 0 }
+
+	price := closes[len(closes)-1]
+
+	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
+	if len(bb.Upper) == 0 { return 0, 0 }
+	bbLower := bb.Lower[len(bb.Lower)-1]
+	bbUpper := bb.Upper[len(bb.Upper)-1]
+	bbMiddle := bb.Middle[len(bb.Middle)-1]
+
+	if price < bbUpper*0.995 { return 0, 0 }
+
+	conf = 0.76
+	if price > bbUpper { conf += 0.05 }
+
+	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
+	rsi := indicator.Last(rsiVals)
+	if rsi > 60 { conf += 0.03 }
+	if rsi > 65 { conf += 0.03 }
+	if rsi > 70 { conf += 0.03 }
+
+	if conf > 0.95 { conf = 0.95 }
+
+	atr := s.calcATR()
+	entryBuf := atr * 0.2
+	entry = math.Round((price+entryBuf)*100) / 100
+
+	s.lastBBMiddle = bbMiddle
+	s.lastBBLower = bbLower
+	s.lastBBUpper = bbUpper
 
 	return conf, entry
 }

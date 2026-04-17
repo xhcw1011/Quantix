@@ -119,92 +119,94 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// to avoid false "externally closed" that creates ghost positions.
 	if s.syncer != nil {
 		if s.longPos != nil && s.longPos.filled && !s.syncer.HasPosition("LONG") {
-			s.log.Warn("AI: LONG externally closed — clearing posState")
+			s.log.Warn("AI: LONG externally closed — cancelling orphan orders + clearing state")
+			if s.longPos.stagedTPPlaced || s.longPos.safetyNetSL {
+				if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+					ep.CancelAllProtective(s.cfg.Symbol, "LONG")
+				}
+			}
+			s.accumLong = 0
+			s.accumShort = 0
+			s.syncRemove("LONG")
 			s.longPos = nil
 		}
 		if s.shortPos != nil && s.shortPos.filled && !s.syncer.HasPosition("SHORT") {
-			s.log.Warn("AI: SHORT externally closed — clearing posState")
+			s.log.Warn("AI: SHORT externally closed — cancelling orphan orders + clearing state")
+			if s.shortPos.stagedTPPlaced || s.shortPos.safetyNetSL {
+				if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+					ep.CancelAllProtective(s.cfg.Symbol, "SHORT")
+				}
+			}
+			s.accumLong = 0
+			s.accumShort = 0
+			s.syncRemove("SHORT")
 			s.shortPos = nil
 		}
 	}
 
 	// Auto-place exchange orders for recovered positions (runs once per position).
-	// Trend: staged TP limit orders (no exchange SL).
+	// Trend: staged TP limit orders + temporary safety-net exchange SL (until local trailing resumes).
 	// Range: exchange algo SL (no staged TP).
 	if s.longPos != nil && s.longPos.filled && s.longPos.mode == modeTrend && !s.longPos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, s.longPos)
+		// Safety-net: place temporary exchange SL to protect during warmup (no local trailing yet).
+		// Cancelled by first tickManage call once local trailing is active.
+		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+			if ep.PlaceExchangeSL(s.cfg.Symbol, "LONG", "SELL", s.longPos.remainQty, s.longPos.stopLoss) {
+				s.longPos.safetyNetSL = true
+				s.log.Info("AI: safety-net SL placed for recovered LONG", zap.Float64("sl", s.longPos.stopLoss))
+			}
+		}
 	}
 	if s.shortPos != nil && s.shortPos.filled && s.shortPos.mode == modeTrend && !s.shortPos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, s.shortPos)
-	}
-	// Range exchange SL: use stagedTPPlaced as flag to prevent duplicate SL placement.
-	// Reusing the flag is OK because Range never has staged TP (only exchange SL).
-	if s.longPos != nil && s.longPos.filled && s.longPos.mode == modeRange && !s.longPos.stagedTPPlaced {
-		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
-			if ep.PlaceExchangeSL(s.cfg.Symbol, "LONG", "SELL", s.longPos.remainQty, s.longPos.stopLoss) {
-				s.longPos.stagedTPPlaced = true // reuse flag to prevent re-placement
-			}
-		}
-	}
-	if s.shortPos != nil && s.shortPos.filled && s.shortPos.mode == modeRange && !s.shortPos.stagedTPPlaced {
 		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
 			if ep.PlaceExchangeSL(s.cfg.Symbol, "SHORT", "BUY", s.shortPos.remainQty, s.shortPos.stopLoss) {
-				s.shortPos.stagedTPPlaced = true
+				s.shortPos.safetyNetSL = true
+				s.log.Info("AI: safety-net SL placed for recovered SHORT", zap.Float64("sl", s.shortPos.stopLoss))
 			}
 		}
 	}
+	// Range/grid positions: no exchange SL (grid rides the range, exits only via TP).
 
 	// Manage positions on primary bar too (SL, trailing, TP checks must run even if halted)
 	if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
 	if s.shortPos != nil { s.managePos(ctx, bar, s.shortPos, &s.shortPos) }
 
+	// Log position state every primary bar (essential for debugging trailing/exit behavior)
+	if s.longPos != nil && s.longPos.filled {
+		p := s.longPos
+		pnlR := 0.0; if p.R > 0 { pnlR = (price - p.entryPrice) / p.R }
+		s.log.Info("POS LONG",
+			zap.Float64("entry", p.entryPrice), zap.Float64("price", price),
+			zap.Float64("pnlR", r2(pnlR)), zap.Float64("peak", p.peakPrice),
+			zap.Float64("trailing", p.trailing), zap.Float64("sl", p.stopLoss),
+			zap.Int("tier", p.trailTier), zap.String("1h_mode", s.hourlyModeStr(p.side)),
+			zap.Int("bars", p.barsHeld))
+	}
+	if s.shortPos != nil && s.shortPos.filled {
+		p := s.shortPos
+		pnlR := 0.0; if p.R > 0 { pnlR = (p.entryPrice - price) / p.R }
+		s.log.Info("POS SHORT",
+			zap.Float64("entry", p.entryPrice), zap.Float64("price", price),
+			zap.Float64("pnlR", r2(pnlR)), zap.Float64("peak", p.peakPrice),
+			zap.Float64("trailing", p.trailing), zap.Float64("sl", p.stopLoss),
+			zap.Int("tier", p.trailTier), zap.String("1h_mode", s.hourlyModeStr(p.side)),
+			zap.Int("bars", p.barsHeld))
+	}
+
 	// dayHalted blocks NEW entries only — existing position management above must still run.
 	if s.dayHalted { return }
-
-	// ── Night session block: 01:00-06:00 UTC+8 — direction accuracy ~0% in this window ──
-	nowUTC8 := time.Now().In(time.FixedZone("UTC+8", 8*3600))
-	hour := nowUTC8.Hour()
-	if hour >= 1 && hour < 6 && s.longPos == nil && s.shortPos == nil {
-		if s.barCount%12 == 0 {
-			s.log.Info("AI: skip — night session block (01:00-06:00 UTC+8)",
-				zap.Int("hour", hour), zap.Float64("price", price))
-		}
-		return
-	}
 
 	// Track if we have pending orders (for post-GPT cancel logic)
 	hasPendingLong := s.longPos != nil && !s.longPos.filled
 	hasPendingShort := s.shortPos != nil && !s.shortPos.filled
 
-	// Post-SL: run a GPT call to update signal accumulation, but DON'T open reverse immediately.
-	// The SL means "direction was wrong" — let the normal flow on the next bar decide
-	// the new direction with fresh regime detection.
+	// Post-SL: skip this bar, let next bar handle fresh signal evaluation.
 	if s.postSLReeval {
 		s.postSLReeval = false
-		s.log.Info("AI: post-SL GPT update",
+		s.log.Info("AI: post-SL cooldown — skip this bar",
 			zap.String("closed_side", s.postSLSide), zap.Float64("sl_price", s.postSLPrice))
-
-		mktCtx := s.buildContext(ctx, bar)
-		sig, err := s.callGPT(mktCtx)
-		if err == nil {
-			s.cacheSignal(bar, sig)
-			s.lastCallBar = s.barCount
-			s.totalCall++
-			// Update accumulation (with counter-trend halving + cap + cancel, same as main loop).
-			la, sa := 0.0, 0.0
-			if sig.Long != nil && sig.Long.Confidence > s.cfg.AccumBaseThresh { la = sig.Long.Confidence - s.cfg.AccumBaseThresh }
-			if sig.Short != nil && sig.Short.Confidence > s.cfg.AccumBaseThresh { sa = sig.Short.Confidence - s.cfg.AccumBaseThresh }
-			if s.lastTrendDir < 0 { la *= 0.5 }
-			if s.lastTrendDir > 0 { sa *= 0.5 }
-			s.accumLong += la; s.accumShort += sa
-			if s.accumLong > s.cfg.SignalAccumMax { s.accumLong = s.cfg.SignalAccumMax }
-			if s.accumShort > s.cfg.SignalAccumMax { s.accumShort = s.cfg.SignalAccumMax }
-			if s.accumLong > 0 && s.accumShort > 0 {
-				diff := s.accumLong - s.accumShort
-				if diff > 0 { s.accumLong = diff; s.accumShort = 0 } else { s.accumShort = -diff; s.accumLong = 0 }
-			}
-		}
-		// Don't open new position on SL bar — let next bar handle it.
 		return
 	}
 
@@ -218,6 +220,12 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	regime := s.detectRegime()
 	s.lastRegime = regime
+	s.lastHourlyDir = s.hourlyTrendDir()
+
+	// Grid positions: NO regime-based exit. Grid trades close via TP only.
+	// Risk is managed by small qty per layer + max 2 layers cap.
+	// Regime exit was actively harmful: it triggered on small moves ($5) that are
+	// normal range oscillation, locking in losses at the worst price.
 
 	// ── EXPANSION cooldown: wait 3 bars (15min) after breakout bar before entry ──
 	// EXPANSION bars trigger FOMO entries at the worst price; let the retracement play out.
@@ -232,159 +240,71 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				zap.Int("cooldown", expansionCooldown),
 				zap.Float64("price", price))
 		}
-		// Still decay signals during cooldown
-		s.accumLong *= s.cfg.SignalDecay
-		s.accumShort *= s.cfg.SignalDecay
-		if s.accumLong < 0.01 { s.accumLong = 0 }
-		if s.accumShort < 0.01 { s.accumShort = 0 }
 		return
 	}
 
-	// Decay signal accumulation every bar (not just on GPT call),
-	// so stale signals fade even when regime blocks GPT calls.
-	s.accumLong *= s.cfg.SignalDecay
-	s.accumShort *= s.cfg.SignalDecay
-	if s.accumLong < 0.01 { s.accumLong = 0 }
-	if s.accumShort < 0.01 { s.accumShort = 0 }
+	// Night session block removed — ETH trades 24h, US session (01:00-06:00 UTC+8) is often active.
 
-	// Force immediate GPT check if a position was closed externally (SL hit, manual close).
-	forceCheck := false
-	if s.syncer != nil && s.syncer.PositionClosedExternally.CompareAndSwap(true, false) {
-		forceCheck = true
-		s.log.Info("AI: position closed externally — forcing immediate signal check")
+	// ── TP cooldown: block TREND entries for 3 bars after TPs fill ──
+	// Grid is exempt — TP fill means range is active, next reversion should be acted on promptly.
+	tpCooldown := 3
+	if s.tpCooldownBar > 0 && s.barCount-s.tpCooldownBar < tpCooldown && s.longPos == nil && s.shortPos == nil {
+		if regime != RegimeRange { return }
 	}
 
-	// RANGE regime: skip entirely if RangeEntryConf=0 (disabled), otherwise use slower GPT interval.
-	interval := s.cfg.CallIntervalBars
-	if interval < 1 { interval = 1 }
-	if regime == RegimeRange && s.longPos == nil && s.shortPos == nil {
-		if s.cfg.RangeEntryConf <= 0 {
-			// RANGE trading disabled — don't waste GPT calls
-			if s.barCount%12 == 0 {
-				s.log.Info("AI: skip — RANGE regime (trading disabled)",
-					zap.Float64("price", price))
-			}
-			return
-		}
-		ri := s.cfg.RangeCallIntervalBars
-		if ri < 1 { ri = 3 }
-		interval = ri
+	// Clear external close flag (no longer needed for GPT forcing, but still consumed).
+	if s.syncer != nil {
+		s.syncer.PositionClosedExternally.CompareAndSwap(true, false)
 	}
-	if !forceCheck && s.barCount-s.lastCallBar < interval { return }
 
-	if s.consecLoss >= s.cfg.MaxConsecLoss {
-		s.log.Warn("AI: halted — consecutive losses", zap.Int("consec", s.consecLoss))
+	// RANGE regime: skip entry if disabled.
+	if regime == RegimeRange && s.longPos == nil && s.shortPos == nil && s.cfg.RangeEntryConf <= 0 {
+		return
+	}
+
+	// ConsecLoss halt: only block trend entries. Grid mode is high-frequency
+	// small-profit — occasional losses are normal cost, not signal failure.
+	if s.consecLoss >= s.cfg.MaxConsecLoss && regime != RegimeRange && regime != RegimeSlowTrend {
+		s.log.Warn("AI: trend halted — consecutive losses", zap.Int("consec", s.consecLoss))
 		s.lastCallBar = s.barCount
 		return
 	}
 
-	var signal gptSignal
-	var err error
-	if len(s.replaySignals) > 0 {
-		// Backtest replay: use cached signal
-		signal, err = s.nextReplaySignal()
-		if err != nil {
-			s.lastCallBar = s.barCount
-			return
-		}
-	} else {
-		// Live mode: call GPT (no retry — next bar will call again)
-		mktCtx := s.buildContext(ctx, bar)
-		signal, err = s.callGPT(mktCtx)
-		if err != nil {
-			s.log.Warn("AI: GPT failed", zap.Error(err))
-			s.lastCallBar = s.barCount
-			return
-		}
-		s.cacheSignal(bar, signal)
-	}
+	// ── Pure technical signals (GPT removed — zero latency, zero cost) ──
 	s.lastCallBar = s.barCount
 	s.totalCall++
 
-	// Log both signals
-	longConf, shortConf := 0.0, 0.0
-	longEntry, shortEntry := 0.0, 0.0
-	longReason, shortReason := "", ""
-	if signal.Long != nil {
-		longConf = signal.Long.Confidence
-		longEntry = signal.Long.EntryPrice
-		longReason = signal.Long.Reasoning
-	}
-	if signal.Short != nil {
-		shortConf = signal.Short.Confidence
-		shortEntry = signal.Short.EntryPrice
-		shortReason = signal.Short.Reasoning
+	longConf, longEntry := s.techBuySignal()
+	shortConf, shortEntry := s.techSellSignal()
+
+	// Set reason string based on signal type
+	var longReason, shortReason string
+	if regime == RegimeStrongTrend || regime == RegimeExpansion {
+		longReason = "breakout: price > 10-bar high"
+		shortReason = "breakout: price < 10-bar low"
+	} else {
+		longReason = "reversion: RSI oversold + BB lower"
+		shortReason = "reversion: RSI overbought + BB upper"
 	}
 
-	// Backward compat: if GPT returns old format (action/confidence), convert
-	if signal.Long == nil && signal.Short == nil && signal.Action != "" {
-		if signal.Action == "BUY" {
-			longConf = signal.Confidence
-			longEntry = signal.EntryPrice
-			longReason = signal.Reasoning
-		} else if signal.Action == "SELL" {
-			shortConf = signal.Confidence
-			shortEntry = signal.EntryPrice
-			shortReason = signal.Reasoning
-		}
+	// Counter-trend hard clamp (trend mode only — reversion IS counter-trend)
+	if regime == RegimeStrongTrend || regime == RegimeExpansion {
+		ctCap := 0.20
+		if s.lastTrendDir < 0 && longConf > ctCap { longConf = ctCap }
+		if s.lastTrendDir > 0 && shortConf > ctCap { shortConf = ctCap }
 	}
 
-	// ── Hard clamp: GPT often ignores counter-trend cap in prompt ──
-	if s.lastTrendDir < 0 && longConf > s.cfg.CounterTrendCap { longConf = s.cfg.CounterTrendCap }
-	if s.lastTrendDir > 0 && shortConf > s.cfg.CounterTrendCap { shortConf = s.cfg.CounterTrendCap }
-
-	// ── Hybrid direction: replace GPT LONG with technical signal ──
-	// GPT SELL accuracy = 82.7% (keep). GPT BUY accuracy = 12.4% (replace).
-	// Technical BUY uses EMA9/21 crossover + RSI + MACD confirmation.
-	techLongConf, techLongEntry := s.techBuySignal()
-	if techLongConf > longConf {
-		s.log.Info("AI: technical BUY override",
-			zap.Float64("gpt_long", longConf), zap.Float64("tech_long", techLongConf),
-			zap.Float64("tech_entry", techLongEntry))
-		longConf = techLongConf
-		longEntry = techLongEntry
-		longReason = "technical: EMA9>EMA21 crossover + RSI/MACD confirmation"
-	}
-
-	// ── Signal accumulation: rolling confidence across bars ──
-	// Decay already applied at regime detection (every bar).
-	// Counter-trend accumulation is halved to prevent GPT bias from building up
-	// against the detected trend direction.
-	cap := s.cfg.SignalAccumMax
-	longAdd, shortAdd := 0.0, 0.0
-	if longConf > s.cfg.AccumBaseThresh { longAdd = longConf - s.cfg.AccumBaseThresh }
-	if shortConf > s.cfg.AccumBaseThresh { shortAdd = shortConf - s.cfg.AccumBaseThresh }
-	// Halve counter-trend accumulation
-	if s.lastTrendDir < 0 { longAdd *= 0.5 }  // bearish: slow long accumulation
-	if s.lastTrendDir > 0 { shortAdd *= 0.5 }  // bullish: slow short accumulation
-	s.accumLong += longAdd
-	s.accumShort += shortAdd
-	// Cap
-	if s.accumLong > cap { s.accumLong = cap }
-	if s.accumShort > cap { s.accumShort = cap }
-	// Conflicting signals cancel each other
-	if s.accumLong > 0 && s.accumShort > 0 {
-		diff := s.accumLong - s.accumShort
-		if diff > 0 { s.accumLong = diff; s.accumShort = 0 } else { s.accumShort = -diff; s.accumLong = 0 }
-	}
-
-	// Effective confidence = max(raw GPT, accumulated signal)
-	effectiveLong := math.Max(longConf, s.accumLong)
-	effectiveShort := math.Max(shortConf, s.accumShort)
-
-	// ── Two-layer decision: regime determines conditions, GPT scores quality ──
-	// STRONG_TREND/EXPANSION: with-trend uses RegimeEntryConf (0.65), counter-trend stays at 0.82.
-	// SLOW_TREND: with-trend uses midpoint (0.735), counter-trend stays at 0.82.
-	// RANGE: disabled (RangeEntryConf=0), keeps full threshold → effectively blocks entry.
+	// ── Entry thresholds: regime determines required confidence ──
+	// STRONG_TREND/EXPANSION: with-trend uses lower threshold (easier to enter).
+	// SLOW_TREND: midpoint threshold.
+	// RANGE: disabled (RangeEntryConf=0 blocks entry).
 	entryConfLong := s.cfg.ConfidenceThreshold
 	entryConfShort := s.cfg.ConfidenceThreshold
 	if regime == RegimeStrongTrend || regime == RegimeExpansion {
-		if s.lastTrendDir >= 0 { entryConfLong = s.cfg.RegimeEntryConf }   // bullish → lower long threshold
-		if s.lastTrendDir <= 0 { entryConfShort = s.cfg.RegimeEntryConf }  // bearish → lower short threshold
+		if s.lastTrendDir >= 0 { entryConfLong = s.cfg.RegimeEntryConf }
+		if s.lastTrendDir <= 0 { entryConfShort = s.cfg.RegimeEntryConf }
 	} else if regime == RegimeSlowTrend {
-		// SLOW_TREND: with-trend uses midpoint between RegimeEntryConf and full threshold,
-		// counter-trend stays at full threshold.
-		slowConf := (s.cfg.RegimeEntryConf + s.cfg.ConfidenceThreshold) / 2 // e.g. (0.65+0.82)/2 = 0.735
+		slowConf := (s.cfg.RegimeEntryConf + s.cfg.ConfidenceThreshold) / 2
 		if s.lastTrendDir >= 0 { entryConfLong = slowConf }
 		if s.lastTrendDir <= 0 { entryConfShort = slowConf }
 	} else if regime == RegimeRange {
@@ -392,45 +312,56 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			entryConfLong = s.cfg.RangeEntryConf
 			entryConfShort = s.cfg.RangeEntryConf
 		}
-		// RangeEntryConf=0 → keep full ConfidenceThreshold (effectively blocks RANGE entries)
 	}
-	// entryConfLong / entryConfShort used throughout below for directional entry decisions.
 
-	// Use effective (accumulated) confidence for entry decisions.
-	// If accumulated signal boosted confidence above raw GPT, entry price may be stale.
-	if effectiveLong > longConf+0.05 && longEntry > 0 {
-		longEntry = 0
-	}
-	if effectiveShort > shortConf+0.05 && shortEntry > 0 {
-		shortEntry = 0
-	}
-	// Keep raw GPT confidence for accurate logging before overwriting with effective values.
+	// Raw confidence for logging
 	rawLongConf := longConf
 	rawShortConf := shortConf
-	longConf = effectiveLong
-	shortConf = effectiveShort
 
-	// ── EMA slope filter: block BUY when EMA20 is falling, block SELL when EMA20 is rising ──
-	// GPT BUY accuracy was 12.4% — this filter prevents most false BUY signals in downtrends.
-	emaSlopeCloses := s.getCloses()
-	if len(emaSlopeCloses) >= 22 {
-		ema20vals := indicator.EMA(emaSlopeCloses, s.cfg.EMAFast)
-		if len(ema20vals) >= 2 {
-			emaSlope := ema20vals[len(ema20vals)-1] - ema20vals[len(ema20vals)-2]
-			if emaSlope < 0 && longConf > 0 {
-				s.log.Info("AI: BUY blocked — EMA20 slope negative",
-					zap.Float64("slope", r2(emaSlope)), zap.Float64("conf", longConf))
-				longConf = 0
-				s.accumLong = 0 // also clear accumulated long signal to prevent re-trigger
+	longExhausted, shortExhausted := false, false
+	// ── Trend exhaustion filter: skip with-trend entry if 2h move is too large ──
+	// Prevents chasing into extended trends that are likely to reverse.
+	// Uses 15m bars (8 bars = 2 hours) to measure trend distance.
+	if s.cfg.TrendExhaustPct > 0 {
+		bars15 := s.barsForInterval("15m")
+		if len(bars15) >= 8 {
+			low4h := bars15[len(bars15)-8].Close
+			high4h := bars15[len(bars15)-8].Close
+			for _, b := range bars15[len(bars15)-8:] {
+				if b.Low < low4h { low4h = b.Low }
+				if b.High > high4h { high4h = b.High }
 			}
-			if emaSlope > 0 && shortConf > 0 && s.lastTrendDir >= 0 {
-				// Only block counter-trend SHORT when EMA rising AND trend is bullish.
-				// Don't block with-trend SHORT in bearish trend (EMA can have temporary upticks).
-				s.log.Info("AI: SELL blocked — EMA20 slope positive + bullish trend",
-					zap.Float64("slope", r2(emaSlope)), zap.Float64("conf", shortConf))
-				shortConf = 0
-				s.accumShort = 0
+			move4h := (high4h - low4h) / price
+			current := bars15[len(bars15)-1].Close
+			// Track exhaustion flags — applied after MTF scoring to avoid being overwritten.
+			if move4h > s.cfg.TrendExhaustPct && (current-low4h)/(high4h-low4h) > 0.8 && longConf > 0 {
+				s.log.Info("AI: BUY soft-limited — trend exhausted (near 2h high)",
+					zap.Float64("move_pct", r3(move4h*100)))
+				longExhausted = true
 			}
+			if move4h > s.cfg.TrendExhaustPct && (high4h-current)/(high4h-low4h) > 0.8 && shortConf > 0 {
+				s.log.Info("AI: SELL soft-limited — trend exhausted (near 2h low)",
+					zap.Float64("move_pct", r3(move4h*100)))
+				shortExhausted = true
+			}
+		}
+	}
+
+	// ── 1h EMA direction filter ──
+	// Trend mode: only trade with the hourly trend (counter-1h trades historically lost money).
+	// Range/reversion mode: SKIP this filter — reversion signals ARE counter-trend by design.
+	// Only RANGE uses reversion/grid mode. SLOW_TREND uses breakout/trend (it has direction).
+	isReversion := regime == RegimeRange
+	if !isReversion {
+		if s.lastHourlyDir == -1 && longConf > 0 {
+			s.log.Info("AI: BUY blocked — 1h EMA bearish", zap.Float64("conf", longConf))
+			longConf = 0
+			s.accumLong = 0
+		}
+		if s.lastHourlyDir == 1 && shortConf > 0 {
+			s.log.Info("AI: SELL blocked — 1h EMA bullish", zap.Float64("conf", shortConf))
+			shortConf = 0
+			s.accumShort = 0
 		}
 	}
 
@@ -453,14 +384,10 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		zap.Int("call", s.totalCall),
 	)
 	if longConf >= entryConfLong {
-		src := "GPT"
-		if rawLongConf < entryConfLong { src = "accum" }
-		s.log.Info("  BUY reason ("+src+"): "+longReason)
+		s.log.Info("  BUY reason: "+longReason)
 	}
 	if shortConf >= entryConfShort {
-		src := "GPT"
-		if rawShortConf < entryConfShort { src = "accum" }
-		s.log.Info("  SELL reason ("+src+"): "+shortReason)
+		s.log.Info("  SELL reason: "+shortReason)
 	}
 	s.logEvent("signal", action, "", price, 0, 0, math.Max(longConf, shortConf), 0,
 		fmt.Sprintf(`{"raw_L":%.2f,"raw_S":%.2f,"eff_L":%.2f,"eff_S":%.2f,"L_entry":%.2f,"S_entry":%.2f}`,
@@ -521,24 +448,19 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Positive MTF = bullish (headwind for SHORT), negative = bearish (headwind for LONG)
 	longQtyScale, shortQtyScale := 1.0, 1.0
 
+	// MTF only scales qty, never blocks. Keeps the door open for reversal entries.
 	switch {
 	case mtfScore <= -3:
-		if longConf > 0 {
-			s.log.Info("AI: BUY blocked — MTF strongly bearish", zap.Int("score", mtfScore))
-			longConf = 0
-		}
+		longQtyScale = 0.3 // strong headwind → 30% qty
 	case mtfScore == -2:
-		longQtyScale = s.cfg.MTFQtyScaleHard
+		longQtyScale = s.cfg.MTFQtyScaleHard // 70%
 	case mtfScore == -1:
-		longQtyScale = s.cfg.MTFQtyScaleSoft
+		longQtyScale = s.cfg.MTFQtyScaleSoft // 85%
 	}
 
 	switch {
 	case mtfScore >= 3:
-		if shortConf > 0 {
-			s.log.Info("AI: SELL blocked — MTF strongly bullish", zap.Int("score", mtfScore))
-			shortConf = 0
-		}
+		shortQtyScale = 0.3 // strong headwind → 30% qty
 	case mtfScore == 2:
 		shortQtyScale = s.cfg.MTFQtyScaleHard
 	case mtfScore == 1:
@@ -547,6 +469,10 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	s.mtfLongScale = longQtyScale
 	s.mtfShortScale = shortQtyScale
+
+	// Apply trend exhaustion AFTER MTF scoring (otherwise MTF overwrites it).
+	if longExhausted { s.mtfLongScale *= 0.5 }
+	if shortExhausted { s.mtfShortScale *= 0.5 }
 
 	// ── Rule-based boost (after MTF scoring, respects MTF + trend direction) ──
 	swLow := s.findSwingLow(10)
@@ -573,13 +499,13 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		s.log.Info("AI: MTF momentum boost → LONG",
 			zap.Float64("conf_before", longConf), zap.Int("mtf", mtfScore))
 		longConf = entryConfLong
-		if longEntry <= 0 { longEntry = price - price*s.cfg.LongEntryOffsetPct }
+		if longEntry <= 0 { longEntry = price - atr*s.cfg.EntryATRK }
 	}
 	if mtfScore <= -2 && s.lastTrendDir <= 0 && shortConf > 0 && shortConf >= s.cfg.BoostMinConf && shortConf < entryConfShort && s.shortPos == nil {
 		s.log.Info("AI: MTF momentum boost → SHORT",
 			zap.Float64("conf_before", shortConf), zap.Int("mtf", mtfScore))
 		shortConf = entryConfShort
-		if shortEntry <= 0 { shortEntry = price + price*s.cfg.EntryOffsetPct }
+		if shortEntry <= 0 { shortEntry = price + atr*s.cfg.EntryATRK }
 	}
 
 	// ── Cancel pending orders if GPT signal reversed ──
@@ -594,10 +520,23 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		s.shortPos = nil
 	}
 
-	// ── Single-direction mode: only open the strongest signal (after MTF + boost) ──
-	// Exception: HedgeOnDrawdown allows counter-trend Range scalp when main position is losing.
+	// ── Direction conflict resolution ──
+	// Grid/reversion mode: allow simultaneous long+short (hedge) — grid needs both sides.
+	// Trend mode: single-direction only (strongest signal wins).
 	hedgeAllowed := false
-	if !s.cfg.HedgeMode {
+	if isReversion {
+		// Grid mode: both directions allowed simultaneously.
+		// Only block if both signals fire on the same bar (pick stronger).
+		if longConf >= entryConfLong && shortConf >= entryConfShort {
+			if longConf >= shortConf {
+				shortConf = 0
+			} else {
+				longConf = 0
+			}
+		}
+		// Existing opposite-side position does NOT block new entry in grid mode.
+	} else if !s.cfg.HedgeMode {
+		// Trend mode: single direction.
 		if longConf >= entryConfLong && shortConf >= entryConfShort {
 			if longConf >= shortConf {
 				shortConf = 0
@@ -606,7 +545,6 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			}
 		}
 		if s.longPos != nil && shortConf >= entryConfShort {
-			// LONG main losing + SHORT signal → hedge?
 			if s.cfg.HedgeOnDrawdown && s.canHedge(price, s.longPos) {
 				hedgeAllowed = true
 				s.log.Info("AI: hedge-on-drawdown → SHORT scalp",
@@ -617,7 +555,6 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			}
 		}
 		if s.shortPos != nil && longConf >= entryConfLong {
-			// SHORT main losing + LONG signal → hedge?
 			if s.cfg.HedgeOnDrawdown && s.canHedge(price, s.shortPos) {
 				hedgeAllowed = true
 				s.log.Info("AI: hedge-on-drawdown → LONG scalp",
@@ -629,37 +566,23 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 
-	// Entry: anchor to previous bar's close (real support/resistance level)
-	// LONG: prevClose - buffer (buy at previous support on pullback)
-	// SHORT: prevClose + buffer (sell at previous resistance on bounce)
-	bars := s.primaryBars()
-	prevClose := price // fallback to current price if no bars
-	if len(bars) >= 2 {
-		prevClose = bars[len(bars)-2].Close
-	}
-	entryBuf := price * s.cfg.LongEntryOffsetPct // small buffer (~0.10% ≈ $2)
-	maxDev := price * s.cfg.MaxEntryDevPct // cap GPT entry within configured % of current price
+	// Entry price is now determined per-mode in the entry block below:
+	// - Reversion: signal's entry price (near BB extreme)
+	// - Breakout: market price (urgency)
 
-	// ── Update pending limit orders if better entry available ──
-	if s.longPos != nil && !s.longPos.filled && longConf >= entryConfLong {
-		newEntry := prevClose - entryBuf
-		if longEntry > 0 && longEntry < newEntry && (price-longEntry) <= maxDev { newEntry = longEntry }
-		newEntry = math.Round(newEntry*100) / 100
-		// Replace if new entry is closer to current price (more likely to fill)
-		if math.Abs(price-newEntry) < math.Abs(price-s.longPos.entryPrice) {
+	// ── Update pending limit orders: cancel if new signal provides better entry ──
+	if s.longPos != nil && !s.longPos.filled && longConf >= entryConfLong && longEntry > 0 {
+		if longEntry < s.longPos.entryPrice {
 			s.log.Info("AI: updating pending LONG — better entry",
-				zap.Float64("old_entry", s.longPos.entryPrice), zap.Float64("new_entry", newEntry))
+				zap.Float64("old", s.longPos.entryPrice), zap.Float64("new", longEntry))
 			if s.longPos.orderID != "" { ctx.CancelOrder(s.longPos.orderID) }
-			s.longPos = nil // will be re-created below
+			s.longPos = nil
 		}
 	}
-	if s.shortPos != nil && !s.shortPos.filled && shortConf >= entryConfShort {
-		newEntry := prevClose + entryBuf
-		if shortEntry > 0 && shortEntry > newEntry && (shortEntry-price) <= maxDev { newEntry = shortEntry }
-		newEntry = math.Round(newEntry*100) / 100
-		if math.Abs(price-newEntry) < math.Abs(price-s.shortPos.entryPrice) {
+	if s.shortPos != nil && !s.shortPos.filled && shortConf >= entryConfShort && shortEntry > 0 {
+		if shortEntry > s.shortPos.entryPrice {
 			s.log.Info("AI: updating pending SHORT — better entry",
-				zap.Float64("old_entry", s.shortPos.entryPrice), zap.Float64("new_entry", newEntry))
+				zap.Float64("old", s.shortPos.entryPrice), zap.Float64("new", shortEntry))
 			if s.shortPos.orderID != "" { ctx.CancelOrder(s.shortPos.orderID) }
 			s.shortPos = nil
 		}
@@ -667,60 +590,71 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	// ── Open LONG if confident ──
 	if longConf >= entryConfLong && s.longPos == nil {
-		if s.shortPos != nil {
-			if math.Abs(s.shortPos.entryPrice-price) < minSpread { longConf = 0 }
+		// Grid mode: allow long even if short exists (hedge/grid needs both sides).
+		// Trend mode: block if opposite side too close (avoid churn).
+		if isReversion {
+			// Grid: only block if short is modeRange and very close (same grid level)
+			if s.shortPos != nil && s.shortPos.mode == modeRange {
+				if math.Abs(s.shortPos.entryPrice-price) < minSpread { longConf = 0 }
+			}
+		} else {
+			if s.shortPos != nil {
+				if math.Abs(s.shortPos.entryPrice-price) < minSpread { longConf = 0 }
+			}
 		}
 		if longConf > 0 {
-			// LONG entry: blend between prevClose and GPT support.
-			// Pure GPT support is often too far to fill; pure prevClose is too close to market.
-			// Use upper 1/3 of the gap: entry = price - (price - gptSupport) * 0.33
 			var entry float64
-			fallback := math.Round((prevClose-entryBuf)*100) / 100
-			if longEntry > 0 && longEntry < price && (price-longEntry) <= maxDev {
-				blended := price - (price-longEntry)*0.33
-				entry = math.Round(blended*100) / 100
-				if entry > fallback { entry = fallback } // never worse than fallback
-			} else {
-				entry = fallback
-			}
-			entry = math.Round(entry*100) / 100
-			// LONG TP target = GPT resistance (shortEntry) — where sellers step in
-			gptTP := shortEntry
-			if hedgeAllowed && s.shortPos != nil {
-				s.openHedgeScalp(ctx, "LONG", price, entry, atr, s.shortPos)
-			} else {
+			if isReversion {
+				// Reversion: use signal's entry directly (near BB extreme)
+				entry = longEntry
+				if entry <= 0 { entry = math.Round(price*100) / 100 }
 				s.lastConf = longConf
-				s.openTrend(ctx, "LONG", price, entry, atr, gptTP)
+				s.openGrid(ctx, "LONG", price, entry, atr)
 				if s.longPos != nil { s.longPos.entryRegime = regime }
+			} else {
+				// Breakout: market price entry (urgency, no pullback blending)
+				entry = math.Round(price*100) / 100
+				gptTP := shortEntry
+				if hedgeAllowed && s.shortPos != nil {
+					s.openHedgeScalp(ctx, "LONG", price, entry, atr, s.shortPos)
+				} else {
+					s.lastConf = longConf
+					s.openTrend(ctx, "LONG", price, entry, atr, gptTP)
+					if s.longPos != nil { s.longPos.entryRegime = regime }
+				}
 			}
 		}
 	}
 
 	// ── Open SHORT if confident ──
 	if shortConf >= entryConfShort && s.cfg.EnableShort && s.shortPos == nil {
-		if s.longPos != nil {
-			if math.Abs(s.longPos.entryPrice-price) < minSpread { shortConf = 0 }
+		if isReversion {
+			if s.longPos != nil && s.longPos.mode == modeRange {
+				if math.Abs(s.longPos.entryPrice-price) < minSpread { shortConf = 0 }
+			}
+		} else {
+			if s.longPos != nil {
+				if math.Abs(s.longPos.entryPrice-price) < minSpread { shortConf = 0 }
+			}
 		}
 		if shortConf > 0 {
-			// SHORT entry: blend between prevClose and GPT resistance.
 			var entry float64
-			fallback := math.Round((prevClose+entryBuf)*100) / 100
-			if shortEntry > 0 && shortEntry > price && (shortEntry-price) <= maxDev {
-				blended := price + (shortEntry-price)*0.33
-				entry = math.Round(blended*100) / 100
-				if entry < fallback { entry = fallback } // never worse than fallback
-			} else {
-				entry = fallback
-			}
-			entry = math.Round(entry*100) / 100
-			// SHORT TP target = GPT support (longEntry) — where buyers step in
-			gptTP := longEntry
-			if hedgeAllowed && s.longPos != nil {
-				s.openHedgeScalp(ctx, "SHORT", price, entry, atr, s.longPos)
-			} else {
+			if isReversion {
+				entry = shortEntry
+				if entry <= 0 { entry = math.Round(price*100) / 100 }
 				s.lastConf = shortConf
-				s.openTrend(ctx, "SHORT", price, entry, atr, gptTP)
+				s.openGrid(ctx, "SHORT", price, entry, atr)
 				if s.shortPos != nil { s.shortPos.entryRegime = regime }
+			} else {
+				entry = math.Round(price*100) / 100
+				gptTP := longEntry
+				if hedgeAllowed && s.longPos != nil {
+					s.openHedgeScalp(ctx, "SHORT", price, entry, atr, s.longPos)
+				} else {
+					s.lastConf = shortConf
+					s.openTrend(ctx, "SHORT", price, entry, atr, gptTP)
+					if s.shortPos != nil { s.shortPos.entryRegime = regime }
+				}
 			}
 		}
 	}
