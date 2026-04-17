@@ -536,7 +536,8 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 		// Existing opposite-side position does NOT block new entry in grid mode.
 	} else if !s.cfg.HedgeMode {
-		// Trend mode: single direction.
+		// Trend mode: single direction — BUT grid (modeRange) positions don't block trend entries.
+		// A grid SHORT and a trend LONG can coexist (different strategies, different management).
 		if longConf >= entryConfLong && shortConf >= entryConfShort {
 			if longConf >= shortConf {
 				shortConf = 0
@@ -544,7 +545,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				longConf = 0
 			}
 		}
-		if s.longPos != nil && shortConf >= entryConfShort {
+		if s.longPos != nil && s.longPos.mode != modeRange && shortConf >= entryConfShort {
 			if s.cfg.HedgeOnDrawdown && s.canHedge(price, s.longPos) {
 				hedgeAllowed = true
 				s.log.Info("AI: hedge-on-drawdown → SHORT scalp",
@@ -554,7 +555,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				shortConf = 0
 			}
 		}
-		if s.shortPos != nil && longConf >= entryConfLong {
+		if s.shortPos != nil && s.shortPos.mode != modeRange && longConf >= entryConfLong {
 			if s.cfg.HedgeOnDrawdown && s.canHedge(price, s.shortPos) {
 				hedgeAllowed = true
 				s.log.Info("AI: hedge-on-drawdown → LONG scalp",
@@ -612,8 +613,9 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				s.openGrid(ctx, "LONG", price, entry, atr)
 				if s.longPos != nil { s.longPos.entryRegime = regime }
 			} else {
-				// Breakout: market price entry (urgency, no pullback blending)
-				entry = math.Round(price*100) / 100
+				// Breakout: use signal's entry (retest level = previous high/low)
+				entry = longEntry
+				if entry <= 0 { entry = math.Round(price*100) / 100 }
 				gptTP := shortEntry
 				if hedgeAllowed && s.shortPos != nil {
 					s.openHedgeScalp(ctx, "LONG", price, entry, atr, s.shortPos)
@@ -646,7 +648,8 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				s.openGrid(ctx, "SHORT", price, entry, atr)
 				if s.shortPos != nil { s.shortPos.entryRegime = regime }
 			} else {
-				entry = math.Round(price*100) / 100
+				entry = shortEntry
+				if entry <= 0 { entry = math.Round(price*100) / 100 }
 				gptTP := longEntry
 				if hedgeAllowed && s.longPos != nil {
 					s.openHedgeScalp(ctx, "SHORT", price, entry, atr, s.longPos)

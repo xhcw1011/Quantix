@@ -14,6 +14,30 @@ import (
 // Default: TP at 1.5R (50% qty). Trend: TP at 2.0R (50% qty).
 // ATR-adaptive: min(R*level, ATR*3) — tightens in low volatility.
 // Remaining 50% managed by trailing stop + bounce TP.
+// placeGridTP places a single reduce-only limit order at the grid TP price on the exchange.
+// Maker fee (0.02%) instead of reactive market order (0.05%).
+func (s *AIStrategy) placeGridTP(ctx *strategy.Context, pos *posState) {
+	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
+	if !ok { return }
+
+	closeSide := "SELL"
+	posSide := "LONG"
+	if pos.side == "SHORT" {
+		closeSide = "BUY"
+		posSide = "SHORT"
+	}
+
+	tps := []strategy.StagedTP{{Price: pos.takeProfit, Qty: pos.remainQty}}
+	ok = ep.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, 0, pos.remainQty, tps)
+	if ok {
+		pos.stagedTPPlaced = true
+		s.log.Info("AI: grid TP placed on exchange (maker)",
+			zap.String("side", pos.side),
+			zap.Float64("tp", pos.takeProfit),
+			zap.Float64("qty", pos.remainQty))
+	}
+}
+
 // Breakeven triggered by pnlR >= BreakevenR (code-level, not TP-dependent).
 func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState) {
 	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
@@ -163,12 +187,10 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 		}
 	}
 
-	// Grid TP: price is at our target, use limit order for maker fee (0.02% vs 0.05%).
-	// All other exits (SL, trailing, regime_exit): use market for guaranteed fill.
+	// All exits use market order for guaranteed fill.
+	// Grid TP tried limit orders but the price basis (bar close vs tick) caused
+	// stale limit prices that risked non-fill.
 	useMarket := true
-	if reason == "grid_tp" {
-		useMarket = false
-	}
 	if !s.placeCloseOrder(ctx, p.side, qty, useMarket) {
 		// Close order FAILED. Check syncer: if exchange has no position,
 		// the position was already closed (manual, liquidation, TP fill, etc.) — safe to clear state.

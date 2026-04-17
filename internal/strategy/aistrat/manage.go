@@ -102,10 +102,40 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 			if (p.side == "LONG" && price <= g.entryPrice) || (p.side == "SHORT" && price >= g.entryPrice) {
 				g.filled = true
 				g.filledAt = time.Now()
-				p.remainQty += g.qty // only count qty after confirmed fill
-				s.log.Info("AI: grid order filled",
+				p.remainQty += g.qty
+				// Recalculate TP based on new weighted average entry
+				totalQty := p.initQty
+				weightedEntry := p.entryPrice * p.initQty
+				for _, gg := range p.gridOrders {
+					if gg.filled {
+						totalQty += gg.qty
+						weightedEntry += gg.entryPrice * gg.qty
+					}
+				}
+				avgEntry := weightedEntry / totalQty
+				maxTP := s.cfg.GridMaxTPDist
+				if maxTP <= 0 { maxTP = 8.0 }
+				if p.side == "LONG" {
+					p.takeProfit = math.Round((avgEntry+maxTP)*100) / 100
+				} else {
+					p.takeProfit = math.Round((avgEntry-maxTP)*100) / 100
+				}
+				s.log.Info("AI: grid order filled — TP recalculated",
 					zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
+					zap.Float64("avg_entry", math.Round(avgEntry*100)/100),
+					zap.Float64("new_tp", p.takeProfit),
 					zap.Float64("qty", g.qty), zap.Int("layer", i+1))
+				// Cancel old exchange TP and place new one at updated price + qty
+				if p.stagedTPPlaced {
+					if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+						posSide := "LONG"
+						if p.side == "SHORT" { posSide = "SHORT" }
+						ep.CancelAllProtective(s.cfg.Symbol, posSide)
+						p.stagedTPPlaced = false
+					}
+				}
+				s.placeGridTP(ctx, p)
+				s.syncToRedis(p)
 			}
 			continue
 		}
@@ -120,7 +150,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 				zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
 				zap.Float64("tp", g.tp), zap.Float64("price", price),
 				zap.Float64("qty", g.qty), zap.Int("layer", i+1))
-			if !s.placeCloseOrder(ctx, p.side, g.qty, false) {
+			if !s.placeCloseOrder(ctx, p.side, g.qty, true) { // market order for guaranteed fill
 				s.log.Warn("AI: grid close order failed", zap.Int("layer", i+1))
 				continue // skip removal, retry next bar
 			}
@@ -132,10 +162,26 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 
 	// 2. Open new grid order if price moved far enough from last level
 	if len(p.gridOrders) >= s.cfg.GridMaxLayers { return }
-	if !p.filled { return } // base must be filled first
+	if !p.filled { return }
 	if s.cfg.ForceTrend { return }
 
-	// Dynamic grid spacing: compute FRESH BB each bar (not stale lastBB values).
+	// Smart DCA: don't add layers if market conditions oppose the position.
+	// 1. Regime not RANGE → trend confirmed, stop averaging into it
+	// 2. Regime is RANGE but trend_dir opposes position → drift against us, pause
+	if s.lastRegime != RegimeRange {
+		return
+	}
+	if p.side == "LONG" && s.lastTrendDir < 0 {
+		return // bearish drift, don't add long layers
+	}
+	if p.side == "SHORT" && s.lastTrendDir > 0 {
+		return // bullish drift, don't add short layers
+	}
+
+	// Dynamic grid spacing with exponential increase per layer.
+	// Layer 1: base_spacing × 1, Layer 2: base_spacing × 2, etc.
+	// Wrong direction → layers get further apart → less capital committed.
+	layerNum := len(p.gridOrders) + 1 // next layer number (1-based)
 	spacing := p.entryPrice * s.cfg.GridSpacingPct
 	closes := s.getCloses()
 	if len(closes) >= 20 {
@@ -146,24 +192,24 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 			if dynamicSpacing > 0 { spacing = dynamicSpacing }
 		}
 	}
+	// Exponential spacing from BASE entry (not last layer).
+	// layer1 = base - 1×spacing, layer2 = base - 3×spacing (1+2), layer3 = base - 6×spacing (1+2+3)
+	// Cumulative: sum(1..N) × spacing from base entry.
+	cumulativeMultiplier := float64(layerNum * (layerNum + 1) / 2)
+	totalDist := spacing * cumulativeMultiplier
 
-	refPrice := p.entryPrice
-	if len(p.gridOrders) > 0 {
-		last := p.gridOrders[len(p.gridOrders)-1]
-		refPrice = last.entryPrice
-	}
+	refPrice := p.entryPrice // always measure from base entry
 
 	shouldAdd := false
 	var gridEntry, gridTP float64
 
-	if p.side == "LONG" && price <= refPrice-spacing {
+	if p.side == "LONG" && price <= refPrice-totalDist {
 		gridEntry = math.Round(price*100) / 100
-		// Grid layer TP: base position's TP (BB middle), not fixed percentage
 		gridTP = p.takeProfit
 		if gridTP <= gridEntry { gridTP = math.Round((gridEntry+spacing)*100) / 100 }
 		shouldAdd = true
 	}
-	if p.side == "SHORT" && price >= refPrice+spacing {
+	if p.side == "SHORT" && price >= refPrice+totalDist {
 		gridEntry = math.Round(price*100) / 100
 		gridTP = p.takeProfit
 		if gridTP >= gridEntry { gridTP = math.Round((gridEntry-spacing)*100) / 100 }
@@ -175,7 +221,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	gridQty := math.Floor(p.initQty*s.cfg.GridQtyRatio*1000) / 1000
 	if gridQty <= 0 { return }
 	totalQty := p.remainQty + gridQty
-	if totalQty > p.initQty*2 { return }
+	if totalQty > p.initQty*4 { return }
 
 	// Use limit order for grid layers (maker fee, 60% cheaper than market)
 	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, true)

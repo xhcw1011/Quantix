@@ -135,8 +135,8 @@ func (m *MarginMonitor) evaluate(p exchange.PositionMarginInfo) {
 		posDesc += " " + p.PositionSide
 	}
 
-	// margin_ratio=0 means the API didn't return data (common in cross margin mode) — skip.
-	if p.MarginRatio == 0 { return }
+	// margin_ratio <= 0 means the API returned invalid data (common in cross margin mode) — skip.
+	if p.MarginRatio <= 0 { return }
 
 	switch {
 	case p.MarginRatio < m.criticalThreshold:

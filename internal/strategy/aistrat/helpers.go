@@ -308,9 +308,18 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			})
 		}
 
+		// Fix TP for range positions: use syncer's weighted entry + GridMaxTPDist.
+		// Handles cases where grid layers were lost or TP was set relative to base entry.
+		if s.longPos.mode == modeRange {
+			maxTP := s.cfg.GridMaxTPDist; if maxTP <= 0 { maxTP = 8.0 }
+			newTP := math.Round((entry+maxTP)*100) / 100
+			s.longPos.takeProfit = newTP
+		}
+
 		s.loadStagedTPsFromRedis(s.longPos)
 		s.log.Info("AI: recovered LONG from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", lp.Qty),
+			zap.Float64("tp", s.longPos.takeProfit),
 			zap.Float64("stop", sl), zap.Float64("R", s.longPos.R),
 			zap.String("regime", string(s.longPos.entryRegime)),
 			zap.Int("staged_tps", len(s.longPos.stagedTPs)),
@@ -366,9 +375,16 @@ recoverShort:
 			})
 		}
 
+		if s.shortPos.mode == modeRange {
+			maxTP := s.cfg.GridMaxTPDist; if maxTP <= 0 { maxTP = 8.0 }
+			newTP := math.Round((entry-maxTP)*100) / 100
+			s.shortPos.takeProfit = newTP
+		}
+
 		s.loadStagedTPsFromRedis(s.shortPos)
 		s.log.Info("AI: recovered SHORT from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", sp.Qty),
+			zap.Float64("tp", s.shortPos.takeProfit),
 			zap.Float64("stop", sl), zap.Float64("R", s.shortPos.R),
 			zap.String("regime", string(s.shortPos.entryRegime)),
 			zap.Int("staged_tps", len(s.shortPos.stagedTPs)),
@@ -476,35 +492,33 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 	if len(bars) < 20 { return 0, 0 }
 
 	price := bars[len(bars)-1].Close
-	lookback := 10 // breakout window
+	curBar := bars[len(bars)-1]
+	lookback := 10
 
-	// Find highest high of last N bars (excluding current)
 	highestHigh := 0.0
 	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
 		if i < 0 { continue }
 		if bars[i].High > highestHigh { highestHigh = bars[i].High }
 	}
 
-	// Price must break above recent high
 	if price <= highestHigh { return 0, 0 }
 
-	curBar := bars[len(bars)-1]
+	// Bar range filter: skip blow-off bars (range > 2× ATR = overextended move)
+	atr := s.calcATR()
+	barRange := curBar.High - curBar.Low
+	if atr > 0 && barRange > atr*2 { return 0, 0 }
 
-	// RSI: must not be extremely overbought (> 80 = exhaustion)
 	closes := s.getCloses()
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
 	if rsi > 80 { return 0, 0 }
 
 	conf = 0.75
-	// Breakout strength
 	breakoutPct := (price - highestHigh) / highestHigh
 	if breakoutPct > 0.001 { conf += 0.05 }
 	if breakoutPct > 0.003 { conf += 0.05 }
-	// Bullish candle is a bonus, not a requirement
 	if curBar.Close > curBar.Open { conf += 0.05 }
 
-	// Volume confirmation
 	if len(bars) > 20 {
 		avgVol := 0.0
 		for i := len(bars) - 21; i < len(bars)-1; i++ { avgVol += bars[i].Volume }
@@ -514,8 +528,10 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 
 	if conf > 0.95 { conf = 0.95 }
 
-	// Breakout = urgency: enter at market price, don't wait for pullback.
-	entry = math.Round(price*100) / 100
+	// Retest entry: enter at the breakout level (previous high), not current price.
+	// Wait for price to pull back to the breakout point (resistance → support).
+	// If price doesn't pull back, the limit order won't fill — better than chasing.
+	entry = math.Round(highestHigh*100) / 100
 
 	return conf, entry
 }
@@ -525,21 +541,22 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 	if len(bars) < 20 { return 0, 0 }
 
 	price := bars[len(bars)-1].Close
+	curBar := bars[len(bars)-1]
 	lookback := 10
 
-	// Find lowest low of last N bars (excluding current)
 	lowestLow := math.MaxFloat64
 	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
 		if i < 0 { continue }
 		if bars[i].Low < lowestLow { lowestLow = bars[i].Low }
 	}
 
-	// Price must break below recent low
 	if price >= lowestLow { return 0, 0 }
 
-	curBar := bars[len(bars)-1]
+	// Bar range filter: skip blow-off bars
+	atr := s.calcATR()
+	barRange := curBar.High - curBar.Low
+	if atr > 0 && barRange > atr*2 { return 0, 0 }
 
-	// RSI: must not be extremely oversold (< 20 = exhaustion)
 	closes := s.getCloses()
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
@@ -549,7 +566,6 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 	breakoutPct := (lowestLow - price) / lowestLow
 	if breakoutPct > 0.001 { conf += 0.05 }
 	if breakoutPct > 0.003 { conf += 0.05 }
-	// Bearish candle is a bonus, not a requirement
 	if curBar.Close < curBar.Open { conf += 0.05 }
 
 	if len(bars) > 20 {
@@ -561,8 +577,8 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 
 	if conf > 0.95 { conf = 0.95 }
 
-	// Breakout = urgency: enter at market price.
-	entry = math.Round(price*100) / 100
+	// Retest entry: enter at the breakout level (previous low), not current price.
+	entry = math.Round(lowestLow*100) / 100
 
 	return conf, entry
 }
@@ -577,12 +593,15 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 
 	price := closes[len(closes)-1]
 
-	// BB is the SOLE hard condition: price within 0.5% of lower band
 	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
 	if len(bb.Lower) == 0 { return 0, 0 }
 	bbLower := bb.Lower[len(bb.Lower)-1]
 	bbUpper := bb.Upper[len(bb.Upper)-1]
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
+
+	// BB too narrow = no meaningful range to trade. Skip.
+	bbWidth := bbUpper - bbLower
+	if bbWidth < price*s.cfg.BBWidthMin { return 0, 0 }
 
 	if price > bbLower*1.005 { return 0, 0 }
 
@@ -621,6 +640,10 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 	bbLower := bb.Lower[len(bb.Lower)-1]
 	bbUpper := bb.Upper[len(bb.Upper)-1]
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
+
+	// BB too narrow = no meaningful range to trade. Skip.
+	bbWidth := bbUpper - bbLower
+	if bbWidth < price*s.cfg.BBWidthMin { return 0, 0 }
 
 	if price < bbUpper*0.995 { return 0, 0 }
 

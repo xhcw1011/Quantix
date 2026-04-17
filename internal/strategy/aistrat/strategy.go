@@ -144,9 +144,13 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 
 	s.syncToRedis(pos)
 
-	// Staged TP only for trend positions. Grid/range uses local TP check.
 	if pos.mode == modeTrend && !pos.stagedTPPlaced {
 		s.placeStagedExitOrders(ctx, pos)
+	}
+	// Grid/range: place a single reduce-only limit order at TP price (maker fee).
+	// Sits on the order book — fills as maker (0.02%) instead of reactive market (0.05%).
+	if pos.mode == modeRange && pos.takeProfit > 0 && !pos.stagedTPPlaced {
+		s.placeGridTP(ctx, pos)
 	}
 }
 

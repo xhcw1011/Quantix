@@ -235,7 +235,13 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	// (i.e. when Store is nil or recovery fell back to cancel-all for this exchange).
 	// Skip if SkipCleanSlate is set or QUANTIX_SKIP_CLEAN_SLATE env var is set.
 	// Use env var when user has manual positions that should not be touched.
-	skipClean := e.cfg.SkipCleanSlate || os.Getenv("QUANTIX_SKIP_CLEAN_SLATE") == "true"
+	// Skip clean-slate if syncer has positions (normal restart with active grid/trend positions).
+	// Clean-slate cancels ALL exchange orders including grid layer limit orders — destructive.
+	hasPositions := e.posSyncer != nil && (e.posSyncer.HasPosition("LONG") || e.posSyncer.HasPosition("SHORT"))
+	skipClean := e.cfg.SkipCleanSlate || os.Getenv("QUANTIX_SKIP_CLEAN_SLATE") == "true" || hasPositions
+	if hasPositions {
+		e.log.Info("clean-slate: skipped — syncer has active positions, preserving exchange orders")
+	}
 	if !recovered && !skipClean {
 		if oc, ok := e.broker.orderClient.(exchange.OpenOrdersCanceller); ok {
 			cleanCtx, cleanFn := context.WithTimeout(ctx, 10*time.Second)
@@ -276,6 +282,26 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	if e.marginMon != nil {
 		go e.marginMon.Run(ctx)
 	}
+
+	// Independent watchdog: detects engine loop freeze and forces process exit.
+	// Runs in a separate goroutine so it works even when the main select loop is blocked.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				elapsed := time.Since(e.lastBarTime)
+				if elapsed > 10*time.Minute {
+					e.log.Error("WATCHDOG: engine loop appears frozen — no bar activity for 10+ min, forcing exit",
+						zap.Duration("since_last_bar", elapsed))
+					os.Exit(1) // hard exit — systemd/auto-restart will bring it back
+				}
+			}
+		}
+	}()
 
 	// Start User Data Stream for real-time fill + account + position updates.
 	if uds, ok := e.broker.orderClient.(exchange.UserDataSubscriber); ok {
@@ -442,20 +468,8 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			e.persistEquitySnapshot()
 			e.omsInst.PruneTerminal(30 * time.Minute)
 
-			// Stale bar watchdog: if no bar received for 10 minutes, WS is dead.
-			// Force engine to stop — auto-restart will recreate WS connections.
-			if !e.lastBarTime.IsZero() && time.Since(e.lastBarTime) > 10*time.Minute && !e.staleAlerted {
-				e.staleAlerted = true
-				e.log.Error("CRITICAL: no kline data for 10+ minutes — forcing engine restart",
-					zap.Duration("since_last_bar", time.Since(e.lastBarTime)))
-				if e.notifier != nil {
-					e.notifier.SystemAlert("CRITICAL",
-						fmt.Sprintf("⚠️ No kline data for %s — auto-restarting engine",
-							time.Since(e.lastBarTime).Round(time.Second)))
-				}
-				// Return error to trigger engine restart via auto-restart mechanism
-				return fmt.Errorf("stale kline data: no bars for %s", time.Since(e.lastBarTime).Round(time.Second))
-			}
+			// Stale bar watchdog moved to independent goroutine (lines 282-298).
+			// Independent goroutine can detect freezes even when this select loop is blocked.
 
 		case <-dailyTicker.C:
 			e.sendDailySummary()

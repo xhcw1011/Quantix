@@ -164,6 +164,9 @@ func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
 }
 
 // placeMarketOrder executes a market order synchronously and handles fills + protective orders.
+// placeMarketOrder submits a market order and returns the OMS ID.
+// Fill confirmation is handled asynchronously via WS User Data Stream + background poller.
+// Does NOT block the engine loop waiting for fill.
 func (b *Broker) placeMarketOrder(ctx context.Context, ordID string, req strategy.OrderRequest, posSide string) string {
 	qty, err := b.resolveQty(req, posSide)
 	if err != nil {
@@ -204,49 +207,14 @@ func (b *Broker) placeMarketOrder(ctx context.Context, ordID string, req strateg
 		}
 	}
 
-	// If exchange returned qty=0 (async fill, common on Binance Futures),
-	// poll for the actual fill using OrderStatusChecker.
-	if fill.FilledQty == 0 && fill.ExchangeID != "" {
-		if sc, ok := b.orderClient.(exchange.OrderStatusChecker); ok {
-			b.log.Info("market order pending fill, polling...",
-				zap.String("exchange_id", fill.ExchangeID))
-			for i := 0; i < 10; i++ {
-				time.Sleep(500 * time.Millisecond)
-				status, polled, pollErr := sc.GetOrderStatus(ctx, req.Symbol, fill.ExchangeID)
-				if pollErr != nil {
-					continue
-				}
-				if status == "FILLED" || status == "filled" {
-					fill = polled
-					b.log.Info("market order fill confirmed",
-						zap.Float64("qty", fill.FilledQty),
-						zap.Float64("price", fill.AvgPrice))
-					break
-				}
-			}
-		}
-	}
-
+	// If exchange returned fill data immediately, apply it now.
 	if fill.FilledQty > 0 {
-		stratFill := strategy.Fill{
-			ID:           ordID + "-live",
-			Symbol:       req.Symbol,
-			Side:         req.Side,
-			PositionSide: req.PositionSide,
-			Qty:          fill.FilledQty,
-			Price:        fill.AvgPrice,
-			Fee:          fill.Fee,
-			Timestamp:    time.Now(),
-		}
-		b.omsInst.Fill(ordID, stratFill) //nolint:errcheck
-
-		// Auto-place protective orders if this is an opening fill
-		if b.isOpeningFill(req) && (req.StopLoss > 0 || req.TakeProfit > 0) {
-			b.placeProtectiveOrders(ctx, req, "", fill.FilledQty)
-		}
-		// Cancel protective orders if this is a closing fill
-		if b.isClosingFill(req) {
-			b.cancelProtectiveOrders(ctx, req.Symbol, posSide)
+		b.applyMarketFill(ordID, req, posSide, fill)
+	} else if fill.ExchangeID != "" {
+		// No immediate fill (common on Binance Futures) — poll asynchronously.
+		// WS User Data Stream will also deliver the fill, whichever arrives first wins.
+		if sc, ok := b.orderClient.(exchange.OrderStatusChecker); ok {
+			go b.pollMarketOrderFill(b.engineCtx, sc, fill.ExchangeID, ordID, req, posSide)
 		}
 	}
 
@@ -259,6 +227,58 @@ func (b *Broker) placeMarketOrder(ctx context.Context, ordID string, req strateg
 		zap.Float64("avg_price", fill.AvgPrice),
 	)
 	return ordID
+}
+
+// applyMarketFill processes a market order fill (called synchronously or from async poller).
+func (b *Broker) applyMarketFill(ordID string, req strategy.OrderRequest, posSide string, fill exchange.OrderFill) {
+	stratFill := strategy.Fill{
+		ID:           ordID + "-live",
+		Symbol:       req.Symbol,
+		Side:         req.Side,
+		PositionSide: req.PositionSide,
+		Qty:          fill.FilledQty,
+		Price:        fill.AvgPrice,
+		Fee:          fill.Fee,
+		Timestamp:    time.Now(),
+	}
+	b.omsInst.Fill(ordID, stratFill) //nolint:errcheck
+
+	if b.isOpeningFill(req) && (req.StopLoss > 0 || req.TakeProfit > 0) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		b.placeProtectiveOrders(ctx, req, "", fill.FilledQty)
+	}
+	if b.isClosingFill(req) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		b.cancelProtectiveOrders(ctx, req.Symbol, posSide)
+	}
+}
+
+// pollMarketOrderFill polls for market order fill in background goroutine.
+func (b *Broker) pollMarketOrderFill(ctx context.Context, sc exchange.OrderStatusChecker, exchangeID, ordID string, req strategy.OrderRequest, posSide string) {
+	b.log.Info("market order pending fill, polling async...",
+		zap.String("exchange_id", exchangeID))
+	for i := 0; i < 10; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+		status, fill, err := sc.GetOrderStatus(ctx, req.Symbol, exchangeID)
+		if err != nil {
+			continue
+		}
+		if status == "FILLED" || status == "filled" {
+			b.log.Info("market order fill confirmed (async)",
+				zap.Float64("qty", fill.FilledQty),
+				zap.Float64("price", fill.AvgPrice))
+			b.applyMarketFill(ordID, req, posSide, fill)
+			return
+		}
+	}
+	b.log.Warn("market order fill poll exhausted — relying on WS User Data Stream",
+		zap.String("exchange_id", exchangeID))
 }
 
 // placeLimitOrderAsync submits a limit order and returns the OMS ID without waiting for fill.

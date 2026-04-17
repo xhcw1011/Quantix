@@ -32,7 +32,7 @@ LOG_FILE="$LOG_DIR/quantix-$(date +%Y%m%d).log"
 
 echo "=== Engine start: $(date) ===" >> "$LOG_FILE"
 # stdout goes to /dev/null — logger writes directly to log file (no duplicates)
-nohup ./bin/quantix-api -config config/config.yaml > /dev/null 2>&1 &
+nohup ./bin/quantix-api -config config/config.yaml >> ./logs/stdout.log 2>&1 &
 PID=$!
 echo "quantix-api started (pid: $PID)"
 
