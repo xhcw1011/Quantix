@@ -93,70 +93,49 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	if s.cfg.GridMaxLayers <= 0 { return }
 	price := bar.Close
 
-	// 1. Check existing grid orders for TP or fill
-	for i := len(p.gridOrders) - 1; i >= 0; i-- {
-		g := p.gridOrders[i]
-
-		// Pending grid order — check if filled (limit order hit price level)
-		if !g.filled {
-			if (p.side == "LONG" && price <= g.entryPrice) || (p.side == "SHORT" && price >= g.entryPrice) {
-				g.filled = true
-				g.filledAt = time.Now()
-				p.remainQty += g.qty
-				// Recalculate TP based on new weighted average entry
-				totalQty := p.initQty
-				weightedEntry := p.entryPrice * p.initQty
-				for _, gg := range p.gridOrders {
-					if gg.filled {
-						totalQty += gg.qty
-						weightedEntry += gg.entryPrice * gg.qty
-					}
+	// 1. Check pending grid orders for fill.
+	// Filled layers stay in gridOrders until the base staged TP closes the whole position.
+	// Per-layer market TP was removed: it raced with the base limit TP at the same price,
+	// causing partial fills and 0.001 ETH residuals (~$2 tail).
+	for _, g := range p.gridOrders {
+		if g.filled { continue }
+		if (p.side == "LONG" && price <= g.entryPrice) || (p.side == "SHORT" && price >= g.entryPrice) {
+			g.filled = true
+			g.filledAt = time.Now()
+			p.remainQty += g.qty
+			// Recalculate TP based on new weighted average entry
+			totalQty := p.initQty
+			weightedEntry := p.entryPrice * p.initQty
+			for _, gg := range p.gridOrders {
+				if gg.filled {
+					totalQty += gg.qty
+					weightedEntry += gg.entryPrice * gg.qty
 				}
-				avgEntry := weightedEntry / totalQty
-				maxTP := s.cfg.GridMaxTPDist
-				if maxTP <= 0 { maxTP = 8.0 }
-				if p.side == "LONG" {
-					p.takeProfit = math.Round((avgEntry+maxTP)*100) / 100
-				} else {
-					p.takeProfit = math.Round((avgEntry-maxTP)*100) / 100
-				}
-				s.log.Info("AI: grid order filled — TP recalculated",
-					zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
-					zap.Float64("avg_entry", math.Round(avgEntry*100)/100),
-					zap.Float64("new_tp", p.takeProfit),
-					zap.Float64("qty", g.qty), zap.Int("layer", i+1))
-				// Cancel old exchange TP and place new one at updated price + qty
-				if p.stagedTPPlaced {
-					if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
-						posSide := "LONG"
-						if p.side == "SHORT" { posSide = "SHORT" }
-						ep.CancelAllProtective(s.cfg.Symbol, posSide)
-						p.stagedTPPlaced = false
-					}
-				}
-				s.placeGridTP(ctx, p)
-				s.syncToRedis(p)
 			}
-			continue
-		}
-
-		// Filled grid order — check TP
-		gridProfit := false
-		if p.side == "LONG" && price >= g.tp { gridProfit = true }
-		if p.side == "SHORT" && price <= g.tp { gridProfit = true }
-
-		if gridProfit {
-			s.log.Info("AI: grid TP hit",
+			avgEntry := weightedEntry / totalQty
+			maxTP := s.cfg.GridMaxTPDist
+			if maxTP <= 0 { maxTP = 8.0 }
+			if p.side == "LONG" {
+				p.takeProfit = math.Round((avgEntry+maxTP)*100) / 100
+			} else {
+				p.takeProfit = math.Round((avgEntry-maxTP)*100) / 100
+			}
+			s.log.Info("AI: grid order filled — TP recalculated",
 				zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
-				zap.Float64("tp", g.tp), zap.Float64("price", price),
-				zap.Float64("qty", g.qty), zap.Int("layer", i+1))
-			if !s.placeCloseOrder(ctx, p.side, g.qty, true) { // market order for guaranteed fill
-				s.log.Warn("AI: grid close order failed", zap.Int("layer", i+1))
-				continue // skip removal, retry next bar
+				zap.Float64("avg_entry", math.Round(avgEntry*100)/100),
+				zap.Float64("new_tp", p.takeProfit),
+				zap.Float64("qty", g.qty))
+			// Cancel old exchange TP and place new one at updated price + qty
+			if p.stagedTPPlaced {
+				if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
+					posSide := "LONG"
+					if p.side == "SHORT" { posSide = "SHORT" }
+					ep.CancelAllProtective(s.cfg.Symbol, posSide)
+					p.stagedTPPlaced = false
+				}
 			}
-			p.remainQty -= g.qty
-			// Remove this grid order
-			p.gridOrders = append(p.gridOrders[:i], p.gridOrders[i+1:]...)
+			s.placeGridTP(ctx, p)
+			s.syncToRedis(p)
 		}
 	}
 
