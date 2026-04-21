@@ -29,19 +29,10 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		s.barsByInterval[iv] = s.barsByInterval[iv][len(s.barsByInterval[iv])-maxBuf:]
 	}
 
-	// ── Early Redis init (needed before warmup for backtest replay detection) ──
+	// ── Early Redis init ──
 	if s.rdb == nil {
 		if v, ok := ctx.Extra["redis_client"]; ok {
 			if rc, ok := v.(*redis.Client); ok { s.rdb = rc }
-		}
-	}
-	// Pre-load replay signals once — ONLY in explicit backtest mode.
-	// Detected by ctx.Extra["backtest_replay"]=true (set by backtest engine, never by live engine).
-	if s.rdb != nil && len(s.replaySignals) == 0 && !s.warmedUp {
-		if replay, ok := ctx.Extra["backtest_replay"].(bool); ok && replay {
-			if s.hasCachedSignals() {
-				s.loadReplaySignals()
-			}
 		}
 	}
 
@@ -85,7 +76,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 
 	price := bar.Close
-	isStaleBar := len(s.replaySignals) == 0 && time.Since(bar.CloseTime) > 2*time.Minute
+	isStaleBar := time.Since(bar.CloseTime) > 2*time.Minute
 
 	// ── 1m bars: precision stop/timeout management only ──
 	// Skip stale 1m bars to prevent false stop-loss on backfill.
@@ -99,15 +90,11 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	// ── Primary interval bars: full logic below ──
 	s.barCount++
-	// Skip GPT calls on stale backfill bars; wait for first real-time bar.
-	// Exception: backtest replay mode uses cached signals.
+	// Skip processing on stale backfill bars; wait for first real-time bar.
 	if !s.liveReady {
 		if time.Since(bar.CloseTime) < 2*time.Minute {
 			s.liveReady = true
 			s.log.Info("SIG: live ready — first real-time bar")
-		} else if len(s.replaySignals) > 0 {
-			s.liveReady = true
-			s.log.Info("SIG: backtest replay mode — using cached signals", zap.Int("signals", len(s.replaySignals)))
 		} else {
 			return
 		}

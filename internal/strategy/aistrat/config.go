@@ -1,7 +1,6 @@
 package aistrat
 
 import (
-	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -14,8 +13,6 @@ func init() {
 	registry.Register("ai", func(params map[string]any, log *zap.Logger) (strategy.Strategy, error) {
 		cfg := DefaultConfig()
 		if v, ok := params["Symbol"].(string); ok { cfg.Symbol = v }
-		if v, ok := params["APIKey"].(string); ok { cfg.APIKey = v }
-		if v, ok := params["Model"].(string); ok { cfg.Model = v }
 		if v, ok := params["ConfidenceThreshold"]; ok { cfg.ConfidenceThreshold = toFloat(v) }
 		if v, ok := params["LookbackBars"]; ok { cfg.LookbackBars = toInt(v) }
 		if v, ok := params["CallIntervalBars"]; ok { cfg.CallIntervalBars = toInt(v) }
@@ -125,9 +122,6 @@ func init() {
 		if v, ok := params["LimitTimeoutBars"]; ok { cfg.LimitTimeoutBars = toInt(v) }
 		if v, ok := params["MinHoldBars"]; ok { cfg.MinHoldBars = toInt(v) }
 		if v, ok := params["MinTrendBars"]; ok { cfg.MinTrendBars = toInt(v) }
-		if v, ok := params["GPTTemperature"]; ok { cfg.GPTTemperature = toFloat(v) }
-		if v, ok := params["GPTMaxTokens"]; ok { cfg.GPTMaxTokens = toInt(v) }
-		if v, ok := params["GPTTimeout"]; ok { cfg.GPTTimeout = time.Duration(toFloat(v)) * time.Second }
 		if v, ok := params["ForceTrend"].(bool); ok { cfg.ForceTrend = v }
 		if v, ok := params["HedgeOnDrawdown"].(bool); ok { cfg.HedgeOnDrawdown = v }
 		if v, ok := params["HedgeDrawdownPct"]; ok { cfg.HedgeDrawdownPct = toFloat(v) }
@@ -143,9 +137,6 @@ func init() {
 				for _, item := range vv { if s, ok := item.(string); ok { cfg.Intervals = append(cfg.Intervals, s) } }
 			}
 		}
-		if cfg.APIKey == "" {
-			return nil, fmt.Errorf("ai strategy requires APIKey parameter")
-		}
 		return New(cfg, log), nil
 	})
 }
@@ -154,12 +145,10 @@ func init() {
 
 type Config struct {
 	Symbol              string
-	APIKey              string
-	Model               string
 	ConfidenceThreshold float64
 	LookbackBars        int
 	CallIntervalBars      int
-	RangeCallIntervalBars int // GPT call interval (in bars) when regime=RANGE and no positions (default 3)
+	RangeCallIntervalBars int // signal eval interval (in bars) when regime=RANGE and no positions (default 3)
 	EnableShort           bool
 	HedgeMode           bool          // true = long+short simultaneously; false = single strongest direction
 	ForceTrend          bool          // true = disable Range mode, always use Trend mode
@@ -285,15 +274,10 @@ type Config struct {
 
 	// Entry/exit tuning
 	EntryATRK        float64       // entry offset = ATR × EntryATRK (default 0.5; adapts to volatility)
-	MaxEntryDevPct   float64       // max GPT entry deviation from spot (default 0.005)
+	MaxEntryDevPct   float64       // max signal entry deviation from spot (default 0.005)
 	LimitTimeoutBars int           // bars to wait for limit fill (default 2)
 	MinHoldBars      int           // minimum bars before TP/SL checks (default 3)
 	MinTrendBars     int           // minimum bars before trend management (default 5)
-
-	// GPT tuning
-	GPTTemperature float64       // GPT temperature (default 0.3)
-	GPTMaxTokens   int           // GPT max completion tokens (default 400)
-	GPTTimeout     time.Duration // GPT API call timeout (default 15s)
 
 	// Risk limits
 	MaxDailyLossPct float64
@@ -303,7 +287,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		// ─── 基础 ──────────────────────────────────────────────────────
-		Symbol: "ETHUSDT", Model: "gpt-5.4-mini",
+		Symbol: "ETHUSDT",
 		Leverage: 10, EnableShort: true, ForceTrend: false,
 
 		// ─── 核心风险参数（最常调整）─────────────────────────────────
@@ -371,9 +355,6 @@ func DefaultConfig() Config {
 		RSIPeriod: 14, MACDFast: 12, MACDSlow: 26, MACDSignal: 9,
 		EMAFast: 20, EMASlow: 50, BBPeriod: 20, BBStdDev: 2.0,
 		ATRPeriod: 60, VolMAPeriod: 20,
-
-		// ─── GPT 调用 ─────────────────────────────────────────────
-		GPTTemperature: 0.1, GPTMaxTokens: 200, GPTTimeout: 15 * time.Second,
 
 		// ─── Range模式（当前禁用）────────────────────────────────
 		RangeTPPct: 0.012, RangeSLPct: 0.010,

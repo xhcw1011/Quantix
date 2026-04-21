@@ -1,15 +1,13 @@
-// Package aistrat implements an AI-driven trading strategy with regime detection.
+// Package aistrat implements a rule-based trading strategy with regime detection.
 //
 // Regime detection (STRONG_TREND, SLOW_TREND, EXPANSION, RANGE) determines
-// entry thresholds and mode. GPT provides directional signals with confidence.
-// ATR-adaptive TP + R-based trailing stop manage exits.
+// entry thresholds and mode. Pure technical signals (breakout + mean reversion)
+// drive entries. ATR-adaptive TP + R-based trailing stop manage exits.
 package aistrat
 
 import (
 	"fmt"
 	"math"
-	"net/http"
-	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -21,23 +19,15 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// emergencySignal carries the async result of an emergency GPT call.
-type emergencySignal struct {
-	side   string
-	price  float64
-	signal gptSignal
-}
-
 // ─── Strategy ────────────────────────────────────────────────────────────────
 
 type AIStrategy struct {
-	cfg    Config
-	log    *zap.Logger
-	client *http.Client
+	cfg Config
+	log *zap.Logger
 
 	barsByInterval map[string][]exchange.Kline // key = interval ("1m","5m","15m")
 	warmedUp       bool
-	liveReady      bool // true after first real-time primary bar (skip backfill GPT calls)
+	liveReady      bool // true after first real-time primary bar (skip backfill processing)
 	barCount       int  // primary interval bar count
 	lastCallBar    int
 	totalCall      int
@@ -46,7 +36,7 @@ type AIStrategy struct {
 	shortPos *posState
 	syncer    *position.Syncer          // Redis-backed, set at warmup from ctx.Extra
 	stagedEP  strategy.StagedExitPlacer // cached from ctx.Extra on first use
-	rdb       *redis.Client             // for signal caching
+	rdb       *redis.Client             // for position state persistence
 	store     *data.Store               // for trade event logging
 	userID   int
 	engineID string
@@ -72,25 +62,17 @@ type AIStrategy struct {
 	hourlyModeBars    int        // 15m bar count when cache was last updated
 	lastTrendDir    int       // +1 = bullish, -1 = bearish, 0 = neutral (from detectRegime)
 	lastSLReplace   time.Time // throttle ReplaceSLOrder calls (max 1 per 3s)
-	// Signal accumulation: tracks rolling GPT confidence across bars
-	accumLong       float64   // accumulated long signal strength (decays each bar)
-	accumShort      float64   // accumulated short signal strength (decays each bar)
-	replaySignals   []gptSignal // cached signals for backtest replay
-	replayIdx       int         // current index into replaySignals
+	// Signal accumulation: tracks rolling confidence across bars
+	accumLong  float64 // accumulated long signal strength (decays each bar)
+	accumShort float64 // accumulated short signal strength (decays each bar)
 
 	lastCloseFailAt time.Time // throttle close retries after failure (prevent tick-level spam)
 
 	// Post-SL immediate reversal: set by tickManage when SL fires on tick data.
-	// Cleared on next OnBar when the urgent GPT check runs.
-	postSLReeval    bool
-	postSLSide      string    // which side was closed ("LONG"/"SHORT")
-	postSLPrice     float64   // tick price at SL trigger
-	lastEmergencyAt time.Time // throttle emergency GPT calls (max 1 per 30s)
-	tpCooldownBar   int       // bar index when TP filled — block new entries for 3 bars
-
-	// Async emergency GPT: the goroutine sends results here, OnTick consumes.
-	emergencyCh     chan emergencySignal
-	emergencyActive atomic.Bool
+	postSLReeval  bool
+	postSLSide    string  // which side was closed ("LONG"/"SHORT")
+	postSLPrice   float64 // tick price at SL trigger
+	tpCooldownBar int     // bar index when TP filled — block new entries for 3 bars
 }
 
 func New(cfg Config, log *zap.Logger) *AIStrategy {
@@ -100,14 +82,12 @@ func New(cfg Config, log *zap.Logger) *AIStrategy {
 	return &AIStrategy{
 		cfg:            cfg,
 		log:            log,
-		client:         &http.Client{Timeout: cfg.GPTTimeout},
 		barsByInterval: make(map[string][]exchange.Kline),
-		emergencyCh:    make(chan emergencySignal, 1),
 	}
 }
 
 func (s *AIStrategy) Name() string {
-	return fmt.Sprintf("AI(%s/every%dbars)", s.cfg.Model, s.cfg.CallIntervalBars)
+	return fmt.Sprintf("AI(every%dbars)", s.cfg.CallIntervalBars)
 }
 
 func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
@@ -395,87 +375,6 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		s.closePos(ctx, p, pptr, "trailing")
 		s.consecLoss = 0
 		return
-	}
-}
-
-// emergencyReversalCheck launches an async GPT call when unrealized loss exceeds 0.9R.
-// The GPT call runs in a goroutine to avoid blocking tick processing.
-// Results are consumed by processEmergencyResult on the next tick.
-func (s *AIStrategy) emergencyReversalCheck(ctx *strategy.Context, price float64, p *posState) {
-	if s.emergencyActive.Load() { return }
-	s.lastEmergencyAt = time.Now()
-	s.emergencyActive.Store(true)
-
-	side := p.side
-	bars := s.primaryBars()
-	if len(bars) == 0 { s.emergencyActive.Store(false); return }
-
-	// Build context in the main goroutine (reads strategy state safely).
-	lastBar := bars[len(bars)-1]
-	syntheticBar := lastBar
-	syntheticBar.Close = price
-	mktCtx := s.buildContext(ctx, syntheticBar)
-
-	s.log.Info("TICK: launching async emergency GPT check",
-		zap.String("side", side), zap.Float64("price", price))
-
-	go func() {
-		defer s.emergencyActive.Store(false)
-		signal, err := s.callGPT(mktCtx)
-		if err != nil {
-			s.log.Warn("emergency GPT call failed", zap.Error(err))
-			return
-		}
-		select {
-		case s.emergencyCh <- emergencySignal{side: side, price: price, signal: signal}:
-		default:
-		}
-	}()
-}
-
-// processEmergencyResult consumes async emergency GPT results and acts on them.
-// Called from OnTick in the main goroutine — safe to modify strategy state.
-func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice float64) {
-	select {
-	case result := <-s.emergencyCh:
-		var p *posState
-		var pptr **posState
-		if result.side == "LONG" && s.longPos != nil && s.longPos.filled {
-			p = s.longPos; pptr = &s.longPos
-		} else if result.side == "SHORT" && s.shortPos != nil && s.shortPos.filled {
-			p = s.shortPos; pptr = &s.shortPos
-		}
-		if p == nil {
-			s.log.Info("TICK: emergency result arrived but position already closed")
-			return
-		}
-
-		signal := result.signal
-		reverseConf := 0.0
-		if p.side == "LONG" && signal.Short != nil { reverseConf = signal.Short.Confidence }
-		if p.side == "SHORT" && signal.Long != nil { reverseConf = signal.Long.Confidence }
-		if signal.Action != "" {
-			if p.side == "LONG" && signal.Action == "SELL" { reverseConf = signal.Confidence }
-			if p.side == "SHORT" && signal.Action == "BUY" { reverseConf = signal.Confidence }
-		}
-
-		s.log.Info("TICK: emergency result received",
-			zap.String("side", p.side), zap.Float64("price", currentPrice),
-			zap.Float64("reverse_conf", reverseConf))
-
-		// Emergency threshold = ReversalConf (same bar, not easier).
-		// Previously was ReversalConf-0.07 which made it too easy to trigger (0.53).
-		emergencyThreshold := s.cfg.ReversalConf
-		if emergencyThreshold < 0.65 { emergencyThreshold = 0.65 }
-
-		if reverseConf >= emergencyThreshold {
-			closedSide := p.side
-			s.log.Warn("TICK: emergency reversal → close "+closedSide,
-				zap.Float64("conf", reverseConf), zap.Float64("price", currentPrice))
-			s.closePos(ctx, p, pptr, "emergency_reversal")
-			// No flip — let next bar's normal flow decide new direction.
-		}
-	default:
 	}
 }
 
