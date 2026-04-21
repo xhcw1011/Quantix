@@ -37,6 +37,7 @@ func init() {
 		if v, ok := params["RangeSLPct"]; ok { cfg.RangeSLPct = toFloat(v) }
 		if v, ok := params["GridMaxLayers"]; ok { cfg.GridMaxLayers = toInt(v) }
 		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
+		if v, ok := params["GridMinTPDist"]; ok { cfg.GridMinTPDist = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
 		if v, ok := params["GridQtyRatio"]; ok { cfg.GridQtyRatio = toFloat(v) }
@@ -210,6 +211,7 @@ type Config struct {
 	GridTPPct      float64 // grid order take-profit as fallback (default 0.004 = 0.4%)
 	GridQtyRatio   float64 // grid qty as ratio of base qty (default 0.5)
 	GridMaxTPDist  float64 // max TP distance in $ — caps TP when BB is wide (default 8.0)
+	GridMinTPDist  float64 // min TP distance in $ — floor when BB is narrow (default 0 = auto 60% of max)
 
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:

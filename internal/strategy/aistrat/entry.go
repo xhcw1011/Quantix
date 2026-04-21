@@ -90,9 +90,15 @@ func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, 
 	// Grid trades rely on the range holding — SL at range edge, not ATR.
 	buffer := atr * 0.5
 	minSL := entryPrice * s.cfg.MinSLDistPct
-	// TP = min(BB middle, entry ± GridMaxTPDist) — caps profit target when BB is wide.
+	// TP = clamp(BB middle, minTP, maxTP) from entry.
+	// maxTP: caps profit target when BB is wide (default $8).
+	// minTP: floor profit target when BB is narrow — avoids $1-3 TPs that
+	//   barely cover fees. Default = 60% of maxTP so the TP is always
+	//   "meaningful" (around $5 for ETH at current price).
 	maxTP := s.cfg.GridMaxTPDist
 	if maxTP <= 0 { maxTP = 8.0 }
+	minTP := s.cfg.GridMinTPDist
+	if minTP <= 0 { minTP = maxTP * 0.6 }
 
 	var stopLoss, takeProfit float64
 	if side == "LONG" {
@@ -108,6 +114,10 @@ func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, 
 		if takeProfit-entryPrice > maxTP {
 			takeProfit = math.Round((entryPrice+maxTP)*100) / 100
 		}
+		// Floor TP distance
+		if takeProfit-entryPrice < minTP {
+			takeProfit = math.Round((entryPrice+minTP)*100) / 100
+		}
 	} else {
 		sl := s.lastBBUpper + buffer
 		if sl-entryPrice < minSL { sl = entryPrice + minSL }
@@ -119,6 +129,10 @@ func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, 
 		}
 		if entryPrice-takeProfit > maxTP {
 			takeProfit = math.Round((entryPrice-maxTP)*100) / 100
+		}
+		// Floor TP distance
+		if entryPrice-takeProfit < minTP {
+			takeProfit = math.Round((entryPrice-minTP)*100) / 100
 		}
 	}
 
