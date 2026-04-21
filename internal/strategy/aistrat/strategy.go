@@ -138,7 +138,7 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 		pos.trailing = pos.stopLoss
 		pos.R = math.Abs(fill.Price - pos.stopLoss)
 	}
-	s.log.Info("AI: fill confirmed",
+	s.log.Info("SIG: fill confirmed",
 		zap.String("side", pos.side), zap.Float64("fill", fill.Price),
 		zap.Float64("stop", pos.stopLoss), zap.Float64("tp", pos.takeProfit))
 
@@ -203,7 +203,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		if p.side == "SHORT" { posSide = "SHORT" }
 		s.stagedEP.CancelExchangeSL(s.cfg.Symbol, posSide)
 		p.safetyNetSL = false
-		s.log.Info("AI: safety-net SL cancelled — local trailing active",
+		s.log.Info("SIG: safety-net SL cancelled — local trailing active",
 			zap.String("side", p.side), zap.Float64("trailing", p.trailing))
 	}
 
@@ -271,7 +271,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 				// Tier upgrade: allow trailing to widen (reset ratchet for this transition).
 				if tier > p.trailTier && p.trailTier > 0 {
 					p.trailing = newTrail
-					s.log.Info("AI: trail tier upgrade — widening trailing for trend ride",
+					s.log.Info("SIG: trail tier upgrade — widening trailing for trend ride",
 						zap.String("side", p.side), zap.Float64("trailing", newTrail), zap.Float64("pnlR", pnlR))
 				}
 				p.trailTier = tier
@@ -505,7 +505,7 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 	if pos.side == "LONG" { pnl = (fill.Price - pos.entryPrice) * fill.Qty }
 	if pos.side == "SHORT" { pnl = (pos.entryPrice - fill.Price) * fill.Qty }
 
-	s.log.Info("AI: staged TP fill",
+	s.log.Info("SIG: staged TP fill",
 		zap.String("side", pos.side),
 		zap.Float64("fill_price", fill.Price),
 		zap.Float64("fill_qty", fill.Qty),
@@ -518,7 +518,7 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 
 	// Position fully closed (SL fired or all TPs filled) — cancel remaining orders on exchange.
 	if pos.remainQty <= 0 {
-		s.log.Info("AI: position fully closed by exchange order",
+		s.log.Info("SIG: position fully closed by exchange order",
 			zap.String("side", pos.side))
 		if s.stagedEP != nil {
 			posSide := "LONG"
@@ -539,7 +539,7 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 		if !pos.tp1RHit {
 			pos.tp1RHit = true
 			pos.trailing = pos.entryPrice
-			s.log.Info("AI: TP fill → trailing to breakeven",
+			s.log.Info("SIG: TP fill → trailing to breakeven",
 				zap.String("side", pos.side), zap.Float64("entry", pos.entryPrice))
 		}
 		// No exchange SL — local trailing handles the breakeven exit.
@@ -562,7 +562,7 @@ func (s *AIStrategy) markTPFilled(pos *posState, fillPrice, fillQty float64) {
 	}
 	if bestIdx >= 0 && bestDist < pos.entryPrice*0.005 { // within 0.5% of expected price
 		pos.stagedTPs[bestIdx].Status = "filled"
-		s.log.Info("AI: staged TP level filled",
+		s.log.Info("SIG: staged TP level filled",
 			zap.Int("level", pos.stagedTPs[bestIdx].Level),
 			zap.Float64("expected_price", pos.stagedTPs[bestIdx].Price),
 			zap.Float64("fill_price", fillPrice))

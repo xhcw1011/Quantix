@@ -196,7 +196,7 @@ func (s *AIStrategy) cacheSignal(bar exchange.Kline, sig gptSignal) {
 	if err != nil { return }
 	key := fmt.Sprintf("quantix:signals:%s:%s", s.cfg.Symbol, s.cfg.PrimaryInterval)
 	if err := s.rdb.RPush(context.Background(), key, string(data)).Err(); err != nil {
-		s.log.Warn("AI: signal cache failed", zap.Error(err))
+		s.log.Warn("SIG: signal cache failed", zap.Error(err))
 	}
 	// Keep only last 2000 signals (~2 weeks at 144/day) to prevent unbounded growth.
 	s.rdb.LTrim(context.Background(), key, -2000, -1)
@@ -216,7 +216,7 @@ func (s *AIStrategy) loadReplaySignals() {
 	key := fmt.Sprintf("quantix:signals:%s:%s", s.cfg.Symbol, s.cfg.PrimaryInterval)
 	items, err := s.rdb.LRange(context.Background(), key, 0, -1).Result()
 	if err != nil {
-		s.log.Warn("AI: failed to load replay signals", zap.Error(err))
+		s.log.Warn("SIG: failed to load replay signals", zap.Error(err))
 		return
 	}
 	for _, item := range items {
@@ -235,7 +235,7 @@ func (s *AIStrategy) loadReplaySignals() {
 		}
 		s.replaySignals = append(s.replaySignals, sig)
 	}
-	s.log.Info("AI: loaded replay signals", zap.Int("count", len(s.replaySignals)))
+	s.log.Info("SIG: loaded replay signals", zap.Int("count", len(s.replaySignals)))
 }
 
 // nextReplaySignal returns the next cached signal for backtest replay.

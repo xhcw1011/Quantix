@@ -22,10 +22,10 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	// Limit order pending (check on primary bars only)
 	if !p.filled {
 		if isPrimary && s.barCount-p.limitBar > s.cfg.LimitTimeoutBars {
-			s.log.Warn("AI: limit timeout — cancelling", zap.String("side", p.side), zap.String("id", p.orderID))
+			s.log.Warn("SIG: limit timeout — cancelling", zap.String("side", p.side), zap.String("id", p.orderID))
 			if p.orderID != "" { ctx.CancelOrder(p.orderID) }
 			if p.filled {
-				s.log.Info("AI: limit order partially/fully filled before cancel, keeping position")
+				s.log.Info("SIG: limit order partially/fully filled before cancel, keeping position")
 				return
 			}
 			s.syncRemove(p.side)
@@ -76,7 +76,7 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 		if p.side == "LONG" && price >= p.takeProfit { tpHit = true }
 		if p.side == "SHORT" && price <= p.takeProfit { tpHit = true }
 		if tpHit {
-			s.log.Info("AI: GRID TP hit",
+			s.log.Info("SIG: GRID TP hit",
 				zap.String("side", p.side), zap.Float64("entry", p.entryPrice),
 				zap.Float64("tp", p.takeProfit), zap.Float64("price", price))
 			s.closePos(ctx, p, pptr, "grid_tp")
@@ -120,7 +120,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 			} else {
 				p.takeProfit = math.Round((avgEntry-maxTP)*100) / 100
 			}
-			s.log.Info("AI: grid order filled — TP recalculated",
+			s.log.Info("SIG: grid order filled — TP recalculated",
 				zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
 				zap.Float64("avg_entry", math.Round(avgEntry*100)/100),
 				zap.Float64("new_tp", p.takeProfit),
@@ -213,7 +213,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	p.gridOrders = append(p.gridOrders, g)
 	// Don't add to remainQty yet — wait for fill confirmation in the price check loop above.
 
-	s.log.Info("AI: grid order placed (limit)",
+	s.log.Info("SIG: grid order placed (limit)",
 		zap.String("side", p.side), zap.Float64("entry", gridEntry),
 		zap.Float64("tp", gridTP), zap.Float64("qty", gridQty),
 		zap.Int("layer", len(p.gridOrders)))
@@ -331,14 +331,14 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 	if p.remainQty < p.initQty && p.remainQty > 0 { // only after some TPs filled
 		bounceThreshold := s.cfg.BounceTPR * p.R
 		if p.side == "LONG" && p.peakPrice-price >= bounceThreshold && pnlR > 0 {
-			s.log.Info("AI: bounce TP — price retreated from peak",
+			s.log.Info("SIG: bounce TP — price retreated from peak",
 				zap.Float64("peak", p.peakPrice), zap.Float64("price", price), zap.Float64("pnlR", pnlR))
 			s.closePos(ctx, p, pptr, "bounce_tp")
 			s.consecLoss = 0
 			return
 		}
 		if p.side == "SHORT" && price-p.peakPrice >= bounceThreshold && pnlR > 0 {
-			s.log.Info("AI: bounce TP — price bounced from low",
+			s.log.Info("SIG: bounce TP — price bounced from low",
 				zap.Float64("peak", p.peakPrice), zap.Float64("price", price), zap.Float64("pnlR", pnlR))
 			s.closePos(ctx, p, pptr, "bounce_tp")
 			s.consecLoss = 0
@@ -381,7 +381,7 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 	}
 
 	if reverseConf >= s.cfg.ReversalConf {
-		s.log.Info("AI: tech reversal → close "+p.side,
+		s.log.Info("SIG: tech reversal → close "+p.side,
 			zap.Float64("conf", reverseConf))
 		s.closePos(ctx, p, pptr, "tech_reversal")
 		s.lastCallBar = s.barCount - s.cfg.CallIntervalBars

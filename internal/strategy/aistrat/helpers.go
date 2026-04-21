@@ -261,7 +261,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 	// Manual positions (opened via exchange UI) have no strategy state → skip them.
 	if lp := s.syncer.GetLong(); lp != nil && lp.Qty > 0 {
 		if lp.R == 0 && lp.Mode == "" {
-			s.log.Info("AI: skipping LONG recovery — manual position (no strategy state)",
+			s.log.Info("SIG: skipping LONG recovery — manual position (no strategy state)",
 				zap.Float64("entry", lp.EntryPrice), zap.Float64("qty", lp.Qty))
 			goto recoverShort
 		}
@@ -317,7 +317,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 		}
 
 		s.loadStagedTPsFromRedis(s.longPos)
-		s.log.Info("AI: recovered LONG from syncer",
+		s.log.Info("SIG: recovered LONG from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", lp.Qty),
 			zap.Float64("tp", s.longPos.takeProfit),
 			zap.Float64("stop", sl), zap.Float64("R", s.longPos.R),
@@ -330,7 +330,7 @@ recoverShort:
 	// Recover SHORT — only if bot opened it.
 	if sp := s.syncer.GetShort(); sp != nil && sp.Qty > 0 {
 		if sp.R == 0 && sp.Mode == "" {
-			s.log.Info("AI: skipping SHORT recovery — manual position (no strategy state)",
+			s.log.Info("SIG: skipping SHORT recovery — manual position (no strategy state)",
 				zap.Float64("entry", sp.EntryPrice), zap.Float64("qty", sp.Qty))
 			return
 		}
@@ -382,7 +382,7 @@ recoverShort:
 		}
 
 		s.loadStagedTPsFromRedis(s.shortPos)
-		s.log.Info("AI: recovered SHORT from syncer",
+		s.log.Info("SIG: recovered SHORT from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", sp.Qty),
 			zap.Float64("tp", s.shortPos.takeProfit),
 			zap.Float64("stop", sl), zap.Float64("R", s.shortPos.R),
@@ -489,7 +489,10 @@ func (s *AIStrategy) techSellSignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 	bars := s.primaryBars()
-	if len(bars) < 20 { return 0, 0 }
+	if len(bars) < 20 {
+		s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "insufficient_bars"), zap.Int("bars", len(bars)))
+		return 0, 0
+	}
 
 	price := bars[len(bars)-1].Close
 	curBar := bars[len(bars)-1]
@@ -501,17 +504,29 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 		if bars[i].High > highestHigh { highestHigh = bars[i].High }
 	}
 
-	if price <= highestHigh { return 0, 0 }
+	if price <= highestHigh {
+		s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "no_breakout_long"),
+			zap.Float64("price", price), zap.Float64("hi10", highestHigh),
+			zap.Float64("gap_pct", (price-highestHigh)/highestHigh*100))
+		return 0, 0
+	}
 
 	// Bar range filter: skip blow-off bars (range > 2× ATR = overextended move)
 	atr := s.calcATR()
 	barRange := curBar.High - curBar.Low
-	if atr > 0 && barRange > atr*2 { return 0, 0 }
+	if atr > 0 && barRange > atr*2 {
+		s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "bar_range_blowoff"),
+			zap.Float64("bar_range_atr", barRange/atr))
+		return 0, 0
+	}
 
 	closes := s.getCloses()
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
-	if rsi > 80 { return 0, 0 }
+	if rsi > 80 {
+		s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "rsi_overbought"), zap.Float64("rsi", rsi))
+		return 0, 0
+	}
 
 	conf = 0.75
 	breakoutPct := (price - highestHigh) / highestHigh
@@ -538,7 +553,10 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 	bars := s.primaryBars()
-	if len(bars) < 20 { return 0, 0 }
+	if len(bars) < 20 {
+		s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "insufficient_bars"), zap.Int("bars", len(bars)))
+		return 0, 0
+	}
 
 	price := bars[len(bars)-1].Close
 	curBar := bars[len(bars)-1]
@@ -550,17 +568,29 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 		if bars[i].Low < lowestLow { lowestLow = bars[i].Low }
 	}
 
-	if price >= lowestLow { return 0, 0 }
+	if price >= lowestLow {
+		s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "no_breakout_short"),
+			zap.Float64("price", price), zap.Float64("lo10", lowestLow),
+			zap.Float64("gap_pct", (lowestLow-price)/lowestLow*100))
+		return 0, 0
+	}
 
 	// Bar range filter: skip blow-off bars
 	atr := s.calcATR()
 	barRange := curBar.High - curBar.Low
-	if atr > 0 && barRange > atr*2 { return 0, 0 }
+	if atr > 0 && barRange > atr*2 {
+		s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "bar_range_blowoff"),
+			zap.Float64("bar_range_atr", barRange/atr))
+		return 0, 0
+	}
 
 	closes := s.getCloses()
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
-	if rsi < 20 { return 0, 0 }
+	if rsi < 20 {
+		s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "rsi_oversold"), zap.Float64("rsi", rsi))
+		return 0, 0
+	}
 
 	conf = 0.75
 	breakoutPct := (lowestLow - price) / lowestLow
@@ -589,21 +619,37 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 	closes := s.getCloses()
-	if len(closes) < 30 { return 0, 0 }
+	if len(closes) < 30 {
+		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "insufficient_bars"), zap.Int("closes", len(closes)))
+		return 0, 0
+	}
 
 	price := closes[len(closes)-1]
 
 	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-	if len(bb.Lower) == 0 { return 0, 0 }
+	if len(bb.Lower) == 0 {
+		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "bb_unavailable"))
+		return 0, 0
+	}
 	bbLower := bb.Lower[len(bb.Lower)-1]
 	bbUpper := bb.Upper[len(bb.Upper)-1]
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
 
 	// BB too narrow = no meaningful range to trade. Skip.
 	bbWidth := bbUpper - bbLower
-	if bbWidth < price*s.cfg.BBWidthMin { return 0, 0 }
+	if bbWidth < price*s.cfg.BBWidthMin {
+		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "bb_narrow"),
+			zap.Float64("bb_width_pct", bbWidth/price*100),
+			zap.Float64("min_pct", s.cfg.BBWidthMin*100))
+		return 0, 0
+	}
 
-	if price > bbLower*1.005 { return 0, 0 }
+	if price > bbLower*1.005 {
+		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "not_at_bb_lower"),
+			zap.Float64("price", price), zap.Float64("bb_lower", bbLower),
+			zap.Float64("px_above_lower_pct", (price-bbLower)/bbLower*100))
+		return 0, 0
+	}
 
 	// Base confidence: 0.76 ensures entry when price touches BB band (RangeEntryConf=0.75).
 	// Bonuses from RSI and BB penetration push conf higher for stronger signals.
@@ -631,21 +677,37 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 	closes := s.getCloses()
-	if len(closes) < 30 { return 0, 0 }
+	if len(closes) < 30 {
+		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "insufficient_bars"), zap.Int("closes", len(closes)))
+		return 0, 0
+	}
 
 	price := closes[len(closes)-1]
 
 	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-	if len(bb.Upper) == 0 { return 0, 0 }
+	if len(bb.Upper) == 0 {
+		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "bb_unavailable"))
+		return 0, 0
+	}
 	bbLower := bb.Lower[len(bb.Lower)-1]
 	bbUpper := bb.Upper[len(bb.Upper)-1]
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
 
 	// BB too narrow = no meaningful range to trade. Skip.
 	bbWidth := bbUpper - bbLower
-	if bbWidth < price*s.cfg.BBWidthMin { return 0, 0 }
+	if bbWidth < price*s.cfg.BBWidthMin {
+		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "bb_narrow"),
+			zap.Float64("bb_width_pct", bbWidth/price*100),
+			zap.Float64("min_pct", s.cfg.BBWidthMin*100))
+		return 0, 0
+	}
 
-	if price < bbUpper*0.995 { return 0, 0 }
+	if price < bbUpper*0.995 {
+		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "not_at_bb_upper"),
+			zap.Float64("price", price), zap.Float64("bb_upper", bbUpper),
+			zap.Float64("px_below_upper_pct", (bbUpper-price)/bbUpper*100))
+		return 0, 0
+	}
 
 	conf = 0.76
 	if price > bbUpper { conf += 0.05 }
@@ -671,6 +733,58 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 
 func r2(v float64) float64 { return math.Round(v*100) / 100 }
 func r3(v float64) float64 { return math.Round(v*1000) / 1000 }
+
+// buildDiagFields returns regime-appropriate diagnostic fields for the per-bar
+// summary log. Values are recomputed each call — do not rely on cached
+// s.lastBB* because those are only written when the reversion signal ran past
+// the BB check (exactly the path we want to diagnose when it doesn't fire).
+func (s *AIStrategy) buildDiagFields(regime Regime) []zap.Field {
+	closes := s.getCloses()
+	if len(closes) < 30 { return nil }
+	price := closes[len(closes)-1]
+	rsi := r2(indicator.Last(indicator.RSI(closes, s.cfg.RSIPeriod)))
+
+	if regime == RegimeRange {
+		bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
+		if len(bb.Lower) == 0 { return []zap.Field{zap.Float64("rsi", rsi)} }
+		lo := bb.Lower[len(bb.Lower)-1]
+		mid := bb.Middle[len(bb.Middle)-1]
+		up := bb.Upper[len(bb.Upper)-1]
+		return []zap.Field{
+			zap.Float64("bb_lower", r2(lo)),
+			zap.Float64("bb_middle", r2(mid)),
+			zap.Float64("bb_upper", r2(up)),
+			zap.Float64("bb_width_pct", r3((up-lo)/price*100)),
+			zap.Float64("px_above_lo_pct", r3((price-lo)/lo*100)),
+			zap.Float64("px_below_up_pct", r3((up-price)/up*100)),
+			zap.Float64("rsi", rsi),
+		}
+	}
+
+	// Trend path: 10-bar high/low + breakout gap + bar range / ATR
+	bars := s.primaryBars()
+	if len(bars) < 12 { return []zap.Field{zap.Float64("rsi", rsi)} }
+	lookback := 10
+	hi10 := 0.0
+	lo10 := math.MaxFloat64
+	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
+		if i < 0 { continue }
+		if bars[i].High > hi10 { hi10 = bars[i].High }
+		if bars[i].Low < lo10 { lo10 = bars[i].Low }
+	}
+	atr := s.calcATR()
+	cur := bars[len(bars)-1]
+	barRangeATR := 0.0
+	if atr > 0 { barRangeATR = r3((cur.High-cur.Low)/atr) }
+	return []zap.Field{
+		zap.Float64("hi10", r2(hi10)),
+		zap.Float64("lo10", r2(lo10)),
+		zap.Float64("brkout_long_pct", r3((price-hi10)/hi10*100)),
+		zap.Float64("brkout_short_pct", r3((lo10-price)/lo10*100)),
+		zap.Float64("bar_range_atr", barRangeATR),
+		zap.Float64("rsi", rsi),
+	}
+}
 
 // logEvent writes a trade event to DB for persistent analysis.
 func (s *AIStrategy) logEvent(eventType, side, reason string, price, entryPrice, qty, confidence, pnl float64, details string) {
