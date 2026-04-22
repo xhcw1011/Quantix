@@ -209,6 +209,28 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	s.lastRegime = regime
 	s.lastHourlyDir = s.hourlyTrendDir()
 
+	// ── Cancel pending TREND limit orders if 1h flipped against them before fill ──
+	// Limit orders can take minutes to fill. If the 1h trend reverses during that
+	// window, the order would fill into a now-disadvantaged trade. The signal-time
+	// 1h filter (lastHourlyDir check below) only blocks NEW signals — existing
+	// pending orders need this explicit guard.
+	// Skip in HedgeMode (user opted into both directions) and for GRID orders
+	// (grid intentionally allows both sides).
+	if !s.cfg.HedgeMode {
+		if s.longPos != nil && !s.longPos.filled && s.longPos.mode == modeTrend && s.lastHourlyDir == -1 {
+			s.log.Info("SIG: cancelling pending LONG — 1h flipped bearish before fill",
+				zap.String("id", s.longPos.orderID))
+			if s.longPos.orderID != "" { ctx.CancelOrder(s.longPos.orderID) }
+			s.longPos = nil
+		}
+		if s.shortPos != nil && !s.shortPos.filled && s.shortPos.mode == modeTrend && s.lastHourlyDir == 1 {
+			s.log.Info("SIG: cancelling pending SHORT — 1h flipped bullish before fill",
+				zap.String("id", s.shortPos.orderID))
+			if s.shortPos.orderID != "" { ctx.CancelOrder(s.shortPos.orderID) }
+			s.shortPos = nil
+		}
+	}
+
 	// Grid positions: NO regime-based exit. Grid trades close via TP only.
 	// Risk is managed by small qty per layer + max 2 layers cap.
 	// Regime exit was actively harmful: it triggered on small moves ($5) that are
