@@ -107,7 +107,7 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 
 	s.log.Info("SIG: TP calculation",
 		zap.Float64("R", R), zap.Float64("entryATR", pos.entryATR),
-		zap.Float64("gptTP", pos.gptTPPrice),
+		zap.Float64("alt_tp_hint", pos.gptTPPrice),
 		zap.Any("levels", levels), zap.Any("tp_prices", tps))
 
 	ok = ep.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, pos.stopLoss, qty, tps)
