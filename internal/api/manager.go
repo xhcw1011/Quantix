@@ -482,6 +482,16 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 			engineCancel()
 			return "", fmt.Errorf("leverage must be between 0 and 125 (got %d)", req.Leverage)
 		}
+		// Futures requires explicit leverage. Without it, the engine's internal cash
+		// accounting falls back to leverage=1 (spot semantics), making cash field
+		// log values wildly wrong (full notional locked instead of 1/leverage margin).
+		// Real exchange-side margin is unaffected, but monitoring/log values become
+		// untrustworthy. spot already rejected above (lines 307-317).
+		isFutures := cred.MarketType != "spot" && cred.MarketType != "SPOT"
+		if isFutures && req.Leverage <= 0 {
+			engineCancel()
+			return "", fmt.Errorf("leverage is required for %s/%s (got %d); futures engines need explicit leverage to compute correct margin", cred.Exchange, cred.MarketType, req.Leverage)
+		}
 		if req.Leverage > 0 {
 			leverageCtx, leverageCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			lvErr := orderClient.SetLeverage(leverageCtx, req.Symbol, req.Leverage)
