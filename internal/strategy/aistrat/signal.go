@@ -286,12 +286,15 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	longConf, longEntry := s.techBuySignal()
 	shortConf, shortEntry := s.techSellSignal()
 
-	// Set reason string based on signal type
+	// Set reason string based on signal type. Trend regimes have two trigger
+	// paths: regime+dir shortcut (3bdd57a) OR 10-bar break fallback. The
+	// detailed path is in the corresponding sig_accept log line.
 	var longReason, shortReason string
-	if regime == RegimeStrongTrend || regime == RegimeExpansion {
-		longReason = "breakout: price > 10-bar high"
-		shortReason = "breakout: price < 10-bar low"
-	} else {
+	switch regime {
+	case RegimeStrongTrend, RegimeExpansion, RegimeSlowTrend:
+		longReason = "trend: regime+dir match OR price > 10-bar high"
+		shortReason = "trend: regime+dir match OR price < 10-bar low"
+	default: // RANGE
 		longReason = "reversion: RSI oversold + BB lower"
 		shortReason = "reversion: RSI overbought + BB upper"
 	}
