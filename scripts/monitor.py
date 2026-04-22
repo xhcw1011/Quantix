@@ -59,7 +59,22 @@ def parse_json_fields(line: str) -> dict:
 
 
 def get_today_log() -> Path:
-    """Get today's log file path."""
+    """Get the most recent quantix log file (by mtime).
+
+    start-quantix.sh names the log by engine start date, not calendar date.
+    An engine running past midnight keeps writing to the file named with its
+    start date. Looking up today's date would miss that log entirely.
+    Sort by mtime to always pick the one being actively written.
+    """
+    candidates = sorted(
+        LOG_DIR.glob("quantix-*.log"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        return candidates[0]
+    # Fallback: today's path (same as old behavior) so caller's exists() check
+    # produces a meaningful "No log file found" message.
     today = datetime.now().strftime("%Y%m%d")
     return LOG_DIR / f"quantix-{today}.log"
 
@@ -262,12 +277,16 @@ def detect_anomalies(events):
                     "detail": f"Equity dropped {dd_pct:.1f}% ({first_eq:.2f} → {last_eq:.2f})",
                 })
 
-    # 3. No signals at all (engine might be dead)
-    if len(events["signals"]) == 0 and len(events["regime_skips"]) == 0:
+    # 3. No activity check: engine emits "Live Trading Status" every minute.
+    # Only flag as dead if even status logs are absent (signals can be silent
+    # for legit reasons: no trend, warmup, halt, etc. — but status is always on).
+    if (len(events["signals"]) == 0 and
+        len(events["regime_skips"]) == 0 and
+        len(events["status"]) == 0):
         anomalies.append({
             "severity": "CRITICAL",
             "type": "no_activity",
-            "detail": "No signals and no regime skips — engine may be dead",
+            "detail": "No signals, regime skips, or status logs — engine is dead",
         })
 
     # 4. No trades for extended period while regime is not RANGE
