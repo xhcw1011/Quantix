@@ -66,7 +66,7 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 
 
 // manageRange handles Range/grid positions: fixed TP at BB middle, grid layers on drawdown.
-// No SL — grid rides the range. Risk managed by small qty per layer + max layers cap + regime exit.
+// No SL — grid rides the range. Risk managed by small qty per layer + max layers cap + regime-flip exit.
 func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
 	price := bar.Close
 
@@ -82,6 +82,36 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 			s.closePos(ctx, p, pptr, "grid_tp", price)
 			s.consecLoss = 0
 			return
+		}
+	}
+
+	// ── Regime-flip exit (primary bars only) ──
+	// GRID assumes mean-reversion. If regime turns non-RANGE AND trend_dir
+	// opposes the position for 3 consecutive primary bars, the range
+	// assumption has failed — force-exit rather than let grid layers stack
+	// into a one-way market. Reverse entry will happen naturally on the
+	// same bar via the breakoutBuy/Sell trend regime shortcut.
+	iv := bar.Interval
+	if iv == "" { iv = s.cfg.PrimaryInterval }
+	if iv == s.cfg.PrimaryInterval {
+		opposing := s.lastRegime != RegimeRange && (
+			(p.side == "LONG" && s.lastTrendDir == -1) ||
+			(p.side == "SHORT" && s.lastTrendDir == 1))
+		if opposing {
+			p.consecTrendOpp++
+			if p.consecTrendOpp >= 3 {
+				s.log.Warn("SIG: GRID regime exit — regime opposes position 3 bars",
+					zap.String("side", p.side),
+					zap.String("regime", string(s.lastRegime)),
+					zap.Int("trend_dir", s.lastTrendDir),
+					zap.Float64("entry", p.entryPrice),
+					zap.Float64("price", price),
+					zap.Int("layers", len(p.gridOrders)))
+				s.closePos(ctx, p, pptr, "regime_flip_against", price)
+				return
+			}
+		} else {
+			p.consecTrendOpp = 0
 		}
 	}
 

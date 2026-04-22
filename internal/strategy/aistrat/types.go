@@ -71,6 +71,10 @@ type posState struct {
 	// Regime at entry time (determines management behavior)
 	entryRegime Regime
 
+	// Grid mode regime-flip exit: counts consecutive primary bars where
+	// regime is non-RANGE AND trend_dir opposes the position. 3 bars → force exit.
+	consecTrendOpp int
+
 	// Grid orders (range mode only)
 	gridOrders []*gridOrder
 }
