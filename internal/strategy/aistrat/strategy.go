@@ -61,6 +61,12 @@ type AIStrategy struct {
 	cachedHourlyShort hourlyMode // cached 1h mode for SHORT positions
 	hourlyModeBars    int        // 15m bar count when cache was last updated
 	lastTrendDir    int       // +1 = bullish, -1 = bearish, 0 = neutral (from detectRegime)
+	// Regime hysteresis: transitions need 2 consecutive bars of the same new
+	// regime before committing. Prevents single-bar flicker from thrashing
+	// downstream (GRID regime-flip exit, breakout shortcut).
+	confirmedRegime Regime // hystereized regime reported to downstream
+	pendingRegime   Regime // regime being evaluated for transition
+	pendingCount    int    // consecutive bars of pending regime
 	lastSLReplace   time.Time // throttle ReplaceSLOrder calls (max 1 per 3s)
 	// Signal accumulation: tracks rolling confidence across bars
 	accumLong  float64 // accumulated long signal strength (decays each bar)

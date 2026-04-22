@@ -149,10 +149,57 @@ func (s *AIStrategy) detectHourlyMode(side string) hourlyMode {
 
 // ─── Regime Detection ────────────────────────────────────────────────────────
 
-// detectRegime identifies the current market structure and sets s.lastTrendDir.
-// lastTrendDir: +1 = bullish (price rising), -1 = bearish (price falling), 0 = neutral.
-// Only affects new entries — existing positions are managed by their entryRegime.
+// detectRegime returns the confirmed regime after hysteresis smoothing.
+// Raw regime is computed fresh every bar; transitions require 2 consecutive
+// bars of the same new regime before committing. Prevents single-bar flicker
+// from thrashing downstream decisions (GRID regime-flip exit, breakout
+// shortcut, etc.). Sets s.lastTrendDir as a side effect (not hystereized —
+// trend_dir is computed from stable 2h data).
+// First bar after init bootstraps immediately (no 2-bar wait).
 func (s *AIStrategy) detectRegime() Regime {
+	raw := s.computeRawRegime()
+
+	// Bootstrap: first call commits immediately.
+	if s.confirmedRegime == "" {
+		s.confirmedRegime = raw
+		s.pendingRegime = raw
+		s.pendingCount = 0
+		return raw
+	}
+
+	// Same as confirmed → no transition in progress.
+	if raw == s.confirmedRegime {
+		s.pendingRegime = raw
+		s.pendingCount = 0
+		return s.confirmedRegime
+	}
+
+	// Different from confirmed — track pending transition.
+	if raw == s.pendingRegime {
+		s.pendingCount++
+	} else {
+		s.pendingRegime = raw
+		s.pendingCount = 1
+	}
+
+	const hysteresisN = 2 // consecutive bars needed to confirm transition
+	if s.pendingCount >= hysteresisN {
+		s.log.Info("SIG: regime transition confirmed",
+			zap.String("from", string(s.confirmedRegime)),
+			zap.String("to", string(raw)),
+			zap.Int("confirmations", s.pendingCount))
+		s.confirmedRegime = raw
+		s.pendingCount = 0
+		return raw
+	}
+
+	// Pending but not yet confirmed — downstream sees stable prior regime.
+	return s.confirmedRegime
+}
+
+// computeRawRegime runs the raw classification logic without hysteresis.
+// Sets s.lastTrendDir as a side effect.
+func (s *AIStrategy) computeRawRegime() Regime {
 	bars := s.primaryBars()
 	atr := s.calcATR()
 	if atr <= 0 || len(bars) < s.cfg.RegimeN+1 {
