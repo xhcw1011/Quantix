@@ -498,6 +498,16 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 	curBar := bars[len(bars)-1]
 	lookback := 10
 
+	// EXPANSION shortcut: detectRegime already validated bar size, body, direction
+	// alignment, and previous-bar confirmation. The 10-bar break + blowoff filters
+	// below would contradict that (blowoff = "skip big bars" but EXPANSION IS a big
+	// bar by definition). Trust the regime signal; trigger directly with market entry.
+	if s.lastRegime == RegimeExpansion && s.lastTrendDir == 1 {
+		s.log.Info("sig_accept", zap.String("fn", "breakoutBuy"), zap.String("reason", "expansion_with_trend"),
+			zap.Float64("price", price))
+		return 0.85, math.Round(price*100) / 100
+	}
+
 	highestHigh := 0.0
 	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
 		if i < 0 { continue }
@@ -561,6 +571,13 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 	price := bars[len(bars)-1].Close
 	curBar := bars[len(bars)-1]
 	lookback := 10
+
+	// EXPANSION shortcut: see breakoutBuySignal for rationale.
+	if s.lastRegime == RegimeExpansion && s.lastTrendDir == -1 {
+		s.log.Info("sig_accept", zap.String("fn", "breakoutSell"), zap.String("reason", "expansion_with_trend"),
+			zap.Float64("price", price))
+		return 0.85, math.Round(price*100) / 100
+	}
 
 	lowestLow := math.MaxFloat64
 	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
