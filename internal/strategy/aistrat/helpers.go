@@ -498,13 +498,24 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 	curBar := bars[len(bars)-1]
 	lookback := 10
 
-	// EXPANSION shortcut: detectRegime already validated bar size, body, direction
-	// alignment, and previous-bar confirmation. The 10-bar break + blowoff filters
-	// below would contradict that (blowoff = "skip big bars" but EXPANSION IS a big
-	// bar by definition). Trust the regime signal; trigger directly with market entry.
-	if s.lastRegime == RegimeExpansion && s.lastTrendDir == 1 {
-		s.log.Info("sig_accept", zap.String("fn", "breakoutBuy"), zap.String("reason", "expansion_with_trend"),
-			zap.Float64("price", price))
+	// Trend regime shortcut (EXPANSION/STRONG_TREND/SLOW_TREND with matching dir):
+	// detectRegime has already validated direction over 2h × 8 bars of 15m data.
+	// The 10-bar break + blowoff + RSI filters below would contradict that:
+	//  - blowoff rejects "barRange > 2×ATR" but trend acceleration IS a big bar;
+	//  - 10-bar break requires price > prior high but in持续单向 trend price often
+	//    drifts within the 10-bar range without explicit break.
+	// Trust the regime signal. Keep RSI safety net to avoid extreme-overbought FOMO.
+	if s.lastTrendDir == 1 && (s.lastRegime == RegimeExpansion ||
+		s.lastRegime == RegimeStrongTrend || s.lastRegime == RegimeSlowTrend) {
+		closes := s.getCloses()
+		rsi := indicator.Last(indicator.RSI(closes, s.cfg.RSIPeriod))
+		if rsi > 80 {
+			s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "rsi_overbought_in_trend"),
+				zap.String("regime", string(s.lastRegime)), zap.Float64("rsi", rsi))
+			return 0, 0
+		}
+		s.log.Info("sig_accept", zap.String("fn", "breakoutBuy"), zap.String("reason", "trend_regime_with_dir"),
+			zap.String("regime", string(s.lastRegime)), zap.Float64("price", price), zap.Float64("rsi", rsi))
 		return 0.85, math.Round(price*100) / 100
 	}
 
@@ -572,10 +583,18 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 	curBar := bars[len(bars)-1]
 	lookback := 10
 
-	// EXPANSION shortcut: see breakoutBuySignal for rationale.
-	if s.lastRegime == RegimeExpansion && s.lastTrendDir == -1 {
-		s.log.Info("sig_accept", zap.String("fn", "breakoutSell"), zap.String("reason", "expansion_with_trend"),
-			zap.Float64("price", price))
+	// Trend regime shortcut: see breakoutBuySignal for rationale.
+	if s.lastTrendDir == -1 && (s.lastRegime == RegimeExpansion ||
+		s.lastRegime == RegimeStrongTrend || s.lastRegime == RegimeSlowTrend) {
+		closes := s.getCloses()
+		rsi := indicator.Last(indicator.RSI(closes, s.cfg.RSIPeriod))
+		if rsi < 20 {
+			s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "rsi_oversold_in_trend"),
+				zap.String("regime", string(s.lastRegime)), zap.Float64("rsi", rsi))
+			return 0, 0
+		}
+		s.log.Info("sig_accept", zap.String("fn", "breakoutSell"), zap.String("reason", "trend_regime_with_dir"),
+			zap.String("regime", string(s.lastRegime)), zap.Float64("price", price), zap.Float64("rsi", rsi))
 		return 0.85, math.Round(price*100) / 100
 	}
 
