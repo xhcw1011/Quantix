@@ -157,6 +157,16 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 		return // bullish drift, don't add short layers
 	}
 
+	// 5m-level adverse momentum guard: regime/trend_dir uses 2h/15m data and
+	// can't react to sudden moves. This check pauses adds on shock bars.
+	if blocked, reason := s.isAdverseMomentum(p); blocked {
+		s.log.Info("SIG: grid layer blocked — adverse momentum",
+			zap.String("side", p.side),
+			zap.String("reason", reason),
+			zap.Int("layer_attempted", len(p.gridOrders)+1))
+		return
+	}
+
 	// Dynamic grid spacing with exponential increase per layer.
 	// Layer 1: base_spacing × 1, Layer 2: base_spacing × 2, etc.
 	// Wrong direction → layers get further apart → less capital committed.

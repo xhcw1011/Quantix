@@ -361,7 +361,7 @@ func DefaultConfig() Config {
 		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
-		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0,
+		GridMaxLayers: 3, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────

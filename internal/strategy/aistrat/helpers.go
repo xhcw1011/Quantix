@@ -734,6 +734,46 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 func r2(v float64) float64 { return math.Round(v*100) / 100 }
 func r3(v float64) float64 { return math.Round(v*1000) / 1000 }
 
+// isAdverseMomentum returns (true, reason) if recent 5m price action moves
+// strongly against the position direction. Used to pause grid layer additions
+// during sudden moves that the slower regime/trend_dir signals haven't caught
+// up to yet (e.g. 凌晨急跌埋 LONG grid).
+//
+// Three triggers, any one fires:
+//  1. single_bar_shock: current bar net move > 1.5×ATR against position
+//  2. cum3_shock: 3-bar net close-to-close move > 2.0×ATR against position
+//  3. range_break: current bar extreme breaks prior 5-bar high/low
+func (s *AIStrategy) isAdverseMomentum(p *posState) (bool, string) {
+	bars := s.primaryBars()
+	if len(bars) < 6 { return false, "" }
+	atr := s.calcATR()
+	if atr <= 0 { return false, "" }
+
+	cur := bars[len(bars)-1]
+
+	// 1. Single-bar shock
+	barMove := cur.Close - cur.Open
+	if p.side == "LONG" && barMove < -atr*1.5 { return true, "single_bar_shock" }
+	if p.side == "SHORT" && barMove > atr*1.5 { return true, "single_bar_shock" }
+
+	// 2. Cumulative 3-bar move
+	cum3 := bars[len(bars)-1].Close - bars[len(bars)-3].Close
+	if p.side == "LONG" && cum3 < -atr*2.0 { return true, "cum3_shock" }
+	if p.side == "SHORT" && cum3 > atr*2.0 { return true, "cum3_shock" }
+
+	// 3. Current bar breaks prior 5-bar extreme
+	prior5Low := bars[len(bars)-6].Low
+	prior5High := bars[len(bars)-6].High
+	for i := len(bars) - 6; i < len(bars)-1; i++ {
+		if bars[i].Low < prior5Low { prior5Low = bars[i].Low }
+		if bars[i].High > prior5High { prior5High = bars[i].High }
+	}
+	if p.side == "LONG" && cur.Low < prior5Low { return true, "range_break" }
+	if p.side == "SHORT" && cur.High > prior5High { return true, "range_break" }
+
+	return false, ""
+}
+
 // buildDiagFields returns regime-appropriate diagnostic fields for the per-bar
 // summary log. Values are recomputed each call — do not rely on cached
 // s.lastBB* because those are only written when the reversion signal ran past
