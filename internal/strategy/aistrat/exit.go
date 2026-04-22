@@ -134,7 +134,12 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 
 // ─── Close Helpers ───────────────────────────────────────────────────────────
 
-func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posState, reason string) {
+// closePos closes a position with market order.
+// triggerPrice: the price that triggered the close (tick price for TICK paths,
+// bar close for bar-driven paths). Pass 0 to fall back to latest bar close.
+// Used for accurate est_pnl logging — bar close lags real fill price during
+// tick-triggered closes (TP/SL/trailing) and produces wildly wrong PnL numbers.
+func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posState, reason string, triggerPrice float64) {
 	qty := math.Floor(p.remainQty*1000) / 1000
 	if qty <= 0 { *pptr = nil; return }
 
@@ -222,15 +227,17 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 		s.lastCloseFailAt = time.Now()
 		return
 	}
-	bars := s.primaryBars()
-	closePrice := 0.0
-	if len(bars) > 0 { closePrice = bars[len(bars)-1].Close }
+	closePrice := triggerPrice
+	if closePrice <= 0 {
+		bars := s.primaryBars()
+		if len(bars) > 0 { closePrice = bars[len(bars)-1].Close }
+	}
 	pnl := 0.0
 	if p.side == "LONG" { pnl = (closePrice - p.entryPrice) * qty }
 	if p.side == "SHORT" { pnl = (p.entryPrice - closePrice) * qty }
 	s.log.Info("SIG: CLOSE", zap.String("side", p.side), zap.String("reason", reason),
-		zap.Float64("entry", p.entryPrice), zap.Float64("qty", qty), zap.Bool("market", useMarket),
-		zap.Float64("est_pnl", pnl))
+		zap.Float64("entry", p.entryPrice), zap.Float64("close", closePrice), zap.Float64("qty", qty),
+		zap.Bool("market", useMarket), zap.Float64("est_pnl", pnl))
 	s.logEvent("close", p.side, reason, closePrice, p.entryPrice, qty, 0, pnl, "")
 
 	// Track hedge cooldown: if closing a Range position while opposite Trend exists

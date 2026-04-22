@@ -44,7 +44,7 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 		if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
 			s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
 			closedSide := p.side
-			s.closePos(ctx, p, pptr, "stop_loss")
+			s.closePos(ctx, p, pptr, "stop_loss", price)
 			s.consecLoss++
 			s.stopBar = s.barCount
 			s.postSLReeval = true
@@ -79,7 +79,7 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 			s.log.Info("SIG: GRID TP hit",
 				zap.String("side", p.side), zap.Float64("entry", p.entryPrice),
 				zap.Float64("tp", p.takeProfit), zap.Float64("price", price))
-			s.closePos(ctx, p, pptr, "grid_tp")
+			s.closePos(ctx, p, pptr, "grid_tp", price)
 			s.consecLoss = 0
 			return
 		}
@@ -251,7 +251,7 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 	if p.filled && hMode != hourlyTrendStrong && time.Since(p.filledAt) > 3*time.Hour {
 		s.log.Warn("BAR: time exit — held >3h in weak/exit mode",
 			zap.String("side", p.side), zap.Float64("pnlR", pnlR))
-		s.closePos(ctx, p, pptr, "time_exit")
+		s.closePos(ctx, p, pptr, "time_exit", price)
 		if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
 		return
 	}
@@ -343,14 +343,14 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		if p.side == "LONG" && p.peakPrice-price >= bounceThreshold && pnlR > 0 {
 			s.log.Info("SIG: bounce TP — price retreated from peak",
 				zap.Float64("peak", p.peakPrice), zap.Float64("price", price), zap.Float64("pnlR", pnlR))
-			s.closePos(ctx, p, pptr, "bounce_tp")
+			s.closePos(ctx, p, pptr, "bounce_tp", price)
 			s.consecLoss = 0
 			return
 		}
 		if p.side == "SHORT" && price-p.peakPrice >= bounceThreshold && pnlR > 0 {
 			s.log.Info("SIG: bounce TP — price bounced from low",
 				zap.Float64("peak", p.peakPrice), zap.Float64("price", price), zap.Float64("pnlR", pnlR))
-			s.closePos(ctx, p, pptr, "bounce_tp")
+			s.closePos(ctx, p, pptr, "bounce_tp", price)
 			s.consecLoss = 0
 			return
 		}
@@ -358,12 +358,12 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 
 	// ── Local SL check (backup for exchange SL) ──
 	if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
-		s.closePos(ctx, p, pptr, "trailing")
+		s.closePos(ctx, p, pptr, "trailing", price)
 		if pnlR > 0 { s.consecLoss = 0 }
 		return
 	}
 	if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
-		s.closePos(ctx, p, pptr, "trailing")
+		s.closePos(ctx, p, pptr, "trailing", price)
 		if pnlR > 0 { s.consecLoss = 0 }
 		return
 	}
@@ -393,7 +393,7 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 	if reverseConf >= s.cfg.ReversalConf {
 		s.log.Info("SIG: tech reversal → close "+p.side,
 			zap.Float64("conf", reverseConf))
-		s.closePos(ctx, p, pptr, "tech_reversal")
+		s.closePos(ctx, p, pptr, "tech_reversal", bar.Close)
 		s.lastCallBar = s.barCount - s.cfg.CallIntervalBars
 	}
 }

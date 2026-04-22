@@ -169,7 +169,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 			if (p.side == "LONG" && price >= p.takeProfit) || (p.side == "SHORT" && price <= p.takeProfit) {
 				s.log.Info("TICK GRID TP", zap.String("side", p.side),
 					zap.Float64("price", price), zap.Float64("tp", p.takeProfit))
-				s.closePos(ctx, p, pptr, "grid_tp")
+				s.closePos(ctx, p, pptr, "grid_tp", price)
 				s.consecLoss = 0
 			}
 		}
@@ -192,7 +192,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		closedSide := p.side
 		s.log.Warn("TICK STOP-LOSS", zap.String("side", closedSide),
 			zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
-		s.closePos(ctx, p, pptr, "stop_loss")
+		s.closePos(ctx, p, pptr, "stop_loss", price)
 		s.consecLoss++
 		s.stopBar = s.barCount
 		// Flag for immediate reversal evaluation on next OnBar.
@@ -267,7 +267,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 			if !p.lastPeakAt.IsZero() && time.Since(p.lastPeakAt) > 45*time.Minute {
 				s.log.Warn("TICK: stale peak exit — 45m no new high/low in EXIT_MODE",
 					zap.String("side", p.side), zap.Float64("pnlR", pnlR))
-				s.closePos(ctx, p, pptr, "stale_peak_exit")
+				s.closePos(ctx, p, pptr, "stale_peak_exit", price)
 				if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
 				return
 			}
@@ -326,7 +326,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 			s.log.Warn("TICK: time exit — held >3h in weak/exit mode",
 				zap.String("side", p.side), zap.Float64("pnlR", pnlR),
 				zap.Duration("held", time.Since(p.filledAt)))
-			s.closePos(ctx, p, pptr, "time_exit")
+			s.closePos(ctx, p, pptr, "time_exit", price)
 			if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
 			return
 		}
@@ -337,14 +337,14 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 			if p.side == "LONG" && p.peakPrice-price >= bounceThreshold {
 				s.log.Info("TICK: bounce TP", zap.String("side", p.side),
 					zap.Float64("peak", p.peakPrice), zap.Float64("price", price))
-				s.closePos(ctx, p, pptr, "bounce_tp")
+				s.closePos(ctx, p, pptr, "bounce_tp", price)
 				s.consecLoss = 0
 				return
 			}
 			if p.side == "SHORT" && price-p.peakPrice >= bounceThreshold {
 				s.log.Info("TICK: bounce TP", zap.String("side", p.side),
 					zap.Float64("peak", p.peakPrice), zap.Float64("price", price))
-				s.closePos(ctx, p, pptr, "bounce_tp")
+				s.closePos(ctx, p, pptr, "bounce_tp", price)
 				s.consecLoss = 0
 				return
 			}
@@ -355,7 +355,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		if pnlR < s.cfg.EmergencyPnlR && hMode == hourlyExitMode {
 			s.log.Warn("TICK: emergency exit — losing >0.9R + 1h exit mode",
 				zap.String("side", p.side), zap.Float64("pnlR", pnlR))
-			s.closePos(ctx, p, pptr, "emergency_exit")
+			s.closePos(ctx, p, pptr, "emergency_exit", price)
 			s.consecLoss++
 			return
 		}
@@ -365,14 +365,14 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 	if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
 		s.log.Warn("TICK TRAILING", zap.String("side", p.side),
 			zap.Float64("price", price), zap.Float64("trail", p.trailing))
-		s.closePos(ctx, p, pptr, "trailing")
+		s.closePos(ctx, p, pptr, "trailing", price)
 		s.consecLoss = 0
 		return
 	}
 	if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
 		s.log.Warn("TICK TRAILING", zap.String("side", p.side),
 			zap.Float64("price", price), zap.Float64("trail", p.trailing))
-		s.closePos(ctx, p, pptr, "trailing")
+		s.closePos(ctx, p, pptr, "trailing", price)
 		s.consecLoss = 0
 		return
 	}
