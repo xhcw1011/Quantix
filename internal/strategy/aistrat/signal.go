@@ -238,10 +238,15 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	// ── EXPANSION cooldown: wait 3 bars (15min) after breakout bar before entry ──
 	// EXPANSION bars trigger FOMO entries at the worst price; let the retracement play out.
-	if regime == RegimeExpansion {
-		s.expansionBar = s.barCount
-	}
+	// Only set expansionBar on FRESH EXPANSION (not continuous) — otherwise every
+	// consecutive EXPANSION bar would reset the cooldown indefinitely, making the
+	// cooldown never expire in sustained breakouts (observed 凌晨 03:40-04:15).
 	expansionCooldown := 3
+	if regime == RegimeExpansion {
+		if s.expansionBar == 0 || s.barCount-s.expansionBar >= expansionCooldown {
+			s.expansionBar = s.barCount
+		}
+	}
 	if s.expansionBar > 0 && s.barCount-s.expansionBar < expansionCooldown && s.longPos == nil && s.shortPos == nil {
 		if s.barCount%6 == 0 || s.barCount-s.expansionBar == 0 {
 			s.log.Info("SIG: skip — EXPANSION cooldown",
