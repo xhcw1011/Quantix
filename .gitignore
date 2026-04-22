@@ -4,8 +4,8 @@
 *.dll
 *.so
 *.dylib
-quantix
-api
+/quantix
+/api
 
 # Test binary
 *.test
