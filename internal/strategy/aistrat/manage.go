@@ -243,6 +243,13 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	p.gridOrders = append(p.gridOrders, g)
 	// Don't add to remainQty yet — wait for fill confirmation in the price check loop above.
 
+	// Persist gridOrders IMMEDIATELY on placement, not just on fill.
+	// Without this, a restart/recovery between layer placement and fill
+	// would lose the pending layer; manageGrid on reboot reads gridOrders=[]
+	// and re-adds layers on top, exceeding GridMaxLayers. This was root cause
+	// of 4/23 LONG @2364.76 stacking to 0.385 qty (~$900 notional).
+	s.syncToRedis(p)
+
 	s.log.Info("SIG: grid order placed (limit)",
 		zap.String("side", p.side), zap.Float64("entry", gridEntry),
 		zap.Float64("tp", gridTP), zap.Float64("qty", gridQty),
