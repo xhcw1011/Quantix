@@ -114,13 +114,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 				}
 			}
 			avgEntry := weightedEntry / totalQty
-			maxTP := s.cfg.GridMaxTPDist
-			if maxTP <= 0 { maxTP = 8.0 }
-			if p.side == "LONG" {
-				p.takeProfit = math.Round((avgEntry+maxTP)*100) / 100
-			} else {
-				p.takeProfit = math.Round((avgEntry-maxTP)*100) / 100
-			}
+			p.takeProfit = s.computeGridTP(p.side, avgEntry)
 			s.log.Info("SIG: grid order filled — TP recalculated",
 				zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
 				zap.Float64("avg_entry", math.Round(avgEntry*100)/100),

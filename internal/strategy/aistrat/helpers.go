@@ -355,12 +355,11 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			})
 		}
 
-		// Fix TP for range positions: use syncer's weighted entry + GridMaxTPDist.
-		// Handles cases where grid layers were lost or TP was set relative to base entry.
+		// Recompute TP for range positions using the same floating logic as
+		// openGrid: BB middle clamped to [min, max]. Consistent with initial
+		// TP and layer recalc paths.
 		if s.longPos.mode == modeRange {
-			maxTP := s.cfg.GridMaxTPDist; if maxTP <= 0 { maxTP = 8.0 }
-			newTP := math.Round((entry+maxTP)*100) / 100
-			s.longPos.takeProfit = newTP
+			s.longPos.takeProfit = s.computeGridTP("LONG", entry)
 		}
 
 		s.loadStagedTPsFromRedis(s.longPos)
@@ -423,9 +422,7 @@ recoverShort:
 		}
 
 		if s.shortPos.mode == modeRange {
-			maxTP := s.cfg.GridMaxTPDist; if maxTP <= 0 { maxTP = 8.0 }
-			newTP := math.Round((entry-maxTP)*100) / 100
-			s.shortPos.takeProfit = newTP
+			s.shortPos.takeProfit = s.computeGridTP("SHORT", entry)
 		}
 
 		s.loadStagedTPsFromRedis(s.shortPos)
@@ -834,6 +831,39 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 
 func r2(v float64) float64 { return math.Round(v*100) / 100 }
 func r3(v float64) float64 { return math.Round(v*1000) / 1000 }
+
+// computeGridTP returns the correct TP price for a grid position.
+// Used by openGrid (initial), manageGrid (layer recalc), recoverFromSyncer.
+// Target = BB middle (direction-appropriate); clamped to
+// [GridMinTPDist, GridMaxTPDist] from entry. Guarantees consistent behavior
+// across position lifecycle — initial open and post-layer recalc both use
+// the same floating range.
+func (s *AIStrategy) computeGridTP(side string, entry float64) float64 {
+	maxTP := s.cfg.GridMaxTPDist
+	if maxTP <= 0 { maxTP = 12.0 }
+	minTP := s.cfg.GridMinTPDist
+	if minTP <= 0 { minTP = maxTP * 0.5 }
+
+	var tp float64
+	if side == "LONG" {
+		if s.lastBBMiddle > entry {
+			tp = s.lastBBMiddle
+		} else {
+			tp = entry + entry*s.cfg.GridTPPct
+		}
+		if tp-entry > maxTP { tp = entry + maxTP }
+		if tp-entry < minTP { tp = entry + minTP }
+	} else {
+		if s.lastBBMiddle > 0 && s.lastBBMiddle < entry {
+			tp = s.lastBBMiddle
+		} else {
+			tp = entry - entry*s.cfg.GridTPPct
+		}
+		if entry-tp > maxTP { tp = entry - maxTP }
+		if entry-tp < minTP { tp = entry - minTP }
+	}
+	return math.Round(tp*100) / 100
+}
 
 // weightedAvgEntry returns the average entry price across base position
 // + filled grid layers, weighted by qty. For trend positions (no grid layers)
