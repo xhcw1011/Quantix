@@ -734,6 +734,16 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 		return 0, 0
 	}
 
+	// Adverse momentum guard: reversion assumes mean-reversion, but in clear
+	// downtrend (急跌/破前 5 根低/3 根累计大跌) it'd catch a falling knife.
+	// regime_flip would tally the loss later (~$3-5 each); reject here instead.
+	if blocked, reason := s.isAdverseMomentum("LONG"); blocked {
+		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"),
+			zap.String("reason", "adverse_momentum_"+reason),
+			zap.Float64("price", price))
+		return 0, 0
+	}
+
 	// Base confidence: 0.76 ensures entry when price touches BB band (RangeEntryConf=0.75).
 	// Bonuses from RSI and BB penetration push conf higher for stronger signals.
 	conf = 0.76
@@ -792,6 +802,14 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 		return 0, 0
 	}
 
+	// Adverse momentum guard: see reversionBuySignal for rationale.
+	if blocked, reason := s.isAdverseMomentum("SHORT"); blocked {
+		s.log.Info("sig_reject", zap.String("fn", "reversionSell"),
+			zap.String("reason", "adverse_momentum_"+reason),
+			zap.Float64("price", price))
+		return 0, 0
+	}
+
 	conf = 0.76
 	if price > bbUpper { conf += 0.05 }
 
@@ -818,15 +836,19 @@ func r2(v float64) float64 { return math.Round(v*100) / 100 }
 func r3(v float64) float64 { return math.Round(v*1000) / 1000 }
 
 // isAdverseMomentum returns (true, reason) if recent 5m price action moves
-// strongly against the position direction. Used to pause grid layer additions
-// during sudden moves that the slower regime/trend_dir signals haven't caught
-// up to yet (e.g. 凌晨急跌埋 LONG grid).
+// strongly against the given direction. Used to:
+//   1. pause grid layer additions during sudden moves (manageGrid)
+//   2. block reversion entries during clear opposite momentum (reversionBuy/Sell)
+// for both: prevents catching falling knives / chasing peak in obvious one-way
+// market that the slower regime/trend_dir signals haven't caught up to yet.
+//
+// side: "LONG" or "SHORT"
 //
 // Three triggers, any one fires:
-//  1. single_bar_shock: current bar net move > 1.5×ATR against position
-//  2. cum3_shock: 3-bar net close-to-close move > 2.0×ATR against position
+//  1. single_bar_shock: current bar net move > 1.5×ATR against direction
+//  2. cum3_shock: 3-bar net close-to-close move > 2.0×ATR against direction
 //  3. range_break: current bar extreme breaks prior 5-bar high/low
-func (s *AIStrategy) isAdverseMomentum(p *posState) (bool, string) {
+func (s *AIStrategy) isAdverseMomentum(side string) (bool, string) {
 	bars := s.primaryBars()
 	if len(bars) < 6 { return false, "" }
 	atr := s.calcATR()
@@ -836,13 +858,13 @@ func (s *AIStrategy) isAdverseMomentum(p *posState) (bool, string) {
 
 	// 1. Single-bar shock
 	barMove := cur.Close - cur.Open
-	if p.side == "LONG" && barMove < -atr*1.5 { return true, "single_bar_shock" }
-	if p.side == "SHORT" && barMove > atr*1.5 { return true, "single_bar_shock" }
+	if side == "LONG" && barMove < -atr*1.5 { return true, "single_bar_shock" }
+	if side == "SHORT" && barMove > atr*1.5 { return true, "single_bar_shock" }
 
 	// 2. Cumulative 3-bar move
 	cum3 := bars[len(bars)-1].Close - bars[len(bars)-3].Close
-	if p.side == "LONG" && cum3 < -atr*2.0 { return true, "cum3_shock" }
-	if p.side == "SHORT" && cum3 > atr*2.0 { return true, "cum3_shock" }
+	if side == "LONG" && cum3 < -atr*2.0 { return true, "cum3_shock" }
+	if side == "SHORT" && cum3 > atr*2.0 { return true, "cum3_shock" }
 
 	// 3. Current bar breaks prior 5-bar extreme
 	prior5Low := bars[len(bars)-6].Low
@@ -851,8 +873,8 @@ func (s *AIStrategy) isAdverseMomentum(p *posState) (bool, string) {
 		if bars[i].Low < prior5Low { prior5Low = bars[i].Low }
 		if bars[i].High > prior5High { prior5High = bars[i].High }
 	}
-	if p.side == "LONG" && cur.Low < prior5Low { return true, "range_break" }
-	if p.side == "SHORT" && cur.High > prior5High { return true, "range_break" }
+	if side == "LONG" && cur.Low < prior5Low { return true, "range_break" }
+	if side == "SHORT" && cur.High > prior5High { return true, "range_break" }
 
 	return false, ""
 }

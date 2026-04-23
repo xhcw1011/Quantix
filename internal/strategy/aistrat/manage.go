@@ -189,7 +189,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 
 	// 5m-level adverse momentum guard: regime/trend_dir uses 2h/15m data and
 	// can't react to sudden moves. This check pauses adds on shock bars.
-	if blocked, reason := s.isAdverseMomentum(p); blocked {
+	if blocked, reason := s.isAdverseMomentum(p.side); blocked {
 		s.log.Info("SIG: grid layer blocked — adverse momentum",
 			zap.String("side", p.side),
 			zap.String("reason", reason),
