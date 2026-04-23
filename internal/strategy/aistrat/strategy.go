@@ -169,8 +169,29 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 	// ── 0. Skip tick-level management during minimum hold period ──
 	if p.barsHeld < s.cfg.MinHoldBars { return }
 
-	// ── Range/grid mode: only check TP on tick (no SL, no trailing) ──
+	// ── Range/grid mode: fixed-distance SL + TP check on tick ──
 	if p.mode == modeRange {
+		// Fixed-distance SL: exit if price moved against base entry by more
+		// than GridFixedSLDist. Replaces regime_flip (too eager); user wants
+		// "fixed loss exit" — predictable max loss, not trend-based判断.
+		// Distance measured from base entry (p.entryPrice), not weighted avg.
+		if s.cfg.GridFixedSLDist > 0 {
+			var advDist float64
+			if p.side == "LONG" { advDist = p.entryPrice - price }
+			if p.side == "SHORT" { advDist = price - p.entryPrice }
+			if advDist > s.cfg.GridFixedSLDist {
+				s.log.Warn("TICK GRID fixed-distance SL hit",
+					zap.String("side", p.side),
+					zap.Float64("entry", p.entryPrice),
+					zap.Float64("price", price),
+					zap.Float64("dist", advDist),
+					zap.Float64("threshold", s.cfg.GridFixedSLDist),
+					zap.Int("layers", len(p.gridOrders)))
+				s.closePos(ctx, p, pptr, "fixed_sl", price)
+				s.consecLoss++
+				return
+			}
+		}
 		if p.takeProfit > 0 {
 			if (p.side == "LONG" && price >= p.takeProfit) || (p.side == "SHORT" && price <= p.takeProfit) {
 				s.log.Info("TICK GRID TP", zap.String("side", p.side),
