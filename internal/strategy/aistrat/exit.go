@@ -232,13 +232,19 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 		bars := s.primaryBars()
 		if len(bars) > 0 { closePrice = bars[len(bars)-1].Close }
 	}
+	// Use weighted average entry across base + filled grid layers for accurate
+	// est_pnl. p.entryPrice is the BASE entry only; if grid layers have filled,
+	// the actual cost basis is the weighted average. Trend positions have no
+	// grid layers, so weightedAvgEntry returns p.entryPrice unchanged.
+	avgEntry := weightedAvgEntry(p)
 	pnl := 0.0
-	if p.side == "LONG" { pnl = (closePrice - p.entryPrice) * qty }
-	if p.side == "SHORT" { pnl = (p.entryPrice - closePrice) * qty }
+	if p.side == "LONG" { pnl = (closePrice - avgEntry) * qty }
+	if p.side == "SHORT" { pnl = (avgEntry - closePrice) * qty }
 	s.log.Info("SIG: CLOSE", zap.String("side", p.side), zap.String("reason", reason),
-		zap.Float64("entry", p.entryPrice), zap.Float64("close", closePrice), zap.Float64("qty", qty),
+		zap.Float64("entry", p.entryPrice), zap.Float64("avg_entry", avgEntry),
+		zap.Float64("close", closePrice), zap.Float64("qty", qty),
 		zap.Bool("market", useMarket), zap.Float64("est_pnl", pnl))
-	s.logEvent("close", p.side, reason, closePrice, p.entryPrice, qty, 0, pnl, "")
+	s.logEvent("close", p.side, reason, closePrice, avgEntry, qty, 0, pnl, "")
 
 	// Track hedge cooldown: if closing a Range position while opposite Trend exists
 	if p.mode == modeRange {

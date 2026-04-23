@@ -835,6 +835,23 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 func r2(v float64) float64 { return math.Round(v*100) / 100 }
 func r3(v float64) float64 { return math.Round(v*1000) / 1000 }
 
+// weightedAvgEntry returns the average entry price across base position
+// + filled grid layers, weighted by qty. For trend positions (no grid layers)
+// returns p.entryPrice unchanged. Used in est_pnl calculation to give
+// accurate per-position PnL when grid layers have been added.
+func weightedAvgEntry(p *posState) float64 {
+	totalQty := p.initQty
+	weightedEntry := p.entryPrice * p.initQty
+	for _, g := range p.gridOrders {
+		if g.filled {
+			totalQty += g.qty
+			weightedEntry += g.entryPrice * g.qty
+		}
+	}
+	if totalQty <= 0 { return p.entryPrice }
+	return weightedEntry / totalQty
+}
+
 // isAdverseMomentum returns (true, reason) if recent 5m price action moves
 // strongly against the given direction. Used to:
 //   1. pause grid layer additions during sudden moves (manageGrid)
