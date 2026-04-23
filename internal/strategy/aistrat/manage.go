@@ -140,8 +140,27 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 		}
 	}
 
-	// 2. Open new grid order if price moved far enough from last level
-	if len(p.gridOrders) >= s.cfg.GridMaxLayers { return }
+	// 2. Open new grid order if price moved far enough from last level.
+	// Count layers by qty delta + pending, NOT by gridOrders length alone.
+	// gridOrders array is not persisted in Redis; after syncer recovery
+	// (position event / reconnect / periodic sync) it resets to nil,
+	// and the old `len(p.gridOrders) >= MaxLayers` check would allow
+	// re-adding layers on top of already-filled ones. Observed 4/23:
+	// LONG @2364.76 qty grew to 0.385 (7 layers) in 2 hours despite
+	// GridMaxLayers=3 because syncer reset gridOrders repeatedly.
+	layerQty := p.initQty * s.cfg.GridQtyRatio
+	if layerQty > 0 {
+		filledFromQty := int(math.Round((p.remainQty - p.initQty) / layerQty))
+		if filledFromQty < 0 { filledFromQty = 0 }
+		pendingCount := 0
+		for _, g := range p.gridOrders {
+			if !g.filled { pendingCount++ }
+		}
+		effective := filledFromQty + pendingCount
+		if effective >= s.cfg.GridMaxLayers { return }
+	} else {
+		if len(p.gridOrders) >= s.cfg.GridMaxLayers { return }
+	}
 	if !p.filled { return }
 	if s.cfg.ForceTrend { return }
 
