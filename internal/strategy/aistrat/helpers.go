@@ -856,18 +856,23 @@ func weightedAvgEntry(p *posState) float64 {
 // strongly against the given direction. Used to:
 //   1. pause grid layer additions during sudden moves (manageGrid)
 //   2. block reversion entries during clear opposite momentum (reversionBuy/Sell)
-// for both: prevents catching falling knives / chasing peak in obvious one-way
-// market that the slower regime/trend_dir signals haven't caught up to yet.
+// for both: prevents catching falling knives / chasing peak in obvious急变 that
+// the slower regime/trend_dir signals haven't caught up to yet.
 //
 // side: "LONG" or "SHORT"
 //
-// Three triggers, any one fires:
+// Two triggers (only true 急变 / 急涨), any one fires:
 //  1. single_bar_shock: current bar net move > 1.5×ATR against direction
 //  2. cum3_shock: 3-bar net close-to-close move > 2.0×ATR against direction
-//  3. range_break: current bar extreme breaks prior 5-bar high/low
+//
+// range_break (cur.Low < prior5Low) was removed 2026-04-23: in 持续单边
+// 行情 each new bar makes a new low, triggering range_break every bar and
+// permanently blocking grid layers (LONG @2364.76 had 30+ consecutive
+// rejections). single_bar_shock and cum3_shock are sufficient for catching
+// real急变 without this linear cascade.
 func (s *AIStrategy) isAdverseMomentum(side string) (bool, string) {
 	bars := s.primaryBars()
-	if len(bars) < 6 { return false, "" }
+	if len(bars) < 4 { return false, "" }
 	atr := s.calcATR()
 	if atr <= 0 { return false, "" }
 
@@ -882,16 +887,6 @@ func (s *AIStrategy) isAdverseMomentum(side string) (bool, string) {
 	cum3 := bars[len(bars)-1].Close - bars[len(bars)-3].Close
 	if side == "LONG" && cum3 < -atr*2.0 { return true, "cum3_shock" }
 	if side == "SHORT" && cum3 > atr*2.0 { return true, "cum3_shock" }
-
-	// 3. Current bar breaks prior 5-bar extreme
-	prior5Low := bars[len(bars)-6].Low
-	prior5High := bars[len(bars)-6].High
-	for i := len(bars) - 6; i < len(bars)-1; i++ {
-		if bars[i].Low < prior5Low { prior5Low = bars[i].Low }
-		if bars[i].High > prior5High { prior5High = bars[i].High }
-	}
-	if side == "LONG" && cur.Low < prior5Low { return true, "range_break" }
-	if side == "SHORT" && cur.High > prior5High { return true, "range_break" }
 
 	return false, ""
 }
