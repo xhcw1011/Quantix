@@ -188,7 +188,11 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 					zap.Float64("threshold", s.cfg.GridFixedSLDist),
 					zap.Int("layers", len(p.gridOrders)))
 				s.closePos(ctx, p, pptr, "fixed_sl", price)
-				s.consecLoss++
+				// Don't increment consecLoss — GRID's fixed_sl is a position-level
+				// risk cap, not a strategy-failure signal. Letting it count toward
+				// consecLoss would halt trend entries (signal.go 1h EMA filter block)
+				// after 3 grid SLs, conflating grid risk management with trend策略
+				// disruption. Grid and trend are independent evaluation paths.
 				return
 			}
 		}

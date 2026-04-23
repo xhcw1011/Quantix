@@ -7,7 +7,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Quantix/quantix/internal/exchange"
-	"github.com/Quantix/quantix/internal/indicator"
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
@@ -135,14 +134,10 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	}
 
 	// 2. Open new grid order if price moved far enough from last level.
-	// Count layers by qty delta + pending, NOT by gridOrders length alone.
-	// gridOrders array is not persisted in Redis; after syncer recovery
-	// (position event / reconnect / periodic sync) it resets to nil,
-	// and the old `len(p.gridOrders) >= MaxLayers` check would allow
-	// re-adding layers on top of already-filled ones. Observed 4/23:
-	// LONG @2364.76 qty grew to 0.385 (7 layers) in 2 hours despite
-	// GridMaxLayers=3 because syncer reset gridOrders repeatedly.
+	// Count layers by qty delta + pending, NOT by gridOrders length alone
+	// (gridOrders array can reset on syncer recovery; qty is exchange-truth).
 	layerQty := p.initQty * s.cfg.GridQtyRatio
+	var effective int
 	if layerQty > 0 {
 		filledFromQty := int(math.Round((p.remainQty - p.initQty) / layerQty))
 		if filledFromQty < 0 { filledFromQty = 0 }
@@ -150,11 +145,11 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 		for _, g := range p.gridOrders {
 			if !g.filled { pendingCount++ }
 		}
-		effective := filledFromQty + pendingCount
-		if effective >= s.cfg.GridMaxLayers { return }
+		effective = filledFromQty + pendingCount
 	} else {
-		if len(p.gridOrders) >= s.cfg.GridMaxLayers { return }
+		effective = len(p.gridOrders)
 	}
+	if effective >= s.cfg.GridMaxLayers { return }
 	if !p.filled { return }
 	if s.cfg.ForceTrend { return }
 
@@ -181,25 +176,16 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 		return
 	}
 
-	// Dynamic grid spacing with exponential increase per layer.
-	// Layer 1: base_spacing × 1, Layer 2: base_spacing × 2, etc.
-	// Wrong direction → layers get further apart → less capital committed.
-	layerNum := len(p.gridOrders) + 1 // next layer number (1-based)
-	spacing := p.entryPrice * s.cfg.GridSpacingPct
-	closes := s.getCloses()
-	if len(closes) >= 20 {
-		bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-		if len(bb.Upper) > 0 && len(bb.Lower) > 0 {
-			bbWidth := bb.Upper[len(bb.Upper)-1] - bb.Lower[len(bb.Lower)-1]
-			dynamicSpacing := bbWidth / float64(s.cfg.GridMaxLayers+1)
-			if dynamicSpacing > 0 { spacing = dynamicSpacing }
-		}
-	}
-	// Exponential spacing from BASE entry (not last layer).
-	// layer1 = base - 1×spacing, layer2 = base - 3×spacing (1+2), layer3 = base - 6×spacing (1+2+3)
-	// Cumulative: sum(1..N) × spacing from base entry.
-	cumulativeMultiplier := float64(layerNum * (layerNum + 1) / 2)
-	totalDist := spacing * cumulativeMultiplier
+	// Fixed linear spacing: each layer triggers at N × GridLayerSpacing from base.
+	// layer 1 at base ± \$10 (= 1 × 10), layer 2 at ± \$20, layer 3 at ± \$30.
+	// Keeps layer 3 well inside GridFixedSLDist (\$50) so all 3 can fill before
+	// SL triggers. Replaces old BB-width dynamic spacing which could put
+	// layer 3 beyond SL in high-volatility markets, making the layer mechanism
+	// ineffective.
+	spacing := s.cfg.GridLayerSpacing
+	if spacing <= 0 { spacing = 10.0 }
+	layerNum := effective + 1 // next layer number (1-based)
+	totalDist := spacing * float64(layerNum)
 
 	refPrice := p.entryPrice // always measure from base entry
 

@@ -36,6 +36,7 @@ func init() {
 		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
 		if v, ok := params["GridMinTPDist"]; ok { cfg.GridMinTPDist = toFloat(v) }
 		if v, ok := params["GridFixedSLDist"]; ok { cfg.GridFixedSLDist = toFloat(v) }
+		if v, ok := params["GridLayerSpacing"]; ok { cfg.GridLayerSpacing = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
 		if v, ok := params["GridQtyRatio"]; ok { cfg.GridQtyRatio = toFloat(v) }
@@ -203,6 +204,7 @@ type Config struct {
 	GridMaxTPDist  float64 // max TP distance in $ — caps TP when BB is wide (default 12.0)
 	GridMinTPDist  float64 // min TP distance in $ — floor when BB is narrow (default 5.0)
 	GridFixedSLDist float64 // fixed-distance SL: exit grid if price moves > this $ from base entry (default 50.0)
+	GridLayerSpacing float64 // fixed $ between grid layers: layer N triggers at base ± (N × this) (default 10.0)
 
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
@@ -364,7 +366,7 @@ func DefaultConfig() Config {
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
 		GridMaxLayers: 3, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
-		GridMaxTPDist: 12.0, GridMinTPDist: 5.0, GridFixedSLDist: 50.0,
+		GridMaxTPDist: 12.0, GridMinTPDist: 5.0, GridFixedSLDist: 50.0, GridLayerSpacing: 10.0,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────
