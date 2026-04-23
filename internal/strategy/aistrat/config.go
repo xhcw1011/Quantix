@@ -200,8 +200,8 @@ type Config struct {
 	GridSpacingPct float64 // spacing between grid levels as fallback (default 0.005 = 0.5%)
 	GridTPPct      float64 // grid order take-profit as fallback (default 0.004 = 0.4%)
 	GridQtyRatio   float64 // grid qty as ratio of base qty (default 0.5)
-	GridMaxTPDist  float64 // max TP distance in $ — caps TP when BB is wide (default 8.0)
-	GridMinTPDist  float64 // min TP distance in $ — floor when BB is narrow (default 0 = auto 60% of max)
+	GridMaxTPDist  float64 // max TP distance in $ — caps TP when BB is wide (default 15.0)
+	GridMinTPDist  float64 // min TP distance in $ — floor when BB is narrow (default 8.0)
 	GridFixedSLDist float64 // fixed-distance SL: exit grid if price moves > this $ from base entry (default 50.0)
 
 	// Staged TP (trend mode) — exchange-native limit orders
@@ -363,7 +363,8 @@ func DefaultConfig() Config {
 		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
-		GridMaxLayers: 3, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0, GridFixedSLDist: 50.0,
+		GridMaxLayers: 3, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
+		GridMaxTPDist: 15.0, GridMinTPDist: 8.0, GridFixedSLDist: 50.0,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────
