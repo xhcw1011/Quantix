@@ -109,11 +109,21 @@ func (b *SimBroker) Process(bar exchange.Kline) []strategy.Fill {
 }
 
 // execute simulates order execution at the bar's close price with slippage.
+//
+// Routes by req.PositionSide:
+//   - "" or LONG: spot/LONG path. SideBuy opens/adds, SideSell closes against
+//     existing long position. Buy uses cash; rejected if insufficient.
+//   - SHORT: futures hedge SHORT path. SideSell opens/adds (no cash check —
+//     futures margin), SideBuy closes against existing short position.
 func (b *SimBroker) execute(req strategy.OrderRequest, bar exchange.Kline) (strategy.Fill, error) {
-	// Use close price as execution price (conservative approximation)
-	execPrice := bar.Close
+	if req.PositionSide == strategy.PositionSideShort {
+		return b.executeShort(req, bar)
+	}
+	return b.executeLong(req, bar)
+}
 
-	// Apply slippage: buys pay more, sells receive less
+func (b *SimBroker) executeLong(req strategy.OrderRequest, bar exchange.Kline) (strategy.Fill, error) {
+	execPrice := bar.Close
 	switch req.Side {
 	case strategy.SideBuy:
 		execPrice *= (1 + b.Slippage)
@@ -122,11 +132,9 @@ func (b *SimBroker) execute(req strategy.OrderRequest, bar exchange.Kline) (stra
 	}
 
 	qty := req.Qty
-
 	switch req.Side {
 	case strategy.SideBuy:
 		if qty == 0 {
-			// Use 99% of available cash (keep 1% buffer for rounding)
 			available := b.portfolio.cash * 0.99
 			if available <= 0 {
 				return strategy.Fill{}, fmt.Errorf("insufficient cash: %.4f", b.portfolio.cash)
@@ -136,7 +144,6 @@ func (b *SimBroker) execute(req strategy.OrderRequest, bar exchange.Kline) (stra
 		cost := qty * execPrice
 		fee := cost * b.FeeRate
 		if cost+fee > b.portfolio.cash {
-			// Scale down to what we can afford
 			qty = b.portfolio.cash / (execPrice * (1 + b.FeeRate))
 			cost = qty * execPrice
 			fee = cost * b.FeeRate
@@ -146,36 +153,90 @@ func (b *SimBroker) execute(req strategy.OrderRequest, bar exchange.Kline) (stra
 		}
 		b.nextID++
 		return strategy.Fill{
-			ID:        fmt.Sprintf("sim-%d", b.nextID),
-			Symbol:    req.Symbol,
-			Side:      strategy.SideBuy,
-			Qty:       qty,
-			Price:     execPrice,
-			Fee:       fee,
-			Timestamp: bar.CloseTime,
+			ID:           fmt.Sprintf("sim-%d", b.nextID),
+			Symbol:       req.Symbol,
+			Side:         strategy.SideBuy,
+			PositionSide: req.PositionSide,
+			Qty:          qty,
+			Price:        execPrice,
+			Fee:          fee,
+			Timestamp:    bar.CloseTime,
 		}, nil
 
 	case strategy.SideSell:
-		pos, exists := b.portfolio.positions[req.Symbol]
+		pos, exists := b.portfolio.longPositions[req.Symbol]
 		if !exists || pos.Qty <= 0 {
-			return strategy.Fill{}, fmt.Errorf("no position to sell for %s", req.Symbol)
+			return strategy.Fill{}, fmt.Errorf("no long position to sell for %s", req.Symbol)
 		}
 		if qty == 0 || qty > pos.Qty {
-			qty = pos.Qty // sell entire position
+			qty = pos.Qty
 		}
 		proceeds := qty * execPrice
 		fee := proceeds * b.FeeRate
 		b.nextID++
 		return strategy.Fill{
-			ID:        fmt.Sprintf("sim-%d", b.nextID),
-			Symbol:    req.Symbol,
-			Side:      strategy.SideSell,
-			Qty:       qty,
-			Price:     execPrice,
-			Fee:       fee,
-			Timestamp: bar.CloseTime,
+			ID:           fmt.Sprintf("sim-%d", b.nextID),
+			Symbol:       req.Symbol,
+			Side:         strategy.SideSell,
+			PositionSide: req.PositionSide,
+			Qty:          qty,
+			Price:        execPrice,
+			Fee:          fee,
+			Timestamp:    bar.CloseTime,
 		}, nil
 	}
+	return strategy.Fill{}, fmt.Errorf("unknown side: %s", req.Side)
+}
 
+func (b *SimBroker) executeShort(req strategy.OrderRequest, bar exchange.Kline) (strategy.Fill, error) {
+	execPrice := bar.Close
+	switch req.Side {
+	case strategy.SideBuy:
+		execPrice *= (1 + b.Slippage)
+	case strategy.SideSell:
+		execPrice *= (1 - b.Slippage)
+	}
+
+	qty := req.Qty
+	switch req.Side {
+	case strategy.SideSell:
+		// Open / add to SHORT. Margin assumed sufficient (no cash check).
+		if qty <= 0 {
+			return strategy.Fill{}, fmt.Errorf("short open requires explicit qty")
+		}
+		fee := qty * execPrice * b.FeeRate
+		b.nextID++
+		return strategy.Fill{
+			ID:           fmt.Sprintf("sim-%d", b.nextID),
+			Symbol:       req.Symbol,
+			Side:         strategy.SideSell,
+			PositionSide: strategy.PositionSideShort,
+			Qty:          qty,
+			Price:        execPrice,
+			Fee:          fee,
+			Timestamp:    bar.CloseTime,
+		}, nil
+
+	case strategy.SideBuy:
+		pos, exists := b.portfolio.shortPositions[req.Symbol]
+		if !exists || pos.Qty <= 0 {
+			return strategy.Fill{}, fmt.Errorf("no short position to cover for %s", req.Symbol)
+		}
+		if qty == 0 || qty > pos.Qty {
+			qty = pos.Qty
+		}
+		fee := qty * execPrice * b.FeeRate
+		b.nextID++
+		return strategy.Fill{
+			ID:           fmt.Sprintf("sim-%d", b.nextID),
+			Symbol:       req.Symbol,
+			Side:         strategy.SideBuy,
+			PositionSide: strategy.PositionSideShort,
+			Qty:          qty,
+			Price:        execPrice,
+			Fee:          fee,
+			Timestamp:    bar.CloseTime,
+		}, nil
+	}
 	return strategy.Fill{}, fmt.Errorf("unknown side: %s", req.Side)
 }

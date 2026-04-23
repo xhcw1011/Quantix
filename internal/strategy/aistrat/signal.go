@@ -91,10 +91,20 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// ── Primary interval bars: full logic below ──
 	s.barCount++
 	// Skip processing on stale backfill bars; wait for first real-time bar.
+	// Exception: backtest mode (ctx.Extra["backtest"]=true) bypasses this
+	// guard since all historical bars are "stale" by definition. Without
+	// this, backtest produces 0 trades (regression when GPT replay path was
+	// removed in 9d090db).
 	if !s.liveReady {
-		if time.Since(bar.CloseTime) < 2*time.Minute {
+		// backtest_replay is set by cmd/backtest when running on historical data.
+		isBacktest, _ := ctx.Extra["backtest_replay"].(bool)
+		if isBacktest || time.Since(bar.CloseTime) < 2*time.Minute {
 			s.liveReady = true
-			s.log.Info("SIG: live ready — first real-time bar")
+			if isBacktest {
+				s.log.Info("SIG: live ready — backtest mode")
+			} else {
+				s.log.Info("SIG: live ready — first real-time bar")
+			}
 		} else {
 			return
 		}

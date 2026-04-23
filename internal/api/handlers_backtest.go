@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Quantix/quantix/internal/backtest"
 	"github.com/Quantix/quantix/internal/data"
+	"github.com/Quantix/quantix/internal/logger"
 	"github.com/Quantix/quantix/internal/strategy/registry"
 )
 
@@ -137,6 +139,30 @@ func (s *Server) runBacktest(jobID string, req backtestReq, startDate, endDate *
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
+	// Per-job backtest logger: isolates verbose strategy/engine logs from the
+	// main app log. Falls back to the main logger when LogDir is unset.
+	btLog := s.log
+	if s.logDir != "" {
+		path := filepath.Join(s.logDir, "backtest", "backtest-"+jobID+".log")
+		lvl := s.logLevel
+		if lvl == "" {
+			lvl = "info"
+		}
+		if fl, err := logger.NewFileLogger(path, lvl); err == nil {
+			btLog = fl
+			defer fl.Sync()
+			s.log.Info("backtest started",
+				zap.String("id", jobID),
+				zap.String("strategy", req.StrategyID),
+				zap.String("symbol", req.Symbol),
+				zap.String("log_file", path),
+			)
+		} else {
+			s.log.Warn("backtest logger init failed, falling back to main log",
+				zap.String("id", jobID), zap.Error(err))
+		}
+	}
+
 	// Build strategy params
 	stratParams := map[string]any{
 		"Symbol":   req.Symbol,
@@ -146,7 +172,7 @@ func (s *Server) runBacktest(jobID string, req backtestReq, startDate, endDate *
 		stratParams[k] = v
 	}
 
-	strat, err := registry.Create(req.StrategyID, stratParams, s.log)
+	strat, err := registry.Create(req.StrategyID, stratParams, btLog)
 	if err != nil {
 		s.finishBacktest(ctx, jobID, nil, err.Error())
 		return
@@ -166,7 +192,10 @@ func (s *Server) runBacktest(jobID string, req backtestReq, startDate, endDate *
 		cfg.EndTime = *endDate
 	}
 
-	engine := backtest.New(cfg, s.store, strat, s.log)
+	engine := backtest.New(cfg, s.store, strat, btLog)
+	// Bypass live-data staleness guard in aistrat signal.go — historical bars
+	// would otherwise be rejected and the strategy never becomes "live_ready".
+	engine.SetExtra("backtest_replay", true)
 	report, err := engine.Run(ctx)
 	if err != nil {
 		s.finishBacktest(ctx, jobID, nil, err.Error())

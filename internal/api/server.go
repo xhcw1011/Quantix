@@ -26,6 +26,8 @@ type Server struct {
 	jwtExpiry   time.Duration
 	rateLimiter *ipRateLimiter
 	log         *zap.Logger
+	logDir      string
+	logLevel    string
 }
 
 // NewServer creates a configured Server.
@@ -54,6 +56,8 @@ func NewServer(store *data.Store, enc *Encryptor, jwtSecret string, smtpCfg conf
 		rateLimiter: newIPRateLimiter(rate.Limit(rps), burst),
 		wsHub:       wsHub,
 		log:         log,
+		logDir:      cfg.App.LogDir,
+		logLevel:    cfg.App.LogLevel,
 	}
 	s.manager = NewEngineManager(store, enc, smtpCfg, wsHub, cfg, rdb, log)
 	return s

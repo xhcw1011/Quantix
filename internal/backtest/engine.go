@@ -172,12 +172,22 @@ func (e *Engine) loadKlines(ctx context.Context) ([]exchange.Kline, error) {
 
 // closeOpenPositions force-closes any remaining open positions at the last bar's close.
 func (e *Engine) closeOpenPositions(lastBar exchange.Kline) {
-	for sym := range e.portfolio.positions {
+	for sym := range e.portfolio.longPositions {
 		e.broker.PlaceOrder(strategy.OrderRequest{
-			Symbol: sym,
-			Side:   strategy.SideSell,
-			Type:   strategy.OrderMarket,
-			Qty:    0, // close all
+			Symbol:       sym,
+			Side:         strategy.SideSell,
+			PositionSide: strategy.PositionSideLong,
+			Type:         strategy.OrderMarket,
+			Qty:          0,
+		})
+	}
+	for sym := range e.portfolio.shortPositions {
+		e.broker.PlaceOrder(strategy.OrderRequest{
+			Symbol:       sym,
+			Side:         strategy.SideBuy,
+			PositionSide: strategy.PositionSideShort,
+			Type:         strategy.OrderMarket,
+			Qty:          0,
 		})
 	}
 	fills := e.broker.Process(lastBar)

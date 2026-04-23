@@ -160,6 +160,48 @@ func (s *AIStrategy) throttledReplaceSL(symbol, posSide, closeSide string, qty, 
 	s.lastSLReplace = time.Now()
 }
 
+// checkGridProtections evaluates fixed-distance SL and TP for a grid position
+// at the given price. Returns true if the position was closed so the caller
+// skips further management.
+//
+// Shared by OnTick (tickManage) and OnBar (manageRange): live broker delivers
+// ticks so OnTick hits first, but backtests only see bar closes — without the
+// OnBar call these guards are skipped entirely in backtest. src is just a log
+// tag ("TICK" or "BAR").
+//
+// consecLoss is intentionally NOT incremented on fixed_sl: the grid risk cap
+// is position-scoped, not a strategy-failure signal. Letting it count toward
+// consecLoss would halt trend entries after 3 grid SLs, conflating grid risk
+// management with trend-signal disruption (separate evaluation paths).
+func (s *AIStrategy) checkGridProtections(ctx *strategy.Context, price float64, p *posState, pptr **posState, src string) bool {
+	if s.cfg.GridFixedSLDist > 0 {
+		var advDist float64
+		if p.side == "LONG" { advDist = p.entryPrice - price }
+		if p.side == "SHORT" { advDist = price - p.entryPrice }
+		if advDist > s.cfg.GridFixedSLDist {
+			s.log.Warn(src+" GRID fixed-distance SL hit",
+				zap.String("side", p.side),
+				zap.Float64("entry", p.entryPrice),
+				zap.Float64("price", price),
+				zap.Float64("dist", advDist),
+				zap.Float64("threshold", s.cfg.GridFixedSLDist),
+				zap.Int("layers", len(p.gridOrders)))
+			s.closePos(ctx, p, pptr, "fixed_sl", price)
+			return true
+		}
+	}
+	if p.takeProfit > 0 {
+		if (p.side == "LONG" && price >= p.takeProfit) || (p.side == "SHORT" && price <= p.takeProfit) {
+			s.log.Info(src+" GRID TP", zap.String("side", p.side),
+				zap.Float64("price", price), zap.Float64("tp", p.takeProfit))
+			s.closePos(ctx, p, pptr, "grid_tp", price)
+			s.consecLoss = 0
+			return true
+		}
+	}
+	return false
+}
+
 func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posState, pptr **posState) {
 	// Throttle after close failure: don't retry for 10s to prevent tick-level spam.
 	if !s.lastCloseFailAt.IsZero() && time.Since(s.lastCloseFailAt) < 10*time.Second {
@@ -171,39 +213,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 
 	// ── Range/grid mode: fixed-distance SL + TP check on tick ──
 	if p.mode == modeRange {
-		// Fixed-distance SL: exit if price moved against base entry by more
-		// than GridFixedSLDist. Replaces regime_flip (too eager); user wants
-		// "fixed loss exit" — predictable max loss, not trend-based判断.
-		// Distance measured from base entry (p.entryPrice), not weighted avg.
-		if s.cfg.GridFixedSLDist > 0 {
-			var advDist float64
-			if p.side == "LONG" { advDist = p.entryPrice - price }
-			if p.side == "SHORT" { advDist = price - p.entryPrice }
-			if advDist > s.cfg.GridFixedSLDist {
-				s.log.Warn("TICK GRID fixed-distance SL hit",
-					zap.String("side", p.side),
-					zap.Float64("entry", p.entryPrice),
-					zap.Float64("price", price),
-					zap.Float64("dist", advDist),
-					zap.Float64("threshold", s.cfg.GridFixedSLDist),
-					zap.Int("layers", len(p.gridOrders)))
-				s.closePos(ctx, p, pptr, "fixed_sl", price)
-				// Don't increment consecLoss — GRID's fixed_sl is a position-level
-				// risk cap, not a strategy-failure signal. Letting it count toward
-				// consecLoss would halt trend entries (signal.go 1h EMA filter block)
-				// after 3 grid SLs, conflating grid risk management with trend策略
-				// disruption. Grid and trend are independent evaluation paths.
-				return
-			}
-		}
-		if p.takeProfit > 0 {
-			if (p.side == "LONG" && price >= p.takeProfit) || (p.side == "SHORT" && price <= p.takeProfit) {
-				s.log.Info("TICK GRID TP", zap.String("side", p.side),
-					zap.Float64("price", price), zap.Float64("tp", p.takeProfit))
-				s.closePos(ctx, p, pptr, "grid_tp", price)
-				s.consecLoss = 0
-			}
-		}
+		if s.checkGridProtections(ctx, price, p, pptr, "TICK") { return }
 		return
 	}
 

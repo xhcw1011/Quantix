@@ -64,26 +64,17 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 }
 
 
-// manageRange handles Range/grid positions: fixed TP at BB middle, grid layers on drawdown.
-// SL: fixed-distance check is in tickManage (strategy.go) — exit if price moves
-// > GridFixedSLDist from base entry. No bar-level SL here.
+// manageRange handles Range/grid positions: BE lock + fixed-distance SL + TP,
+// followed by grid layer management on drawdown.
+//
+// Protections are shared with tickManage via checkGridProtections so that
+// backtests — which only see bar closes, no OnTick — still apply BE lock and
+// fixed-distance SL. Without this, backtest losses can exceed nominal $50
+// because the old bar-only path skipped the SL check entirely.
 func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
 	price := bar.Close
 
-	// ── Base position TP check ──
-	if p.takeProfit > 0 {
-		tpHit := false
-		if p.side == "LONG" && price >= p.takeProfit { tpHit = true }
-		if p.side == "SHORT" && price <= p.takeProfit { tpHit = true }
-		if tpHit {
-			s.log.Info("SIG: GRID TP hit",
-				zap.String("side", p.side), zap.Float64("entry", p.entryPrice),
-				zap.Float64("tp", p.takeProfit), zap.Float64("price", price))
-			s.closePos(ctx, p, pptr, "grid_tp", price)
-			s.consecLoss = 0
-			return
-		}
-	}
+	if s.checkGridProtections(ctx, price, p, pptr, "BAR") { return }
 
 	// ── Grid layer management: add layers on drawdown, close on layer TP ──
 	s.manageGrid(ctx, bar, p, pptr)

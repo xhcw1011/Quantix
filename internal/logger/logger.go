@@ -81,6 +81,35 @@ func openLogFile(logDir string) (string, error) {
 	return filepath.Join(logDir, filename), nil
 }
 
+// NewFileLogger creates a logger that writes ONLY to the given file path.
+// Used for isolated log streams (e.g., per-backtest logs) that should not
+// mix with the main application log. Parent directory is created if missing.
+func NewFileLogger(filePath, level string) (*zap.Logger, error) {
+	lvl, err := zap.ParseAtomicLevel(level)
+	if err != nil {
+		lvl = zap.NewAtomicLevelAt(zap.InfoLevel)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		return nil, fmt.Errorf("create log dir: %w", err)
+	}
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open log file %s: %w", filePath, err)
+	}
+
+	encoderCfg := zap.NewDevelopmentEncoderConfig()
+	encoderCfg.EncodeLevel = zapcore.CapitalLevelEncoder
+	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	core := zapcore.NewCore(
+		zapcore.NewConsoleEncoder(encoderCfg),
+		zapcore.AddSync(f),
+		lvl,
+	)
+	return zap.New(core, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel)), nil
+}
+
 // MustNew creates a logger or panics on failure.
 func MustNew(env, level, logDir string) *zap.Logger {
 	l, err := New(env, level, logDir)
