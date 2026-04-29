@@ -731,6 +731,35 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 		return 0, 0
 	}
 
+	// C: price overshoot — broke BB lower too hard, momentum likely continuing
+	if s.cfg.ReversionMaxBBLowerOvershoot > 0 && price < bbLower*(1-s.cfg.ReversionMaxBBLowerOvershoot) {
+		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "bb_lower_overshoot"),
+			zap.Float64("price", price), zap.Float64("bb_lower", bbLower),
+			zap.Float64("overshoot_pct", (bbLower-price)/bbLower*100))
+		return 0, 0
+	}
+
+	// A: opposing trend_dir — short-term direction against position = catching a falling knife
+	if s.cfg.ReversionBlockOpposingTrendDir && s.lastTrendDir == -1 {
+		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "opposing_trend_dir"),
+			zap.Int("trend_dir", s.lastTrendDir))
+		return 0, 0
+	}
+
+	// B: BB rapid expansion = volatility breakout starting, not range — reject
+	if s.cfg.ReversionMaxBBExpansionRatio > 0 && len(bb.Lower) >= 6 {
+		bbWidthPrev := bb.Upper[len(bb.Upper)-6] - bb.Lower[len(bb.Lower)-6]
+		if bbWidthPrev > 0 {
+			ratio := bbWidth / bbWidthPrev
+			if ratio > s.cfg.ReversionMaxBBExpansionRatio {
+				s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "bb_expanding"),
+					zap.Float64("ratio", ratio), zap.Float64("max", s.cfg.ReversionMaxBBExpansionRatio),
+					zap.Float64("width_now", bbWidth), zap.Float64("width_5b_ago", bbWidthPrev))
+				return 0, 0
+			}
+		}
+	}
+
 	// Adverse momentum guard: reversion assumes mean-reversion, but in clear
 	// downtrend (急跌/破前 5 根低/3 根累计大跌) it'd catch a falling knife.
 	// regime_flip would tally the loss later (~$3-5 each); reject here instead.
@@ -797,6 +826,35 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 			zap.Float64("price", price), zap.Float64("bb_upper", bbUpper),
 			zap.Float64("px_below_upper_pct", (bbUpper-price)/bbUpper*100))
 		return 0, 0
+	}
+
+	// C: price overshoot — broke BB upper too hard, momentum likely continuing
+	if s.cfg.ReversionMaxBBLowerOvershoot > 0 && price > bbUpper*(1+s.cfg.ReversionMaxBBLowerOvershoot) {
+		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "bb_upper_overshoot"),
+			zap.Float64("price", price), zap.Float64("bb_upper", bbUpper),
+			zap.Float64("overshoot_pct", (price-bbUpper)/bbUpper*100))
+		return 0, 0
+	}
+
+	// A: opposing trend_dir — short-term uptrend means SHORT is fading momentum
+	if s.cfg.ReversionBlockOpposingTrendDir && s.lastTrendDir == 1 {
+		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "opposing_trend_dir"),
+			zap.Int("trend_dir", s.lastTrendDir))
+		return 0, 0
+	}
+
+	// B: BB rapid expansion = breakout starting (downward this time, but symmetric)
+	if s.cfg.ReversionMaxBBExpansionRatio > 0 && len(bb.Lower) >= 6 {
+		bbWidthPrev := bb.Upper[len(bb.Upper)-6] - bb.Lower[len(bb.Lower)-6]
+		if bbWidthPrev > 0 {
+			ratio := bbWidth / bbWidthPrev
+			if ratio > s.cfg.ReversionMaxBBExpansionRatio {
+				s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "bb_expanding"),
+					zap.Float64("ratio", ratio), zap.Float64("max", s.cfg.ReversionMaxBBExpansionRatio),
+					zap.Float64("width_now", bbWidth), zap.Float64("width_5b_ago", bbWidthPrev))
+				return 0, 0
+			}
+		}
 	}
 
 	// Adverse momentum guard: see reversionBuySignal for rationale.

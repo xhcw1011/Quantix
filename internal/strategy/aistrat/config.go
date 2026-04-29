@@ -37,6 +37,10 @@ func init() {
 		if v, ok := params["GridMinTPDist"]; ok { cfg.GridMinTPDist = toFloat(v) }
 		if v, ok := params["GridFixedSLDist"]; ok { cfg.GridFixedSLDist = toFloat(v) }
 		if v, ok := params["GridLayerSpacing"]; ok { cfg.GridLayerSpacing = toFloat(v) }
+		if v, ok := params["EnableTrend"].(bool); ok { cfg.EnableTrend = v }
+		if v, ok := params["ReversionBlockOpposingTrendDir"].(bool); ok { cfg.ReversionBlockOpposingTrendDir = v }
+		if v, ok := params["ReversionMaxBBExpansionRatio"]; ok { cfg.ReversionMaxBBExpansionRatio = toFloat(v) }
+		if v, ok := params["ReversionMaxBBLowerOvershoot"]; ok { cfg.ReversionMaxBBLowerOvershoot = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
 		if v, ok := params["GridQtyRatio"]; ok { cfg.GridQtyRatio = toFloat(v) }
@@ -205,6 +209,28 @@ type Config struct {
 	GridMinTPDist  float64 // min TP distance in $ — floor when BB is narrow (default 5.0)
 	GridFixedSLDist float64 // fixed-distance SL: exit grid if price moves > this $ from base entry (default 50.0)
 	GridLayerSpacing float64 // fixed $ between grid layers: layer N triggers at base ± (N × this) (default 10.0)
+	// EnableTrend gates ALL trend-mode entries (openTrend / openHedgeScalp).
+	// When false, only RANGE/grid entries are allowed and breakout signals are
+	// silently dropped. Used to validate the hypothesis that grid-only is the
+	// profitable subset (demo data 04-24~27: grid +$50, trend -$67).
+	EnableTrend bool
+
+	// ── Reversion entry filters (added 04-28 after $-73 fixed_sl event) ──
+	//
+	// A: ReversionBlockOpposingTrendDir blocks reversion LONG when
+	// lastTrendDir=-1 (and SHORT when lastTrendDir=+1). Catches the "刚开始
+	// 单边下跌时接飞刀" pattern. trend_dir comes from detectRegime — already
+	// computed each bar.
+	ReversionBlockOpposingTrendDir bool
+	// B: ReversionMaxBBExpansionRatio rejects entries when BB width has
+	// expanded too quickly. Computed as bbWidth[now] / bbWidth[5_bars_ago].
+	// > this ratio = volatility breakout starting, not range trade. 0 disables.
+	// Default 1.5 (50% expansion in 25 minutes on 5m).
+	ReversionMaxBBExpansionRatio float64
+	// C: ReversionMaxBBLowerOvershoot caps how far below BB lower the price
+	// can be when opening LONG (mirror for SHORT/upper). 0.002 = 0.2%. Beyond
+	// that = price already broke band hard, momentum continuing, not reverting.
+	ReversionMaxBBLowerOvershoot float64
 
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
@@ -367,6 +393,10 @@ func DefaultConfig() Config {
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
 		GridMaxLayers: 3, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
 		GridMaxTPDist: 12.0, GridMinTPDist: 5.0, GridFixedSLDist: 50.0, GridLayerSpacing: 10.0,
+		EnableTrend: false, // grid-only mode by default — validate hypothesis before re-enabling
+		ReversionBlockOpposingTrendDir: true, // A: block LONG-on-bearish-trend, SHORT-on-bullish
+		ReversionMaxBBExpansionRatio:   0,    // B disabled — heuristic threshold un-calibrated; verify A+C first
+		ReversionMaxBBLowerOvershoot:   0.002, // C: reject if price > 0.2% below BB lower (= momentum continuing)
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────
