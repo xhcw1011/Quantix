@@ -641,7 +641,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				s.lastConf = longConf
 				s.openGrid(ctx, "LONG", price, entry, atr)
 				if s.longPos != nil { s.longPos.entryRegime = regime }
-			} else if s.cfg.EnableTrend {
+			} else {
 				// Breakout: use signal's entry (retest level = previous high/low)
 				entry = longEntry
 				if entry <= 0 { entry = math.Round(price*100) / 100 }
@@ -653,9 +653,6 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 					s.openTrend(ctx, "LONG", price, entry, atr, gptTP)
 					if s.longPos != nil { s.longPos.entryRegime = regime }
 				}
-			} else {
-				s.log.Info("sig_reject", zap.String("fn", "openTrend"),
-					zap.String("reason", "trend_disabled"), zap.String("side", "LONG"))
 			}
 		}
 	}
@@ -679,7 +676,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				s.lastConf = shortConf
 				s.openGrid(ctx, "SHORT", price, entry, atr)
 				if s.shortPos != nil { s.shortPos.entryRegime = regime }
-			} else if s.cfg.EnableTrend {
+			} else {
 				entry = shortEntry
 				if entry <= 0 { entry = math.Round(price*100) / 100 }
 				gptTP := longEntry
@@ -690,9 +687,6 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 					s.openTrend(ctx, "SHORT", price, entry, atr, gptTP)
 					if s.shortPos != nil { s.shortPos.entryRegime = regime }
 				}
-			} else {
-				s.log.Info("sig_reject", zap.String("fn", "openTrend"),
-					zap.String("reason", "trend_disabled"), zap.String("side", "SHORT"))
 			}
 		}
 	}

@@ -64,20 +64,94 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 }
 
 
-// manageRange handles Range/grid positions: BE lock + fixed-distance SL + TP,
-// followed by grid layer management on drawdown.
+// manageRange handles Range/grid positions: TP + (optional) fixed_sl, then
+// grid layer management on drawdown.
 //
 // Protections are shared with tickManage via checkGridProtections so that
-// backtests — which only see bar closes, no OnTick — still apply BE lock and
-// fixed-distance SL. Without this, backtest losses can exceed nominal $50
-// because the old bar-only path skipped the SL check entirely.
+// backtests — which only see bar closes, no OnTick — still apply them.
+//
+// 04-29: when regime shifts out of RANGE, the position is converted to trend
+// management (gets SL/TP/trailing protection it didn't have as grid). The
+// 90-day backtest showed unmanaged grid positions stranded into trends drove
+// most losses — this is the structural fix.
 func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
 	price := bar.Close
+
+	// Convert to trend management if regime has shifted out of RANGE.
+	// Trend mode brings SL + trailing + bounce_tp, so the position is no
+	// longer naked when the range assumption breaks.
+	if p.entryRegime == RegimeRange && s.lastRegime != RegimeRange && s.lastRegime != "" {
+		s.convertGridToTrend(ctx, p, price)
+		// After conversion, fall through to manageTrend by re-dispatching.
+		s.manageTrend(ctx, bar, p, pptr)
+		return
+	}
 
 	if s.checkGridProtections(ctx, price, p, pptr, "BAR") { return }
 
 	// ── Grid layer management: add layers on drawdown, close on layer TP ──
 	s.manageGrid(ctx, bar, p, pptr)
+}
+
+// convertGridToTrend repurposes a grid position for trend-style management.
+// Called when the regime shifts out of RANGE — the original "price will revert
+// to BB middle" assumption is broken, so the position needs the SL + trailing
+// it never got as grid. Cancels pending layer limit orders, derives SL/R from
+// current ATR + weighted avg entry, and resets trailing state.
+func (s *AIStrategy) convertGridToTrend(ctx *strategy.Context, p *posState, price float64) {
+	avgEntry := weightedAvgEntry(p)
+	atr := s.calcATR()
+	if atr <= 0 { atr = math.Abs(p.entryPrice) * 0.005 } // 0.5% fallback
+
+	// Trend SL = wt_avg_entry ± ATR×ATRK (mirrors openTrend's SLOW_TREND path).
+	// Wider SL than openTrend's STRONG_TREND swing variant on purpose: this
+	// position was opened in RANGE so we don't have validated swing structure;
+	// ATR-based SL is the safest derivation.
+	atrK := s.cfg.ATRK
+	if atrK <= 0 { atrK = 3.0 }
+	dist := atr * atrK
+	minDist := avgEntry * s.cfg.MinSLDistPct
+	if dist < minDist { dist = minDist }
+	var newSL float64
+	if p.side == "LONG" {
+		newSL = math.Round((avgEntry-dist)*100) / 100
+	} else {
+		newSL = math.Round((avgEntry+dist)*100) / 100
+	}
+
+	// Cancel pending grid layer limit orders — no more layering after conversion.
+	cancelled := 0
+	for _, g := range p.gridOrders {
+		if !g.filled && g.orderID != "" {
+			ctx.CancelOrder(g.orderID)
+			cancelled++
+		}
+	}
+
+	// Reset trend-management state for this position.
+	p.mode = modeTrend
+	p.stopLoss = newSL
+	p.R = math.Abs(avgEntry - newSL)
+	p.peakPrice = price
+	p.trailing = newSL
+	p.entryATR = atr
+	p.trailTier = 0
+	p.tp1RHit = false
+	p.takeProfit = 0 // grid TP no longer applies; trend uses staged TPs
+
+	s.log.Warn("SIG: grid → trend conversion",
+		zap.String("side", p.side),
+		zap.String("reason", "regime_shifted_out_of_range"),
+		zap.String("new_regime", string(s.lastRegime)),
+		zap.Int("trend_dir", s.lastTrendDir),
+		zap.Float64("avg_entry", avgEntry),
+		zap.Float64("price", price),
+		zap.Float64("new_sl", newSL),
+		zap.Float64("new_R", p.R),
+		zap.Float64("atr", atr),
+		zap.Int("cancelled_layers", cancelled),
+		zap.Float64("remain_qty", p.remainQty))
+	s.syncToRedis(p)
 }
 
 func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {

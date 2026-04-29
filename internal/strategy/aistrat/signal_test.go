@@ -311,3 +311,92 @@ func TestReversionBuy_FiltersDisabled_ZeroValuesBypass(t *testing.T) {
 	// Hard to assert without log scraping; test compiles and runs without panicking.
 	_, _ = s.reversionBuySignal()
 }
+
+// ─── BB middle gate — fix for 04-28 21:35 SHORT @2269.75 ────────────────────
+// Pre-fix: reversionSell accepted price at $2269.75 when bb_middle=$2273 because
+// the only band-proximity gate was `price < bb_upper * 0.995` (= $11 buffer on
+// ETH 5m BB, ~half the half-width). Result: SHORT entry below middle in a
+// downtrend → fixed_sl candidate. Now: must be on correct side of middle first.
+
+func TestReversionSell_BlockedWhenBelowMiddle(t *testing.T) {
+	// Reproduce 21:35: bb_lower=2266, bb_middle=2273, bb_upper=2280
+	// Price 2269.75 — below middle. Pre-fix: passes (within 0.5% of upper).
+	// Post-fix: must be >= middle, so rejected.
+	bars := make([]exchange.Kline, 40)
+	// Oscillating ±7 around 2273 to make middle ≈ 2273, std ≈ 7, upper/lower ≈ ±14
+	for i := 0; i < 40; i++ {
+		offset := 7.0
+		if i%2 == 1 { offset = -7.0 }
+		p := 2273.0 + offset
+		bars[i] = makeBar(p, p+1, p-1, p)
+	}
+	// Last bar at 2269.75 — inside band, but below middle
+	bars[39] = makeBar(2269.75, 2270.0, 2269.0, 2269.75)
+	s := newReversionTestStrategy(bars)
+	s.cfg.ReversionBlockOpposingTrendDir = false // isolate this filter
+	s.cfg.ReversionMaxBBExpansionRatio = 0
+	s.cfg.ReversionMaxBBLowerOvershoot = 0
+	s.lastTrendDir = 0
+
+	conf, _ := s.reversionSellSignal()
+	assert.Equal(t, 0.0, conf, "SHORT must be rejected when price below bb_middle")
+}
+
+func TestReversionBuy_BlockedWhenAboveMiddle(t *testing.T) {
+	// Mirror: LONG entry must be in lower half of BB.
+	bars := make([]exchange.Kline, 40)
+	for i := 0; i < 40; i++ {
+		offset := 7.0
+		if i%2 == 1 { offset = -7.0 }
+		p := 2273.0 + offset
+		bars[i] = makeBar(p, p+1, p-1, p)
+	}
+	// Last bar at 2275 — above middle
+	bars[39] = makeBar(2275.0, 2275.5, 2274.5, 2275.0)
+	s := newReversionTestStrategy(bars)
+	s.cfg.ReversionBlockOpposingTrendDir = false
+	s.cfg.ReversionMaxBBExpansionRatio = 0
+	s.cfg.ReversionMaxBBLowerOvershoot = 0
+
+	conf, _ := s.reversionBuySignal()
+	assert.Equal(t, 0.0, conf, "LONG must be rejected when price above bb_middle")
+}
+
+// ─── 04-29 strict band rule (reproduces the 12:50 case) ─────────────────────
+// Data: 3/3 entries with pxLo% < 0 ended in loss (one was -$73 fixed_sl).
+// Default ReversionMaxBBLowerOvershoot=0 means: any break of the band rejects.
+
+func TestReversionBuy_StrictRejectsAnyBandBreak_Default(t *testing.T) {
+	// Mirror the 04-27 12:50 entry: price slightly below bb_lower (pxLo% < 0).
+	bars := make([]exchange.Kline, 40)
+	for i := 0; i < 40; i++ {
+		offset := 7.0
+		if i%2 == 1 { offset = -7.0 }
+		p := 2273.0 + offset
+		bars[i] = makeBar(p, p+1, p-1, p)
+	}
+	// Bars oscillate ±7 → bb_lower ≈ 2257.4. Place last at 2255 (clearly below).
+	bars[39] = makeBar(2255.0, 2256.0, 2254.5, 2255.0)
+	s := newReversionTestStrategy(bars)
+	// Defaults already strict (overshoot=0); just verify behavior
+	conf, _ := s.reversionBuySignal()
+	assert.Equal(t, 0.0, conf, "any break of bb_lower must be rejected under default strict rule")
+}
+
+func TestReversionBuy_AcceptsAtBandWithDefaults(t *testing.T) {
+	// Price exactly above bb_lower (pxLo% > 0 small) should NOT be rejected
+	// by the overshoot rule. Other rules may still reject (bb_narrow etc.) but
+	// this test isolates the overshoot path.
+	bars := make([]exchange.Kline, 40)
+	for i := 0; i < 40; i++ {
+		offset := 7.0
+		if i%2 == 1 { offset = -7.0 }
+		p := 2273.0 + offset
+		bars[i] = makeBar(p, p+1, p-1, p)
+	}
+	// bb_lower ≈ 2259; place last at 2260 (just above lower band, no overshoot)
+	bars[39] = makeBar(2260.0, 2260.5, 2259.5, 2260.0)
+	s := newReversionTestStrategy(bars)
+	conf, _ := s.reversionBuySignal()
+	assert.Greater(t, conf, 0.0, "price just above bb_lower should NOT be rejected by overshoot")
+}

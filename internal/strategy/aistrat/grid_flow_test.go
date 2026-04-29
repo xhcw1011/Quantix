@@ -316,3 +316,92 @@ func TestTickManage_MinHoldBarsGuard(t *testing.T) {
 	assert.Len(t, broker.Placed, 0, "MinHoldBars not met — skip tick management")
 	assert.NotNil(t, s.longPos)
 }
+
+// ─── Grid → Trend conversion (04-29) ────────────────────────────────────────
+// 90-day backtest showed unmanaged grid positions stranded into trends drove
+// most losses. When regime shifts out of RANGE, position must inherit trend's
+// SL/trailing protection (which it never had as grid).
+
+func TestConvertGridToTrend_LongRegimeShiftSetsSLBelowAvg(t *testing.T) {
+	s, _, ctx := newGridTestStrategy(80, 2300.0)
+	pos := &posState{
+		side: "LONG", mode: modeRange, entryPrice: 2300.0, entryATR: 5,
+		initQty: 1.0, remainQty: 1.5, R: 18, stopLoss: 2280, takeProfit: 2308,
+		filled: true, entryRegime: RegimeRange,
+		gridOrders: []*gridOrder{
+			{entryPrice: 2290.0, qty: 0.5, filled: true},
+		},
+	}
+	s.longPos = pos
+	s.lastRegime = RegimeStrongTrend
+	s.lastTrendDir = -1
+
+	currentPrice := 2280.0
+	s.convertGridToTrend(ctx, pos, currentPrice)
+
+	assert.Equal(t, modeTrend, pos.mode, "mode should switch to trend")
+	wtAvg := (2300.0*1.0 + 2290.0*0.5) / 1.5
+	assert.Less(t, pos.stopLoss, wtAvg, "LONG SL must be below avg entry")
+	assert.Equal(t, currentPrice, pos.peakPrice, "peakPrice resets to current")
+	assert.Equal(t, 0.0, pos.takeProfit, "takeProfit cleared (trend uses staged TPs)")
+	assert.Greater(t, pos.R, 0.0, "R must be positive after conversion")
+}
+
+func TestConvertGridToTrend_ShortRegimeShiftSetsSLAboveAvg(t *testing.T) {
+	s, _, ctx := newGridTestStrategy(80, 2300.0)
+	pos := &posState{
+		side: "SHORT", mode: modeRange, entryPrice: 2300.0, entryATR: 5,
+		initQty: 1.0, remainQty: 1.5, R: 18, stopLoss: 2320, takeProfit: 2292,
+		filled: true, entryRegime: RegimeRange,
+		gridOrders: []*gridOrder{{entryPrice: 2310.0, qty: 0.5, filled: true}},
+	}
+	s.shortPos = pos
+	s.lastRegime = RegimeStrongTrend
+	s.lastTrendDir = 1
+
+	currentPrice := 2320.0
+	s.convertGridToTrend(ctx, pos, currentPrice)
+
+	assert.Equal(t, modeTrend, pos.mode)
+	wtAvg := (2300.0*1.0 + 2310.0*0.5) / 1.5
+	assert.Greater(t, pos.stopLoss, wtAvg, "SHORT SL must be above avg entry")
+	assert.Equal(t, currentPrice, pos.peakPrice)
+}
+
+func TestConvertGridToTrend_CancelsPendingLayers(t *testing.T) {
+	s, broker, ctx := newGridTestStrategy(80, 2300.0)
+	pos := &posState{
+		side: "LONG", mode: modeRange, entryPrice: 2300.0, entryATR: 5,
+		initQty: 1.0, remainQty: 1.0, R: 18, stopLoss: 2280, takeProfit: 2308,
+		filled: true, entryRegime: RegimeRange,
+		gridOrders: []*gridOrder{
+			{entryPrice: 2290.0, qty: 0.5, filled: false, orderID: "layer-1"},
+			{entryPrice: 2280.0, qty: 0.5, filled: false, orderID: "layer-2"},
+		},
+	}
+	s.longPos = pos
+	s.lastRegime = RegimeStrongTrend
+	s.lastTrendDir = -1
+
+	s.convertGridToTrend(ctx, pos, 2280.0)
+	assert.Contains(t, broker.Cancelled, "layer-1", "pending layer 1 cancelled")
+	assert.Contains(t, broker.Cancelled, "layer-2", "pending layer 2 cancelled")
+}
+
+func TestManageRange_AutoConvertsOnRegimeShift(t *testing.T) {
+	// End-to-end: regime flips to STRONG_TREND, next bar's manageRange
+	// should auto-trigger conversion.
+	s, _, ctx := newGridTestStrategy(80, 2300.0)
+	pos := &posState{
+		side: "LONG", mode: modeRange, entryPrice: 2300.0, entryATR: 5,
+		initQty: 1.0, remainQty: 1.0, R: 18, stopLoss: 2280, takeProfit: 2308,
+		filled: true, entryRegime: RegimeRange, barsHeld: 5,
+	}
+	s.longPos = pos
+	s.lastRegime = RegimeStrongTrend
+	s.lastTrendDir = -1
+
+	bar := makeBar(2280.0, 2280.0, 2280.0, 2280.0)
+	s.manageRange(ctx, bar, pos, &s.longPos)
+	assert.Equal(t, modeTrend, pos.mode, "manageRange must detect regime shift and convert")
+}

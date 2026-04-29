@@ -25,8 +25,8 @@ func TestDefaultConfig_GridCoreParams(t *testing.T) {
 	assert.Greater(t, cfg.GridLayerSpacing, 0.0, "GridLayerSpacing must be positive")
 	assert.LessOrEqual(t, cfg.GridLayerSpacing, 100.0, "GridLayerSpacing > 100 = layers too far apart to fill")
 
-	// GridFixedSLDist: 必须正数
-	assert.Greater(t, cfg.GridFixedSLDist, 0.0, "GridFixedSLDist must be positive")
+	// GridFixedSLDist: 0 = 关闭（默认；classic grid 不用硬 SL）；>0 = 启用兜底
+	assert.GreaterOrEqual(t, cfg.GridFixedSLDist, 0.0, "GridFixedSLDist non-negative")
 }
 
 func TestDefaultConfig_GridTPRange(t *testing.T) {
@@ -45,20 +45,16 @@ func TestDefaultConfig_GridTPRange(t *testing.T) {
 // ─── 关键参数交互约束 ───────────────────────────────────────────────────────
 
 func TestDefaultConfig_LayersFitWithinFixedSL(t *testing.T) {
-	// 关键约束：3 层 layer（最远）的触发距离必须在 fixed_sl 之内，
-	// 否则 SL 先触发，layer 永远不会成交，grid 加仓机制失效。
-	//
-	// layer N 触发距离 = N × GridLayerSpacing
-	// 最远 layer N 触发 = MaxLayers × GridLayerSpacing
-	// 应满足: MaxLayers × GridLayerSpacing < GridFixedSLDist
+	// 仅当 fixed_sl 启用 (>0) 时检查 layer 距离与 SL 的关系。
+	// 关闭 fixed_sl 后此约束不适用——网格不靠硬 SL 兜底。
 	cfg := DefaultConfig()
-
+	if cfg.GridFixedSLDist <= 0 {
+		t.Skip("fixed_sl disabled; layer-vs-SL constraint not applicable")
+	}
 	maxLayerDist := float64(cfg.GridMaxLayers) * cfg.GridLayerSpacing
 	assert.Less(t, maxLayerDist, cfg.GridFixedSLDist,
 		"MaxLayers (%d) × GridLayerSpacing (%.1f) = %.1f must be < GridFixedSLDist (%.1f)",
 		cfg.GridMaxLayers, cfg.GridLayerSpacing, maxLayerDist, cfg.GridFixedSLDist)
-
-	// 最少留 10% 缓冲
 	buffer := cfg.GridFixedSLDist - maxLayerDist
 	bufferPct := buffer / cfg.GridFixedSLDist
 	assert.GreaterOrEqual(t, bufferPct, 0.10,
@@ -67,8 +63,11 @@ func TestDefaultConfig_LayersFitWithinFixedSL(t *testing.T) {
 }
 
 func TestDefaultConfig_TPWithinFixedSL(t *testing.T) {
-	// TP 必须远小于 SL，否则 R:R 颠倒
+	// 仅当 fixed_sl 启用时检查 TP < SL 关系。
 	cfg := DefaultConfig()
+	if cfg.GridFixedSLDist <= 0 {
+		t.Skip("fixed_sl disabled; TP-vs-SL R:R constraint not applicable")
+	}
 	assert.Less(t, cfg.GridMaxTPDist, cfg.GridFixedSLDist,
 		"TP max (%.1f) must be less than SL (%.1f)",
 		cfg.GridMaxTPDist, cfg.GridFixedSLDist)
@@ -259,41 +258,3 @@ func TestComputeGridTP_ConfigEdgeCases(t *testing.T) {
 	}
 }
 
-// ─── EnableTrend gate ───────────────────────────────────────────────────────
-
-func TestDefaultConfig_EnableTrendDisabledByDefault(t *testing.T) {
-	// Grid-only is the validated profitable subset (live + demo data both show
-	// trend mode is net negative). Any future change that flips this default
-	// must come with fresh evidence that trend mode has edge.
-	cfg := DefaultConfig()
-	assert.False(t, cfg.EnableTrend,
-		"EnableTrend must default to false until trend-mode edge is proven")
-}
-
-func TestFactory_EnableTrendOverride(t *testing.T) {
-	// Verify the factory plumbs EnableTrend from params map (not just default).
-	import_check := DefaultConfig() // ensure type compiles
-	_ = import_check
-	// Test via registry by constructing a minimal params map.
-	// The factory is registered at init(); we just exercise the toBool path.
-	cases := []struct {
-		val      any
-		expected bool
-	}{
-		{true, true},
-		{false, false},
-	}
-	for _, tc := range cases {
-		params := map[string]any{
-			"Symbol":      "ETHUSDT",
-			"EnableTrend": tc.val,
-		}
-		// Factory is called via registry.Create("ai", ...) — but registry has
-		// global state. Easier path: replicate the toBool dispatch inline.
-		var got bool
-		if v, ok := params["EnableTrend"].(bool); ok {
-			got = v
-		}
-		assert.Equal(t, tc.expected, got, "EnableTrend=%v override", tc.val)
-	}
-}

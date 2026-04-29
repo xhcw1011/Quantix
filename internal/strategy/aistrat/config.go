@@ -37,7 +37,6 @@ func init() {
 		if v, ok := params["GridMinTPDist"]; ok { cfg.GridMinTPDist = toFloat(v) }
 		if v, ok := params["GridFixedSLDist"]; ok { cfg.GridFixedSLDist = toFloat(v) }
 		if v, ok := params["GridLayerSpacing"]; ok { cfg.GridLayerSpacing = toFloat(v) }
-		if v, ok := params["EnableTrend"].(bool); ok { cfg.EnableTrend = v }
 		if v, ok := params["ReversionBlockOpposingTrendDir"].(bool); ok { cfg.ReversionBlockOpposingTrendDir = v }
 		if v, ok := params["ReversionMaxBBExpansionRatio"]; ok { cfg.ReversionMaxBBExpansionRatio = toFloat(v) }
 		if v, ok := params["ReversionMaxBBLowerOvershoot"]; ok { cfg.ReversionMaxBBLowerOvershoot = toFloat(v) }
@@ -209,12 +208,6 @@ type Config struct {
 	GridMinTPDist  float64 // min TP distance in $ — floor when BB is narrow (default 5.0)
 	GridFixedSLDist float64 // fixed-distance SL: exit grid if price moves > this $ from base entry (default 50.0)
 	GridLayerSpacing float64 // fixed $ between grid layers: layer N triggers at base ± (N × this) (default 10.0)
-	// EnableTrend gates ALL trend-mode entries (openTrend / openHedgeScalp).
-	// When false, only RANGE/grid entries are allowed and breakout signals are
-	// silently dropped. Used to validate the hypothesis that grid-only is the
-	// profitable subset (demo data 04-24~27: grid +$50, trend -$67).
-	EnableTrend bool
-
 	// ── Reversion entry filters (added 04-28 after $-73 fixed_sl event) ──
 	//
 	// A: ReversionBlockOpposingTrendDir blocks reversion LONG when
@@ -392,11 +385,18 @@ func DefaultConfig() Config {
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
 		GridMaxLayers: 3, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
-		GridMaxTPDist: 12.0, GridMinTPDist: 5.0, GridFixedSLDist: 50.0, GridLayerSpacing: 10.0,
-		EnableTrend: false, // grid-only mode by default — validate hypothesis before re-enabling
-		ReversionBlockOpposingTrendDir: true, // A: block LONG-on-bearish-trend, SHORT-on-bullish
-		ReversionMaxBBExpansionRatio:   0,    // B disabled — heuristic threshold un-calibrated; verify A+C first
-		ReversionMaxBBLowerOvershoot:   0.002, // C: reject if price > 0.2% below BB lower (= momentum continuing)
+		// GridFixedSLDist=0 disables the fixed-distance SL. Classic grid design
+		// relies on range-bound assumption rather than hard SL. Re-enable if
+		// liquidation risk in trending markets becomes the bigger concern.
+		GridMaxTPDist: 12.0, GridMinTPDist: 5.0, GridFixedSLDist: 0.0, GridLayerSpacing: 10.0,
+		// 04-29 data-driven recalibration: log analysis of 27 matched OPEN→CLOSE
+		// records showed pxLo%/pxUp% (price-vs-band) is the only single feature
+		// that cleanly separates winners from losers (3/3 sub-zero broke band
+		// → 100% loss). trend_dir alone wasn't predictive: td=-1 LONG had 5
+		// wins (+$126) and 5 losses (-$93), so A would net hurt more than help.
+		ReversionBlockOpposingTrendDir: false, // A disabled — trend_dir filter loses good entries
+		ReversionMaxBBExpansionRatio:   0,     // B disabled — heuristic threshold un-calibrated
+		ReversionMaxBBLowerOvershoot:   0.0,   // C strict — reject ANY break of BB band (overshoot = 0)
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────

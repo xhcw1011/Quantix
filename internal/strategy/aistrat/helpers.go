@@ -724,6 +724,16 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 		return 0, 0
 	}
 
+	// Must be in the lower half of BB. The +0.5% buffer below was too
+	// permissive: bbLower*1.005 puts the gate ~$11 above lower on ETH BB
+	// (~half the entire half-width), so price near or above bbMiddle was
+	// passing the "at lower" check. 04-28 21:35 SHORT @2269.75 hit the
+	// mirror version of this bug.
+	if price > bbMiddle {
+		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "above_bb_middle"),
+			zap.Float64("price", price), zap.Float64("bb_middle", bbMiddle))
+		return 0, 0
+	}
 	if price > bbLower*1.005 {
 		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "not_at_bb_lower"),
 			zap.Float64("price", price), zap.Float64("bb_lower", bbLower),
@@ -731,8 +741,10 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 		return 0, 0
 	}
 
-	// C: price overshoot — broke BB lower too hard, momentum likely continuing
-	if s.cfg.ReversionMaxBBLowerOvershoot > 0 && price < bbLower*(1-s.cfg.ReversionMaxBBLowerOvershoot) {
+	// C: any break below BB lower = momentum continuing, not reverting.
+	// Threshold 0 = strict (price < bbLower rejected). Set negative to disable
+	// in tests if needed. 04-29 data: pxLo% < 0 had 100% loss rate (3/3).
+	if price < bbLower*(1-s.cfg.ReversionMaxBBLowerOvershoot) {
 		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "bb_lower_overshoot"),
 			zap.Float64("price", price), zap.Float64("bb_lower", bbLower),
 			zap.Float64("overshoot_pct", (bbLower-price)/bbLower*100))
@@ -821,6 +833,15 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 		return 0, 0
 	}
 
+	// Must be in the upper half of BB. Mirror of the bbMiddle gate in
+	// reversionBuySignal. Without this, 04-28 21:35 fired SHORT @ $2269.75
+	// when bb_middle was $2273 and price was actually below middle —
+	// chasing momentum in a downtrend, not reverting from an extreme.
+	if price < bbMiddle {
+		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "below_bb_middle"),
+			zap.Float64("price", price), zap.Float64("bb_middle", bbMiddle))
+		return 0, 0
+	}
 	if price < bbUpper*0.995 {
 		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "not_at_bb_upper"),
 			zap.Float64("price", price), zap.Float64("bb_upper", bbUpper),
@@ -828,8 +849,8 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 		return 0, 0
 	}
 
-	// C: price overshoot — broke BB upper too hard, momentum likely continuing
-	if s.cfg.ReversionMaxBBLowerOvershoot > 0 && price > bbUpper*(1+s.cfg.ReversionMaxBBLowerOvershoot) {
+	// C: any break above BB upper = momentum continuing. Mirror of buy side.
+	if price > bbUpper*(1+s.cfg.ReversionMaxBBLowerOvershoot) {
 		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "bb_upper_overshoot"),
 			zap.Float64("price", price), zap.Float64("bb_upper", bbUpper),
 			zap.Float64("overshoot_pct", (price-bbUpper)/bbUpper*100))
