@@ -67,7 +67,18 @@ func (n *Notifier) TradeSignal(symbol, side, strategyID string, price float64) {
 
 // FillNotification notifies an order fill.
 // isClose=true marks the fill as a closing/reduce-only trade (TP, SL, trailing, manual close).
+//
+// Suppression rules (avoid noisy TG):
+//  - isClose with realized=0 AND fee=0: almost certainly a duplicate event (UDS + REST
+//    double-reporting same fill). The first event consumed the position; the second
+//    sees pos.Qty=0 → ApplyFill returns 0 realized, fee was already deducted so 0.
+//    Skipping these makes TG show one message per real close with correct PnL.
+//  - Closes with realized=0 but fee>0: real close that broke even. Show with "$0.00".
 func (n *Notifier) FillNotification(strategyID, orderID, symbol, side string, qty, price, fee, realizedPnL float64, isClose bool) {
+	if isClose && realizedPnL == 0 && fee == 0 {
+		return // duplicate fill event — skip TG
+	}
+
 	emoji := "🟢"
 	action := "开仓"
 	dirCN := "买入"
@@ -79,7 +90,15 @@ func (n *Notifier) FillNotification(strategyID, orderID, symbol, side string, qt
 		action = "平仓"
 	}
 	pnlStr := ""
-	if realizedPnL != 0 {
+	if isClose {
+		// Always show PnL line for closes (even if 0 = break-even)
+		sign := "+"
+		if realizedPnL < 0 {
+			sign = ""
+		}
+		pnlStr = fmt.Sprintf("\n已实现盈亏: `%s$%.2f`", sign, realizedPnL)
+	} else if realizedPnL != 0 {
+		// Opens normally have realized=0; show line only if non-zero (rare hedge edge case)
 		sign := "+"
 		if realizedPnL < 0 {
 			sign = ""
