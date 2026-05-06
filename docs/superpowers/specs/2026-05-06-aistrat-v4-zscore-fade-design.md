@@ -220,3 +220,39 @@ Before any v4 code goes live:
 - Position pyramiding
 
 These are explicitly deferred to v4.1+ if v4 demonstrates baseline edge.
+
+---
+
+## Validation Result: Baseline Backtest FAILED (2026-05-06)
+
+Ran `./bin/backtest -strategy ai_v4 -symbol ETHUSDT -interval 5m -start 2026-01-21 -end 2026-05-06 -capital 5000 -fee 0.0004 -slippage 0.0001` with default Config.
+
+| Metric | Value | Required | Pass? |
+|---|---:|---:|:---:|
+| Total Return | **-18.48%** | > 0 | ❌ |
+| Annual Return | -50.80% | — | — |
+| Sharpe Ratio | **-5.103** | > 0 | ❌ |
+| Max Drawdown | 20.42% | — | — |
+| Profit Factor | **0.79** | ≥ 1.0 | ❌ |
+| Trades | 425 | 30-200 | over-trading |
+| Win Rate | 44.7% (190 W / 235 L) | ≥ 55% expected | ❌ below random |
+| Avg Win / Loss | +0.71% / -0.64% | — | mildly asymmetric |
+| Avg Duration | 37 min (~7 bars) | < 12 bars | inside time stop |
+
+**Verdict: thesis-level failure**, not parameter calibration. Win rate < 50% means the z-score signal does NOT predict mean reversion — it's actively losing direction. No parameter tuning can fix a sub-coinflip win rate on the underlying signal.
+
+### Possible reasons (hypotheses for next iteration)
+
+1. **Lookback=20 (100 min) is wrong scale.** ETH 5m mean-reversion cycle may be longer (4-24h) — short lookback fits noise as "extremes" that aren't really extremes.
+2. **Pure z-score is too naive on crypto.** Crypto price distributions have fat tails — z=2.5 events are more common AND less reverting than gaussian assumption.
+3. **No trend filter is wrong here.** v3 with regime detection scored PF=0.84; v4 without it scored 0.79. Removing the regime filter made it WORSE, not better. Suggests regime IS predictive on this market, just not the way v3 used it.
+4. **Bar-close exits too coarse.** SHORT entered at z=+3, by next bar close z could already be at -1 or +5; the bar-level exit decision granularity may miss most of the actual mean-reversion windows.
+
+### Next-step options for user
+
+- **Option A: Kill v4, archive learnings.** Z-score fade thesis falsified on ETH 5m. Try entirely different archetype.
+- **Option B: Try other timeframes.** Re-run baseline on 15m, 1h, 4h primary. May reveal that mean-reversion only works on longer timescales.
+- **Option C: Add minimal regime filter to v4.** Keep z-score core but skip entries when 1h/4h trend is strongly aligned against the reversion. Becomes "v4.1" — but this defeats the "minimal viable" design.
+- **Option D: Run grid search anyway.** ~96 combos × 30 min. If even one combo achieves PF > 1.0, the thesis works at SOME params; defaults were just unlucky. Cheap to verify.
+
+Recommendation: **Option D first** (cheap empirical check), then if D fails escalate to **Option A**. Do NOT proceed to deploy with current numbers under any circumstances.
