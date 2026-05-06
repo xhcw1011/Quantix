@@ -256,3 +256,57 @@ Ran `./bin/backtest -strategy ai_v4 -symbol ETHUSDT -interval 5m -start 2026-01-
 - **Option D: Run grid search anyway.** ~96 combos × 30 min. If even one combo achieves PF > 1.0, the thesis works at SOME params; defaults were just unlucky. Cheap to verify.
 
 Recommendation: **Option D first** (cheap empirical check), then if D fails escalate to **Option A**. Do NOT proceed to deploy with current numbers under any circumstances.
+
+---
+
+## Validation Result: Grid Search Confirmed Thesis Dead (2026-05-06)
+
+User chose to run grid search before scrapping. Ran 96 parameter combinations:
+
+```
+Lookback     ∈ {10, 20, 30, 50}
+EntryZScore  ∈ {2.0, 2.5, 3.0}
+StopZScore   ∈ {3.0, 3.5, 4.0}   (skipping combos where StopZ ≤ EntryZ)
+TimeStopBars ∈ {6, 12, 24}
+```
+
+Results across all 96 combos:
+- **Combos with PF ≥ 1.0: 2** (out of 96)
+- **Combos with Sharpe > 0: 1**
+- **Best combo: lb=30, ez=3.0, sz=3.5, ts=24** → Return +0.02%, Sharpe 0.07, PF 1.11
+
+The "best" combo earns **$1.03 over 105 days** — statistically indistinguishable from zero. Even at the optimum, Win Rate is 46.3% (still sub-coinflip); the marginal PF comes from asymmetric win/loss size, not directional skill.
+
+Walk-forward (Gate 2) requires OOS Sharpe > 0.3; the best in-sample Sharpe is 0.07. It is mathematically certain Gate 2 would fail.
+
+### Decision: Option A — kill v4
+
+The pure z-score fade thesis is empirically falsified on ETH 5m over 105 days of historical data. Parameter sensitivity analysis (96 combos) confirms this is a thesis-level failure, not a calibration issue.
+
+### Lessons Captured
+
+1. **Don't recommend strategies based on N=5 sample sizes.** Earlier conclusion "grid_tp 5 wins / 80% win rate proves mean reversion edge" was a methodological error — small samples can't generalize to 96-combo / 425-trade behavior.
+2. **In-sample optimization on weak signals produces fake winners.** Top combos with marginal Sharpe (0.07) are noise, not edge.
+3. **Win rate < 50% is a structural problem.** No amount of stop/TP tuning fixes a sub-coinflip directional signal.
+4. **The whole "regime detection added complexity" critique of v3 was wrong.** v3's regime gate was actually filtering OUT the worst non-RANGE entries. Removing it (v4) made things worse, not better.
+
+### Implications for v5 (if user wants to try again)
+
+If the user chooses to design a v5, it should NOT be:
+- Pure z-score on 5m (falsified)
+- Mean reversion without regime filter (made it worse)
+- Sub-1h timeframe (noise dominates)
+
+It MIGHT be worth trying:
+- 15m / 1h / 4h primary timeframe (less noise)
+- Trend-following with explicit volatility filter
+- Long-only / market-making strategies
+- Pairs trading vs BTC
+
+Each is a separate spec → plan → validation cycle. Do NOT mix them.
+
+---
+
+## Status: ARCHIVED 2026-05-06
+
+aistrat_v4 code is committed but NOT deployed. Strategy `ai_v4` is registered but inert (no API call to start an engine for it). v3 (`ai`) continues to run on server, losing slowly but stably — that's a separate problem.
