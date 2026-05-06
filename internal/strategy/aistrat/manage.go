@@ -320,7 +320,7 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 
 	// Time-based exit: close if held > 3h and NOT in strong trend.
 	// Prevents slow grind losses in weak/range markets.
-	if p.filled && hMode != hourlyTrendStrong && time.Since(p.filledAt) > 3*time.Hour {
+	if s.cfg.EnableTimeExit && p.filled && hMode != hourlyTrendStrong && time.Since(p.filledAt) > 3*time.Hour {
 		s.log.Warn("BAR: time exit — held >3h in weak/exit mode",
 			zap.String("side", p.side), zap.Float64("pnlR", pnlR))
 		s.closePos(ctx, p, pptr, "time_exit", price)
@@ -428,21 +428,23 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		}
 	}
 
-	// ── Local SL check (backup for exchange SL) ──
-	if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
-		s.closePos(ctx, p, pptr, "trailing", price)
-		if pnlR > 0 { s.consecLoss = 0 }
-		return
-	}
-	if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
-		s.closePos(ctx, p, pptr, "trailing", price)
-		if pnlR > 0 { s.consecLoss = 0 }
-		return
+	// ── Local SL check (backup for exchange SL) — gated by EnableTrailing ──
+	if s.cfg.EnableTrailing {
+		if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
+			s.closePos(ctx, p, pptr, "trailing", price)
+			if pnlR > 0 { s.consecLoss = 0 }
+			return
+		}
+		if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
+			s.closePos(ctx, p, pptr, "trailing", price)
+			if pnlR > 0 { s.consecLoss = 0 }
+			return
+		}
 	}
 
 	// ── Tech reversal check — only when losing, and not on first few bars after restart ──
 	// barCount < 3 after restart: regime/1h mode not yet stable, skip reversal.
-	if pnlR < 1.0 && s.barCount >= 3 && p.barsHeld >= s.cfg.MinTrendBars {
+	if s.cfg.EnableTechReversal && pnlR < 1.0 && s.barCount >= 3 && p.barsHeld >= s.cfg.MinTrendBars {
 		s.checkReversal(ctx, bar, p, pptr)
 	}
 }

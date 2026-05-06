@@ -181,6 +181,17 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 		}
 	}
 	stopLoss = math.Round(stopLoss*100) / 100
+	// SLDistanceMultiplier: widen the SL distance uniformly across all SL paths.
+	// Default 1.0 = no change. Set > 1.0 to give positions more room.
+	if mul := s.cfg.SLDistanceMultiplier; mul > 0 && mul != 1.0 {
+		dist := math.Abs(entryPrice - stopLoss) * mul
+		if side == "LONG" {
+			stopLoss = entryPrice - dist
+		} else {
+			stopLoss = entryPrice + dist
+		}
+		stopLoss = math.Round(stopLoss*100) / 100
+	}
 	if side == "LONG" && stopLoss >= entryPrice { return }
 	if side == "SHORT" && stopLoss <= entryPrice { return }
 

@@ -560,7 +560,10 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 		}
 		s.log.Info("sig_accept", zap.String("fn", "breakoutBuy"), zap.String("reason", "trend_regime_with_dir"),
 			zap.String("regime", string(s.lastRegime)), zap.Float64("price", price), zap.Float64("rsi", rsi))
-		return 0.85, math.Round(price*100) / 100
+		// Apply EntryLimitOffsetUSD: place LIMIT BUY below current to capture maker fee.
+		// Default 0 = market entry; e.g. 5 = LIMIT at price - $5.
+		entry := price - s.cfg.EntryLimitOffsetUSD
+		return 0.85, math.Round(entry*100) / 100
 	}
 
 	highestHigh := 0.0
@@ -639,7 +642,9 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 		}
 		s.log.Info("sig_accept", zap.String("fn", "breakoutSell"), zap.String("reason", "trend_regime_with_dir"),
 			zap.String("regime", string(s.lastRegime)), zap.Float64("price", price), zap.Float64("rsi", rsi))
-		return 0.85, math.Round(price*100) / 100
+		// Apply EntryLimitOffsetUSD: place LIMIT SELL above current to capture maker fee.
+		entry := price + s.cfg.EntryLimitOffsetUSD
+		return 0.85, math.Round(entry*100) / 100
 	}
 
 	lowestLow := math.MaxFloat64

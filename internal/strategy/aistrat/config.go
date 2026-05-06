@@ -26,6 +26,11 @@ func init() {
 		if v, ok := params["TrendRiskPerTrade"]; ok { cfg.TrendRiskPerTrade = toFloat(v) }
 		if v, ok := params["ATRK"]; ok { cfg.ATRK = toFloat(v) }
 		if v, ok := params["TrailingATRK"]; ok { cfg.TrailingATRK = toFloat(v) }
+		if v, ok := params["EnableTrailing"].(bool); ok { cfg.EnableTrailing = v }
+		if v, ok := params["EnableTimeExit"].(bool); ok { cfg.EnableTimeExit = v }
+		if v, ok := params["EnableTechReversal"].(bool); ok { cfg.EnableTechReversal = v }
+		if v, ok := params["EntryLimitOffsetUSD"]; ok { cfg.EntryLimitOffsetUSD = toFloat(v) }
+		if v, ok := params["SLDistanceMultiplier"]; ok { cfg.SLDistanceMultiplier = toFloat(v) }
 		if v, ok := params["MaxDailyLossPct"]; ok { cfg.MaxDailyLossPct = toFloat(v) }
 		if v, ok := params["MaxConsecLoss"]; ok { cfg.MaxConsecLoss = toInt(v) }
 		if v, ok := params["EnableShort"].(bool); ok { cfg.EnableShort = v }
@@ -184,6 +189,14 @@ type Config struct {
 	SwingSLMaxATR float64 // STRONG_TREND swing SL cap as ATR multiple (default 1.8)
 	TrailingATRK  float64 // trailing distance = entryATR × TrailingATRK (default 2.0; safety net, not primary exit)
 
+	// ── Exit toggles (let SL be the only exit when these are all false) ──
+	// Defaults preserve legacy behavior. Set false to disable individual exit paths.
+	EnableTrailing     bool    // if false, skip trailing exit (both bar+tick paths)
+	EnableTimeExit     bool    // if false, skip "held >3h in weak/exit mode" close
+	EnableTechReversal bool    // if false, skip checkReversal (opposing tech signal)
+	EntryLimitOffsetUSD float64 // dollar offset for breakout regime-shortcut entries (0 = market; e.g. 5 = limit ±$5)
+	SLDistanceMultiplier float64 // multiply final SL distance by this factor (default 1.0)
+
 	// ── GPT TP targeting — use market structure for profit targets ──
 	GptTPMinR float64 // min GPT TP distance as R-multiple; floor to cover fees (default 0.5)
 	GptTPMaxR float64 // max GPT TP distance as R-multiple; cap to stay reachable (default 1.5)
@@ -321,6 +334,13 @@ func DefaultConfig() Config {
 		SwingSLMinATR: 2.5,   // STRONG_TREND SL 下限 = ATR × 2.5（放宽：给swing SL足够空间）
 		SwingSLMaxATR: 4.0,   // STRONG_TREND SL 上限 = ATR × 4.0（放宽：强趋势需要更多回撤空间）
 		TrailingATRK:  3.0,   // trailing = entryATR × 3.0
+
+		// Exit toggles + entry/SL adjustments — defaults preserve legacy behavior
+		EnableTrailing:       true,
+		EnableTimeExit:       true,
+		EnableTechReversal:   true,
+		EntryLimitOffsetUSD:  0.0,
+		SLDistanceMultiplier: 1.0,
 
 		// ─── 入场门槛 ─────────────────────────────────────────────
 		ConfidenceThreshold: 0.80,  // 默认/逆趋势入场门槛

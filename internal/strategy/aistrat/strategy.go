@@ -363,7 +363,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		}
 
 		// ── Time-based exit: close if held > 3h and NOT in strong trend ──
-		if p.filled && hMode != hourlyTrendStrong && time.Since(p.filledAt) > 3*time.Hour {
+		if s.cfg.EnableTimeExit && p.filled && hMode != hourlyTrendStrong && time.Since(p.filledAt) > 3*time.Hour {
 			s.log.Warn("TICK: time exit — held >3h in weak/exit mode",
 				zap.String("side", p.side), zap.Float64("pnlR", pnlR),
 				zap.Duration("held", time.Since(p.filledAt)))
@@ -402,20 +402,22 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		}
 	}
 
-	// ── 5. Real-time trailing trigger ──
-	if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
-		s.log.Warn("TICK TRAILING", zap.String("side", p.side),
-			zap.Float64("price", price), zap.Float64("trail", p.trailing))
-		s.closePos(ctx, p, pptr, "trailing", price)
-		s.consecLoss = 0
-		return
-	}
-	if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
-		s.log.Warn("TICK TRAILING", zap.String("side", p.side),
-			zap.Float64("price", price), zap.Float64("trail", p.trailing))
-		s.closePos(ctx, p, pptr, "trailing", price)
-		s.consecLoss = 0
-		return
+	// ── 5. Real-time trailing trigger — gated by EnableTrailing ──
+	if s.cfg.EnableTrailing {
+		if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
+			s.log.Warn("TICK TRAILING", zap.String("side", p.side),
+				zap.Float64("price", price), zap.Float64("trail", p.trailing))
+			s.closePos(ctx, p, pptr, "trailing", price)
+			s.consecLoss = 0
+			return
+		}
+		if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
+			s.log.Warn("TICK TRAILING", zap.String("side", p.side),
+				zap.Float64("price", price), zap.Float64("trail", p.trailing))
+			s.closePos(ctx, p, pptr, "trailing", price)
+			s.consecLoss = 0
+			return
+		}
 	}
 }
 
