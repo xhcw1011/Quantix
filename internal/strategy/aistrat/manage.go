@@ -448,6 +448,15 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 }
 
 func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
+	// 1h aligned with position → opposing 5m tech signal is a pullback within
+	// the larger trend, not a real reversal. Skip. Trailing/SL still apply.
+	hMode := s.detectHourlyMode(p.side)
+	if hMode == hourlyTrendStrong {
+		s.log.Info("SIG: tech reversal skipped — 1h aligned with position",
+			zap.String("side", p.side))
+		return
+	}
+
 	// Technical reversal: check if the opposite direction's tech signal is strong.
 	reverseConf := 0.0
 	if p.side == "LONG" {
@@ -457,7 +466,6 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 	}
 
 	// Also check 1h mode: EXIT_MODE is a strong reversal signal.
-	hMode := s.detectHourlyMode(p.side)
 	if hMode == hourlyExitMode && reverseConf < s.cfg.ReversalConf {
 		reverseConf = s.cfg.ReversalConf // 1h opposes → treat as reversal
 	}
