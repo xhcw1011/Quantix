@@ -26,6 +26,7 @@ import (
 	"github.com/Quantix/quantix/internal/optimize"
 
 	// Strategy registrations
+	_ "github.com/Quantix/quantix/internal/strategy/aistrat_v4"
 	_ "github.com/Quantix/quantix/internal/strategy/grid"
 	_ "github.com/Quantix/quantix/internal/strategy/macross"
 	_ "github.com/Quantix/quantix/internal/strategy/meanreversion"
