@@ -106,6 +106,34 @@ func TestShouldEnterCooldownAllowsOppositeSide(t *testing.T) {
 // math used by ATR test
 var _ = math.Abs
 
+func TestCalcQtyNormal(t *testing.T) {
+	// equity 5000, risk 0.5%, sl distance $20 → qty = $25 / $20 = 1.25
+	q := calcQty(5000, 0.005, 20.0, 100.0, 0.20, 2.0)
+	if math.Abs(q-1.25) > 0.001 {
+		t.Errorf("calcQty = %f, want 1.25", q)
+	}
+}
+
+func TestCalcQtyZeroDistance(t *testing.T) {
+	// SL distance 0 → fall back to leverage cap
+	// equity 5000, leverage 2, price 100, max 0.20 → max qty = 5000 * 0.20 * 2 / 100 = 20
+	q := calcQty(5000, 0.005, 0.0, 100.0, 0.20, 2.0)
+	if q != 20 {
+		t.Errorf("calcQty zero-distance = %f, want 20 (leverage cap)", q)
+	}
+}
+
+func TestCalcQtyMaxPositionCap(t *testing.T) {
+	// equity 5000, risk 5% (huge), sl distance $1, price $100, max 0.20, leverage 2
+	// risk-based: 5000 * 0.05 / 1 = 250 qty
+	// max:        5000 * 0.20 * 2 / 100 = 20 qty
+	// → 20 (cap binds)
+	q := calcQty(5000, 0.05, 1.0, 100.0, 0.20, 2.0)
+	if q != 20 {
+		t.Errorf("calcQty = %f, want 20 (max cap)", q)
+	}
+}
+
 func TestShouldExitNoPosition(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Symbol = "ETHUSDT"
