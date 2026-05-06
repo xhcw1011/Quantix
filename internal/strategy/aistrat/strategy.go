@@ -305,7 +305,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 			// 1h opposes: tighter trail + aggressive profit locking.
 			// ATR*1.0 (not 0.5) to avoid jump-trigger when switching from STRONG (trail=SL).
 			// Stale peak exit: no new high/low for 45 min → close immediately.
-			if !p.lastPeakAt.IsZero() && time.Since(p.lastPeakAt) > 45*time.Minute {
+			if s.cfg.EnableStalePeakExit && !p.lastPeakAt.IsZero() && time.Since(p.lastPeakAt) > 45*time.Minute {
 				s.log.Warn("TICK: stale peak exit — 45m no new high/low in EXIT_MODE",
 					zap.String("side", p.side), zap.Float64("pnlR", pnlR))
 				s.closePos(ctx, p, pptr, "stale_peak_exit", price)
@@ -372,8 +372,8 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 			return
 		}
 
-		// ── 4. Real-time bounce TP (remaining position) ──
-		if p.remainQty < p.initQty && p.remainQty > 0 && pnlR > 0 {
+		// ── 4. Real-time bounce TP (remaining position) — gated by EnableBounceTP ──
+		if s.cfg.EnableBounceTP && p.remainQty < p.initQty && p.remainQty > 0 && pnlR > 0 {
 			bounceThreshold := s.cfg.BounceTPR * p.R
 			if p.side == "LONG" && p.peakPrice-price >= bounceThreshold {
 				s.log.Info("TICK: bounce TP", zap.String("side", p.side),
@@ -393,7 +393,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 
 		// ── 4b. Emergency reversal: if losing > 0.9R, trigger async GPT check ──
 		// Raised from -0.8R to -0.9R, cooldown 30s→60s to avoid premature cuts.
-		if pnlR < s.cfg.EmergencyPnlR && hMode == hourlyExitMode {
+		if s.cfg.EnableEmergencyExit && pnlR < s.cfg.EmergencyPnlR && hMode == hourlyExitMode {
 			s.log.Warn("TICK: emergency exit — losing >0.9R + 1h exit mode",
 				zap.String("side", p.side), zap.Float64("pnlR", pnlR))
 			s.closePos(ctx, p, pptr, "emergency_exit", price)

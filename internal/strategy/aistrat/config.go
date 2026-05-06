@@ -29,6 +29,9 @@ func init() {
 		if v, ok := params["EnableTrailing"].(bool); ok { cfg.EnableTrailing = v }
 		if v, ok := params["EnableTimeExit"].(bool); ok { cfg.EnableTimeExit = v }
 		if v, ok := params["EnableTechReversal"].(bool); ok { cfg.EnableTechReversal = v }
+		if v, ok := params["EnableStalePeakExit"].(bool); ok { cfg.EnableStalePeakExit = v }
+		if v, ok := params["EnableEmergencyExit"].(bool); ok { cfg.EnableEmergencyExit = v }
+		if v, ok := params["EnableBounceTP"].(bool); ok { cfg.EnableBounceTP = v }
 		if v, ok := params["EntryLimitOffsetUSD"]; ok { cfg.EntryLimitOffsetUSD = toFloat(v) }
 		if v, ok := params["SLDistanceMultiplier"]; ok { cfg.SLDistanceMultiplier = toFloat(v) }
 		if v, ok := params["MaxDailyLossPct"]; ok { cfg.MaxDailyLossPct = toFloat(v) }
@@ -191,10 +194,13 @@ type Config struct {
 
 	// ── Exit toggles (let SL be the only exit when these are all false) ──
 	// Defaults preserve legacy behavior. Set false to disable individual exit paths.
-	EnableTrailing     bool    // if false, skip trailing exit (both bar+tick paths)
-	EnableTimeExit     bool    // if false, skip "held >3h in weak/exit mode" close
-	EnableTechReversal bool    // if false, skip checkReversal (opposing tech signal)
-	EntryLimitOffsetUSD float64 // dollar offset for breakout regime-shortcut entries (0 = market; e.g. 5 = limit ±$5)
+	EnableTrailing       bool    // if false, skip trailing exit (both bar+tick paths)
+	EnableTimeExit       bool    // if false, skip "held >3h in weak/exit mode" close
+	EnableTechReversal   bool    // if false, skip checkReversal (opposing tech signal)
+	EnableStalePeakExit  bool    // if false, skip "45m no new peak in EXIT_MODE" close (tick path)
+	EnableEmergencyExit  bool    // if false, skip "pnlR < -0.9 + EXIT_MODE" emergency close (tick path)
+	EnableBounceTP       bool    // if false, skip "peak retreat after partial TP" close (tick path)
+	EntryLimitOffsetUSD  float64 // dollar offset for breakout regime-shortcut entries (0 = market; e.g. 5 = limit ±$5)
 	SLDistanceMultiplier float64 // multiply final SL distance by this factor (default 1.0)
 
 	// ── GPT TP targeting — use market structure for profit targets ──
@@ -339,6 +345,9 @@ func DefaultConfig() Config {
 		EnableTrailing:       true,
 		EnableTimeExit:       true,
 		EnableTechReversal:   true,
+		EnableStalePeakExit:  true,
+		EnableEmergencyExit:  true,
+		EnableBounceTP:       true,
 		EntryLimitOffsetUSD:  0.0,
 		SLDistanceMultiplier: 1.0,
 
