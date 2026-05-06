@@ -105,3 +105,84 @@ func TestShouldEnterCooldownAllowsOppositeSide(t *testing.T) {
 
 // math used by ATR test
 var _ = math.Abs
+
+func TestShouldExitNoPosition(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Symbol = "ETHUSDT"
+	closes := []float64{100, 100, 100}
+	highs := []float64{101, 101, 101}
+	lows := []float64{99, 99, 99}
+	closeIt, reason := shouldExit(closes, highs, lows, cfg, nil, 0)
+	if closeIt {
+		t.Errorf("shouldExit = (true, %s), want (false, _) when no position", reason)
+	}
+}
+
+func TestShouldExitTPHitFromShort(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Symbol = "ETHUSDT"
+	h, l, c := barsAtZ(t, cfg.Lookback, 100, 5, 0.0)
+	pos := &positionState{Side: "SHORT", EntryBar: 5}
+	closeIt, reason := shouldExit(c, h, l, cfg, pos, 10)
+	if !closeIt || reason != "tp" {
+		t.Errorf("shouldExit = (%v, %s), want (true, tp)", closeIt, reason)
+	}
+}
+
+func TestShouldExitTPHitFromLong(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Symbol = "ETHUSDT"
+	h, l, c := barsAtZ(t, cfg.Lookback, 100, 5, 0.0)
+	pos := &positionState{Side: "LONG", EntryBar: 5}
+	closeIt, reason := shouldExit(c, h, l, cfg, pos, 10)
+	if !closeIt || reason != "tp" {
+		t.Errorf("shouldExit = (%v, %s), want (true, tp)", closeIt, reason)
+	}
+}
+
+func TestShouldExitSLHitFromShort(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Symbol = "ETHUSDT"
+	h, l, c := barsAtZ(t, cfg.Lookback, 100, 5, 3.6) // SHORT entered low; price spikes high → SL
+	pos := &positionState{Side: "SHORT", EntryBar: 5}
+	closeIt, reason := shouldExit(c, h, l, cfg, pos, 10)
+	if !closeIt || reason != "sl" {
+		t.Errorf("shouldExit = (%v, %s), want (true, sl)", closeIt, reason)
+	}
+}
+
+func TestShouldExitSLHitFromLong(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Symbol = "ETHUSDT"
+	h, l, c := barsAtZ(t, cfg.Lookback, 100, 5, -3.6)
+	pos := &positionState{Side: "LONG", EntryBar: 5}
+	closeIt, reason := shouldExit(c, h, l, cfg, pos, 10)
+	if !closeIt || reason != "sl" {
+		t.Errorf("shouldExit = (%v, %s), want (true, sl)", closeIt, reason)
+	}
+}
+
+func TestShouldExitTimeStop(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Symbol = "ETHUSDT"
+	cfg.TimeStopBars = 5
+	// z = +1 (no TP for SHORT, no SL), bars held = 5 → time stop
+	h, l, c := barsAtZ(t, cfg.Lookback, 100, 5, 1.0)
+	pos := &positionState{Side: "SHORT", EntryBar: 0}
+	closeIt, reason := shouldExit(c, h, l, cfg, pos, 5)
+	if !closeIt || reason != "time" {
+		t.Errorf("shouldExit = (%v, %s), want (true, time)", closeIt, reason)
+	}
+}
+
+func TestShouldExitNoExitConditions(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Symbol = "ETHUSDT"
+	// z = +1 (SHORT not at TP, |z|<3.5), bars held 2 < TimeStop 12
+	h, l, c := barsAtZ(t, cfg.Lookback, 100, 5, 1.0)
+	pos := &positionState{Side: "SHORT", EntryBar: 8}
+	closeIt, _ := shouldExit(c, h, l, cfg, pos, 10)
+	if closeIt {
+		t.Error("shouldExit returned true, want false (no condition met)")
+	}
+}
