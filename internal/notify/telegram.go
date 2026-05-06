@@ -54,29 +54,41 @@ func (n *Notifier) AddEmail(host string, port int, user, password, from, to stri
 // TradeSignal notifies a buy/sell signal.
 func (n *Notifier) TradeSignal(symbol, side, strategyID string, price float64) {
 	emoji := "📈"
+	dirCN := "做多"
 	if side == "SELL" {
 		emoji = "📉"
+		dirCN = "做空"
 	}
 	n.send(fmt.Sprintf(
-		"%s *Trade Signal* [%s]\n`%s %s @ $%.2f`\n_%s_",
-		emoji, strategyID, side, symbol, price, time.Now().Format("15:04:05"),
+		"%s *交易信号* [%s]\n`%s %s @ $%.2f`\n_%s_",
+		emoji, strategyID, dirCN, symbol, price, time.Now().Format("15:04:05"),
 	))
 }
 
 // FillNotification notifies an order fill.
-func (n *Notifier) FillNotification(strategyID, orderID, symbol, side string, qty, price, fee, realizedPnL float64) {
-	emoji := "✅"
+// isClose=true marks the fill as a closing/reduce-only trade (TP, SL, trailing, manual close).
+func (n *Notifier) FillNotification(strategyID, orderID, symbol, side string, qty, price, fee, realizedPnL float64, isClose bool) {
+	emoji := "🟢"
+	action := "开仓"
+	dirCN := "买入"
+	if side == "SELL" {
+		dirCN = "卖出"
+	}
+	if isClose {
+		emoji = "🔴"
+		action = "平仓"
+	}
 	pnlStr := ""
 	if realizedPnL != 0 {
 		sign := "+"
 		if realizedPnL < 0 {
 			sign = ""
 		}
-		pnlStr = fmt.Sprintf("\nRealized PnL: `%s$%.2f`", sign, realizedPnL)
+		pnlStr = fmt.Sprintf("\n已实现盈亏: `%s$%.2f`", sign, realizedPnL)
 	}
 	n.send(fmt.Sprintf(
-		"%s *Fill* [%s]\n`%s %.6f %s @ $%.2f`\nFee: `$%.4f`%s\n_%s_",
-		emoji, strategyID, side, qty, symbol, price, fee, pnlStr,
+		"%s *%s* [%s]\n`%s %.6f %s @ $%.2f`\n手续费: `$%.4f`%s\n_%s_",
+		emoji, action, strategyID, dirCN, qty, symbol, price, fee, pnlStr,
 		time.Now().Format("15:04:05"),
 	))
 }
@@ -84,7 +96,7 @@ func (n *Notifier) FillNotification(strategyID, orderID, symbol, side string, qt
 // RiskAlert notifies a risk rule violation or circuit breaker.
 func (n *Notifier) RiskAlert(strategyID, message string, equity, drawdownPct float64) {
 	n.send(fmt.Sprintf(
-		"⚡ *RISK ALERT* [%s]\n%s\nEquity: `$%.2f` | Drawdown: `%.2f%%`\n_%s_",
+		"⚡ *风控告警* [%s]\n%s\n净值: `$%.2f` | 回撤: `%.2f%%`\n_%s_",
 		strategyID, message, equity, drawdownPct,
 		time.Now().Format("2006-01-02 15:04:05"),
 	))
@@ -101,10 +113,10 @@ func (n *Notifier) DailySummary(strategyID string, equity, realizedPnL, returnPc
 		winRate = float64(wins) / float64(trades) * 100
 	}
 	n.send(fmt.Sprintf(
-		"📊 *Daily Summary* [%s]\n"+
-			"Return: `%s%.2f%%` | Equity: `$%.2f`\n"+
-			"Realized PnL: `$%.2f`\n"+
-			"Trades: `%d` | Win Rate: `%.1f%%`\n"+
+		"📊 *每日汇总* [%s]\n"+
+			"收益率: `%s%.2f%%` | 净值: `$%.2f`\n"+
+			"已实现盈亏: `$%.2f`\n"+
+			"交易笔数: `%d` | 胜率: `%.1f%%`\n"+
 			"_%s_",
 		strategyID,
 		sign, returnPct, equity,
@@ -124,8 +136,17 @@ func (n *Notifier) SystemAlert(level, message string) {
 	if emoji == "" {
 		emoji = "📌"
 	}
-	text := fmt.Sprintf("%s *System %s*\n%s\n_%s_",
-		emoji, level, message, time.Now().Format("15:04:05"))
+	levelCN := map[string]string{
+		"INFO":     "信息",
+		"WARN":     "警告",
+		"ERROR":    "错误",
+		"CRITICAL": "严重",
+	}[level]
+	if levelCN == "" {
+		levelCN = level
+	}
+	text := fmt.Sprintf("%s *系统 %s*\n%s\n_%s_",
+		emoji, levelCN, message, time.Now().Format("15:04:05"))
 	if level == "CRITICAL" {
 		n.sendCritical(text)
 	} else {

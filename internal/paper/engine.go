@@ -337,6 +337,7 @@ func (e *Engine) applyFillEvent(event oms.FillEvent) {
 			e.cfg.StrategyID, event.Order.ID,
 			event.Fill.Symbol, string(event.Fill.Side),
 			event.Fill.Qty, event.Fill.Price, event.Fill.Fee, realized,
+			isClosingLong || isClosingShort,
 		)
 	}
 

@@ -719,10 +719,14 @@ func (e *Engine) processFills(ctx context.Context) {
 			}
 
 			if e.notifier != nil {
+				ps := string(event.Fill.PositionSide)
+				isClose := (ps == string(strategy.PositionSideLong) && event.Fill.Side == strategy.SideSell) ||
+					(ps == string(strategy.PositionSideShort) && event.Fill.Side == strategy.SideBuy)
 				e.notifier.FillNotification(
 					e.cfg.StrategyID, event.Order.ID,
 					event.Fill.Symbol, string(event.Fill.Side),
 					event.Fill.Qty, event.Fill.Price, event.Fill.Fee, realized,
+					isClose,
 				)
 			}
 
