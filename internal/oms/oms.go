@@ -202,8 +202,25 @@ func (o *OMS) Fill(id string, fill strategy.Fill) error {
 		return fmt.Errorf("fill qty must be positive (got %f)", fill.Qty)
 	}
 
-	// Update average fill price
+	// Reject duplicate / over-filling fills.
+	// In production, the same exchange-side fill sometimes arrives via two
+	// channels (UDS push + REST poll). Without this check, both succeed,
+	// double-counting position adjustments and corrupting realized PnL.
+	// Legitimate exchanges never over-fill an order, so any incoming fill
+	// that would push total filled past order qty is treated as a duplicate.
 	totalFilled := ord.FilledQty + fill.Qty
+	if totalFilled > ord.Qty+filledEps {
+		o.mu.Unlock()
+		o.log.Warn("OMS: rejecting fill that would over-fill order (likely duplicate)",
+			zap.String("order_id", id),
+			zap.Float64("current_filled", ord.FilledQty),
+			zap.Float64("new_qty", fill.Qty),
+			zap.Float64("order_qty", ord.Qty),
+		)
+		return fmt.Errorf("fill would over-fill order (current %.6f + new %.6f > order %.6f)", ord.FilledQty, fill.Qty, ord.Qty)
+	}
+
+	// Update average fill price
 	ord.AvgFillPrice = (ord.FilledQty*ord.AvgFillPrice + fill.Qty*fill.Price) / totalFilled
 	ord.FilledQty = totalFilled
 	ord.Commission += fill.Fee

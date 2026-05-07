@@ -97,6 +97,64 @@ func TestOMS_Fill_FullFill(t *testing.T) {
 	assert.Equal(t, 50.0, got.Commission)
 }
 
+func TestOMS_Fill_RejectsOverFill_DuplicateFromUDSAndPoll(t *testing.T) {
+	// Reproduces the production bug: the same exchange-side fill arrives via
+	// both the User Data Stream (UDS) and the REST poll path. OMS used to
+	// accept both, double-counting position adjustments and corrupting
+	// realized PnL accounting. Now: second fill must be rejected when it
+	// would push total filled past the order qty.
+	o := newTestOMS()
+	ord, _ := o.Submit(strategy.OrderRequest{
+		Symbol: "ETHUSDT", Side: strategy.SideSell, Type: strategy.OrderMarket, Qty: 1.697,
+	}, "test")
+	o.Accept(ord.ID) //nolint:errcheck
+
+	// Market order partially fills only 0.971 (insufficient liquidity scenario).
+	fillUDS := strategy.Fill{Symbol: "ETHUSDT", Side: strategy.SideSell, Qty: 0.971, Price: 2407.6, Fee: 0.93}
+	require.NoError(t, o.Fill(ord.ID, fillUDS))
+
+	// Drain the legitimate first event from channel.
+	<-o.Fills()
+
+	// Same fill arrives via REST poll moments later — must be rejected.
+	fillPoll := strategy.Fill{Symbol: "ETHUSDT", Side: strategy.SideSell, Qty: 0.971, Price: 2407.6, Fee: 0}
+	err := o.Fill(ord.ID, fillPoll)
+	if err == nil {
+		t.Fatal("expected error rejecting duplicate fill that would over-fill order, got nil")
+	}
+
+	// No event on the channel from the second (rejected) fill.
+	select {
+	case extra := <-o.Fills():
+		t.Fatalf("got duplicate fill event on channel: %+v", extra)
+	default:
+	}
+
+	// Order state reflects only the legitimate first fill.
+	got := o.Get(ord.ID)
+	if got.FilledQty != 0.971 {
+		t.Errorf("FilledQty = %f, want 0.971 (rejected fill must not be counted)", got.FilledQty)
+	}
+}
+
+func TestOMS_Fill_AcceptsLegitimatePartials(t *testing.T) {
+	// Verify the over-fill check doesn't break legitimate multi-leg partial fills.
+	o := newTestOMS()
+	ord, _ := o.Submit(strategy.OrderRequest{
+		Symbol: "BTCUSDT", Side: strategy.SideBuy, Type: strategy.OrderLimit, Qty: 1.0, Price: 50000,
+	}, "test")
+	o.Accept(ord.ID) //nolint:errcheck
+
+	require.NoError(t, o.Fill(ord.ID, strategy.Fill{Symbol: "BTCUSDT", Side: strategy.SideBuy, Qty: 0.3, Price: 50000, Fee: 1.5}))
+	require.NoError(t, o.Fill(ord.ID, strategy.Fill{Symbol: "BTCUSDT", Side: strategy.SideBuy, Qty: 0.4, Price: 50100, Fee: 2.0}))
+	require.NoError(t, o.Fill(ord.ID, strategy.Fill{Symbol: "BTCUSDT", Side: strategy.SideBuy, Qty: 0.3, Price: 50200, Fee: 1.5}))
+
+	got := o.Get(ord.ID)
+	if got.Status != StatusFilled {
+		t.Errorf("Status = %s, want FILLED after 0.3 + 0.4 + 0.3 = 1.0 (full)", got.Status)
+	}
+}
+
 func TestOMS_Fill_PublishesFillEvent(t *testing.T) {
 	o := newTestOMS()
 	ord, _ := o.Submit(buyReq("BTCUSDT"), "test")

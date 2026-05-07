@@ -68,10 +68,13 @@ type Order struct {
 var ErrInvalidTransition = errors.New("invalid order status transition")
 
 // validTransitions defines which status changes are permitted.
+// Partial → Partial is allowed because legitimate multi-leg fills can keep
+// the order in StatusPartial across several incremental fills before reaching
+// StatusFilled (e.g., 0.3 + 0.4 then later + 0.3 = 1.0 total).
 var validTransitions = map[OrderStatus][]OrderStatus{
 	StatusPending:   {StatusOpen, StatusRejected, StatusCancelled},
 	StatusOpen:      {StatusFilled, StatusPartial, StatusCancelled},
-	StatusPartial:   {StatusFilled, StatusCancelled},
+	StatusPartial:   {StatusPartial, StatusFilled, StatusCancelled},
 	StatusFilled:    {}, // terminal
 	StatusCancelled: {}, // terminal
 	StatusRejected:  {}, // terminal
