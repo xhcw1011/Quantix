@@ -130,15 +130,25 @@ func (e *Engine) sendDailySummary() {
 	if e.notifier == nil {
 		return
 	}
-	e.fillMu.Lock()
-	rpnl, total, wins := e.realizedPnL, e.total, e.wins
-	e.fillMu.Unlock()
 	equity := e.broker.Equity()
+
+	e.fillMu.Lock()
+	// Compute window-relative metrics (since last summary), then snapshot for next window.
+	baseline := e.dailyBaselineEquity
+	intervalRealized := e.realizedPnL - e.dailyBaselineRealizedPnL
+	intervalWins := e.wins - e.dailyBaselineWins
+	intervalTotal := e.total - e.dailyBaselineTotal
+	e.dailyBaselineEquity = equity
+	e.dailyBaselineWins = e.wins
+	e.dailyBaselineTotal = e.total
+	e.dailyBaselineRealizedPnL = e.realizedPnL
+	e.fillMu.Unlock()
+
 	var ret float64
-	if e.cfg.InitialCapital > 0 {
-		ret = (equity/e.cfg.InitialCapital - 1) * 100
+	if baseline > 0 {
+		ret = (equity/baseline - 1) * 100
 	}
-	e.notifier.DailySummary(e.cfg.StrategyID, equity, rpnl, ret, total, wins)
+	e.notifier.DailySummary(e.cfg.StrategyID, equity, intervalRealized, ret, intervalTotal, intervalWins)
 }
 
 // Summary returns a one-line result string.

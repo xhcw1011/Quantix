@@ -68,10 +68,17 @@ type Engine struct {
 	tickCh     chan float64            // real-time price from ticker WS
 	log        *zap.Logger
 
-	fillMu      sync.Mutex // protects realizedPnL, wins, total
+	fillMu      sync.Mutex // protects realizedPnL, wins, total, dailyBaselineEquity, dailyBaselineWins, dailyBaselineTotal
 	realizedPnL float64
 	wins, total int
-	startTime   time.Time
+	// Daily summary baseline — captured at engine start and reset each daily summary.
+	// Used to compute "since last summary" return%/wins/total instead of "since engine start"
+	// (which made the metrics drift to whatever cash happened to be at last restart).
+	dailyBaselineEquity      float64
+	dailyBaselineWins        int
+	dailyBaselineTotal       int
+	dailyBaselineRealizedPnL float64
+	startTime           time.Time
 	dbWg        sync.WaitGroup // tracks in-flight DB write goroutines for clean shutdown
 	stratFillCh chan strategy.Fill // routes OnFill to the main goroutine (eliminates data race)
 
@@ -208,6 +215,13 @@ func (e *Engine) SyncBalance(ctx context.Context, baseCurrency string) error {
 func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	e.startTime = time.Now()
 	e.lastBarTime = time.Now()
+	// Capture starting equity as baseline for the first daily summary's % return.
+	e.fillMu.Lock()
+	e.dailyBaselineEquity = e.broker.Equity()
+	e.dailyBaselineWins = 0
+	e.dailyBaselineTotal = 0
+	e.dailyBaselineRealizedPnL = 0
+	e.fillMu.Unlock()
 	e.broker.SetEngineCtx(ctx) // allow async order-fill pollers to use engine lifecycle ctx
 
 	// Wire engine context into the staged exit adapter.
@@ -609,9 +623,14 @@ func (e *Engine) processFills(ctx context.Context) {
 
 			e.fillMu.Lock()
 			e.realizedPnL += realized
-			e.total++
-			if realized > 0 {
-				e.wins++
+			// Win rate counts only closing fills (those with non-zero realized PnL).
+			// Opening fills produce realized=0 by definition; counting them dilutes
+			// the win rate metric to ~half the true value.
+			if realized != 0 {
+				e.total++
+				if realized > 0 {
+					e.wins++
+				}
 			}
 			e.fillMu.Unlock()
 
@@ -789,9 +808,12 @@ func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
 
 	e.fillMu.Lock()
 	e.realizedPnL += realized
-	e.total++
-	if realized > 0 {
-		e.wins++
+	// Same win-rate fix as processFills: only count closing fills.
+	if realized != 0 {
+		e.total++
+		if realized > 0 {
+			e.wins++
+		}
 	}
 	e.fillMu.Unlock()
 
