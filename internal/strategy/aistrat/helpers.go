@@ -763,6 +763,14 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 		return 0, 0
 	}
 
+	// A2: 1h trend opposes — even if 5m looks like a reversion setup, 1h downtrend
+	// means we're catching a knife in the larger timeframe. Mirror of the existing
+	// 1h-aligned tech_reversal close gate. Gated by EnableEntry1hAlignmentFilter.
+	if s.cfg.EnableEntry1hAlignmentFilter && s.detectHourlyMode("LONG") == hourlyExitMode {
+		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "1h_opposes"))
+		return 0, 0
+	}
+
 	// B: BB rapid expansion = volatility breakout starting, not range — reject
 	if s.cfg.ReversionMaxBBExpansionRatio > 0 && len(bb.Lower) >= 6 {
 		bbWidthPrev := bb.Upper[len(bb.Upper)-6] - bb.Lower[len(bb.Lower)-6]
@@ -866,6 +874,13 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 	if s.cfg.ReversionBlockOpposingTrendDir && s.lastTrendDir == 1 {
 		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "opposing_trend_dir"),
 			zap.Int("trend_dir", s.lastTrendDir))
+		return 0, 0
+	}
+
+	// A2: 1h trend opposes — 1h uptrend means SHORT is fighting the bigger timeframe.
+	// Mirror of reversionBuySignal's 1h check. Gated by EnableEntry1hAlignmentFilter.
+	if s.cfg.EnableEntry1hAlignmentFilter && s.detectHourlyMode("SHORT") == hourlyExitMode {
+		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "1h_opposes"))
 		return 0, 0
 	}
 

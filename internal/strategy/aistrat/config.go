@@ -34,6 +34,7 @@ func init() {
 		if v, ok := params["EnableBounceTP"].(bool); ok { cfg.EnableBounceTP = v }
 		if v, ok := params["EntryLimitOffsetUSD"]; ok { cfg.EntryLimitOffsetUSD = toFloat(v) }
 		if v, ok := params["SLDistanceMultiplier"]; ok { cfg.SLDistanceMultiplier = toFloat(v) }
+		if v, ok := params["EnableEntry1hAlignmentFilter"].(bool); ok { cfg.EnableEntry1hAlignmentFilter = v }
 		if v, ok := params["MaxDailyLossPct"]; ok { cfg.MaxDailyLossPct = toFloat(v) }
 		if v, ok := params["MaxConsecLoss"]; ok { cfg.MaxConsecLoss = toInt(v) }
 		if v, ok := params["EnableShort"].(bool); ok { cfg.EnableShort = v }
@@ -202,6 +203,11 @@ type Config struct {
 	EnableBounceTP       bool    // if false, skip "peak retreat after partial TP" close (tick path)
 	EntryLimitOffsetUSD  float64 // dollar offset for breakout regime-shortcut entries (0 = market; e.g. 5 = limit ±$5)
 	SLDistanceMultiplier float64 // multiply final SL distance by this factor (default 1.0)
+	// EnableEntry1hAlignmentFilter: reject reversion entries when 1h trend opposes them.
+	// Reversion buy is rejected when 1h is in EXIT mode for LONG (1h falling).
+	// Reversion sell is rejected when 1h is in EXIT mode for SHORT (1h rising).
+	// Mirror of the existing tech_reversal close gate (1h-aligned skip).
+	EnableEntry1hAlignmentFilter bool
 
 	// ── GPT TP targeting — use market structure for profit targets ──
 	GptTPMinR float64 // min GPT TP distance as R-multiple; floor to cover fees (default 0.5)
@@ -350,6 +356,7 @@ func DefaultConfig() Config {
 		EnableBounceTP:       true,
 		EntryLimitOffsetUSD:  0.0,
 		SLDistanceMultiplier: 1.0,
+		EnableEntry1hAlignmentFilter: false, // default off to preserve legacy backtest baselines
 
 		// ─── 入场门槛 ─────────────────────────────────────────────
 		ConfidenceThreshold: 0.80,  // 默认/逆趋势入场门槛
