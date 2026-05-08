@@ -130,14 +130,17 @@ func (s *AIStrategy) detectHourlyMode(side string) hourlyMode {
 	emaNow := ema80[len(ema80)-1]
 	slope := ema80[len(ema80)-1] - ema80[len(ema80)-2]
 
-	// Compute for both sides at once
+	// Compute for both sides at once.
+	// Strong + Exit are now both 2-condition for symmetry. Previously Exit was
+	// 1-condition (price-vs-EMA only), which over-classified normal pullbacks
+	// as "1h opposing", in turn making the 1h-aligned entry filter too restrictive.
 	s.cachedHourlyLong = hourlyTrendWeak
 	if price > emaNow && slope > 0 { s.cachedHourlyLong = hourlyTrendStrong }
-	if price < emaNow { s.cachedHourlyLong = hourlyExitMode }
+	if price < emaNow && slope < 0 { s.cachedHourlyLong = hourlyExitMode }
 
 	s.cachedHourlyShort = hourlyTrendWeak
 	if price < emaNow && slope < 0 { s.cachedHourlyShort = hourlyTrendStrong }
-	if price > emaNow { s.cachedHourlyShort = hourlyExitMode }
+	if price > emaNow && slope > 0 { s.cachedHourlyShort = hourlyExitMode }
 
 	s.hourlyModeBars = nBars
 	// Also sync lastHourlyDir for consistency with signal.go filter
