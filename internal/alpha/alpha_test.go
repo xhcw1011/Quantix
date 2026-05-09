@@ -26,9 +26,42 @@ func TestFeatures_HasRequiredFields(t *testing.T) {
 		BBLower:  2285.0,
 		BBMiddle: 2300.0,
 		RSI:      55.0,
-		LastBars: []float64{2295, 2298, 2301, 2300, 2299},
 	}
 	if f.Close != 2300 {
 		t.Fatalf("Close not set: %f", f.Close)
+	}
+}
+
+// Verify the Alpha interface is implementable and Signal returns by value (no aliasing).
+type fakeAlpha struct {
+	name string
+	out  Signal
+}
+
+func (f *fakeAlpha) Name() string              { return f.name }
+func (f *fakeAlpha) Predict(_ Features) Signal { return f.out }
+
+func TestAlphaInterface_BasicContract(t *testing.T) {
+	a := &fakeAlpha{name: "fake", out: Signal{Direction: DirLong, Strength: 0.5, TargetR: 1.5, Reason: "test"}}
+	if a.Name() != "fake" {
+		t.Fatalf("Name=%q", a.Name())
+	}
+	got := a.Predict(Features{Close: 2300})
+	if got.Direction != DirLong || got.Strength != 0.5 || got.TargetR != 1.5 || got.Reason != "test" {
+		t.Fatalf("Predict returned wrong Signal: %+v", got)
+	}
+
+	// Mutating the returned Signal must not affect the source — value semantics.
+	got.Direction = DirShort
+	got2 := a.Predict(Features{})
+	if got2.Direction != DirLong {
+		t.Fatalf("Signal aliasing detected: source mutated to %d", got2.Direction)
+	}
+}
+
+func TestDirection_Constants(t *testing.T) {
+	// Pin the wire encoding so accidental refactors break loudly.
+	if DirShort != -1 || DirHold != 0 || DirLong != 1 {
+		t.Fatalf("Direction constants drifted: short=%d hold=%d long=%d", DirShort, DirHold, DirLong)
 	}
 }
