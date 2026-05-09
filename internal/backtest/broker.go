@@ -15,6 +15,15 @@ type pendingOrder struct {
 	req strategy.OrderRequest
 }
 
+// stopRecord tracks an active stop-loss for a single open position.
+// Phase 2 simplification: one stop per symbol; opening another position
+// with a stop on the same symbol overwrites the old one.
+type stopRecord struct {
+	posSide strategy.PositionSide // "" or LONG = long; SHORT = short
+	price   float64
+	qty     float64
+}
+
 // SimBroker is a simulated broker for backtesting.
 // Orders are queued when the strategy calls PlaceOrder, then matched at
 // the close price of the next bar (next-bar-open approximation via close).
@@ -22,23 +31,25 @@ type SimBroker struct {
 	FeeRate  float64 // commission rate, e.g. 0.001 = 0.1%
 	Slippage float64 // one-way slippage fraction, e.g. 0.0005
 
-	pending   []pendingOrder
-	cancelled map[string]bool // IDs that have been cancelled
-	submitted map[string]bool // all IDs ever submitted (for validation)
-	portfolio *Portfolio
-	log       *zap.Logger
-	nextID    int
+	pending     []pendingOrder
+	cancelled   map[string]bool // IDs that have been cancelled
+	submitted   map[string]bool // all IDs ever submitted (for validation)
+	activeStops map[string]*stopRecord
+	portfolio   *Portfolio
+	log         *zap.Logger
+	nextID      int
 }
 
 // NewSimBroker creates a broker wired to the given portfolio.
 func NewSimBroker(feeRate, slippage float64, portfolio *Portfolio, log *zap.Logger) *SimBroker {
 	return &SimBroker{
-		FeeRate:   feeRate,
-		Slippage:  slippage,
-		portfolio: portfolio,
-		log:       log,
-		cancelled: make(map[string]bool),
-		submitted: make(map[string]bool),
+		FeeRate:     feeRate,
+		Slippage:    slippage,
+		portfolio:   portfolio,
+		log:         log,
+		cancelled:   make(map[string]bool),
+		submitted:   make(map[string]bool),
+		activeStops: make(map[string]*stopRecord),
 	}
 }
 
@@ -68,42 +79,64 @@ func (b *SimBroker) CancelOrder(id string) error {
 // Process matches all pending orders against the given bar's close price.
 // Returns the list of fills generated. Should be called once per bar,
 // AFTER the strategy's OnBar has been invoked.
+//
+// Order of operations:
+//  1. Check active stop-losses against this bar's high/low. Triggered stops
+//     emit close fills FIRST (chronologically a stop trips intra-bar before
+//     a new entry executes at close).
+//  2. Execute pending orders queued during the prior bar's OnBar.
+//  3. For each entry fill, register a new stop if req.StopLoss != 0;
+//     for each closing fill, clear any active stop on the symbol.
 func (b *SimBroker) Process(bar exchange.Kline) []strategy.Fill {
-	if len(b.pending) == 0 {
-		return nil
-	}
+	// 1. Stops first.
+	fills := b.checkStops(bar)
 
-	orders := b.pending
-	b.pending = nil
+	// 2. Pending orders.
+	if len(b.pending) > 0 {
+		orders := b.pending
+		b.pending = nil
+		for _, po := range orders {
+			if b.cancelled[po.id] {
+				b.log.Debug("skipping cancelled order", zap.String("id", po.id))
+				continue
+			}
+			fill, err := b.execute(po.req, bar)
+			if err != nil {
+				b.log.Warn("order rejected",
+					zap.String("symbol", po.req.Symbol),
+					zap.String("side", string(po.req.Side)),
+					zap.Error(err))
+				continue
+			}
+			fills = append(fills, fill)
 
-	var fills []strategy.Fill
-	for _, po := range orders {
-		if b.cancelled[po.id] {
-			b.log.Debug("skipping cancelled order", zap.String("id", po.id))
-			continue
+			// Update portfolio
+			if trade := b.portfolio.applyFill(fill, bar.CloseTime); trade != nil {
+				b.portfolio.Trades = append(b.portfolio.Trades, *trade)
+			}
+
+			// 3. Register / clear active stop for this symbol.
+			if b.isOpeningFill(fill) {
+				if po.req.StopLoss != 0 {
+					b.activeStops[fill.Symbol] = &stopRecord{
+						posSide: po.req.PositionSide,
+						price:   po.req.StopLoss,
+						qty:     fill.Qty,
+					}
+				}
+			} else {
+				// Closing fill — clear any active stop for this symbol.
+				delete(b.activeStops, fill.Symbol)
+			}
+
+			b.log.Debug("fill",
+				zap.String("id", fill.ID),
+				zap.String("symbol", fill.Symbol),
+				zap.String("side", string(fill.Side)),
+				zap.Float64("qty", fill.Qty),
+				zap.Float64("price", fill.Price),
+				zap.Float64("fee", fill.Fee))
 		}
-		fill, err := b.execute(po.req, bar)
-		if err != nil {
-			b.log.Warn("order rejected",
-				zap.String("symbol", po.req.Symbol),
-				zap.String("side", string(po.req.Side)),
-				zap.Error(err))
-			continue
-		}
-		fills = append(fills, fill)
-
-		// Update portfolio
-		if trade := b.portfolio.applyFill(fill, bar.CloseTime); trade != nil {
-			b.portfolio.Trades = append(b.portfolio.Trades, *trade)
-		}
-
-		b.log.Debug("fill",
-			zap.String("id", fill.ID),
-			zap.String("symbol", fill.Symbol),
-			zap.String("side", string(fill.Side)),
-			zap.Float64("qty", fill.Qty),
-			zap.Float64("price", fill.Price),
-			zap.Float64("fee", fill.Fee))
 	}
 	return fills
 }
@@ -239,4 +272,69 @@ func (b *SimBroker) executeShort(req strategy.OrderRequest, bar exchange.Kline) 
 		}, nil
 	}
 	return strategy.Fill{}, fmt.Errorf("unknown side: %s", req.Side)
+}
+
+// isOpeningFill returns true when the fill represents opening or adding to
+// a position (vs closing). Long opens via SideBuy; short opens via SideSell.
+func (b *SimBroker) isOpeningFill(fill strategy.Fill) bool {
+	if fill.PositionSide == strategy.PositionSideShort {
+		return fill.Side == strategy.SideSell
+	}
+	return fill.Side == strategy.SideBuy
+}
+
+// checkStops scans active stops against the current bar's high/low and
+// emits close fills for any that triggered. Triggered stops are removed.
+// Long stop trips when bar.Low <= stop.price; short when bar.High >= stop.price.
+// Close price is the stop price with slippage (worst-case execution).
+func (b *SimBroker) checkStops(bar exchange.Kline) []strategy.Fill {
+	if len(b.activeStops) == 0 {
+		return nil
+	}
+	var fills []strategy.Fill
+	for sym, sr := range b.activeStops {
+		// Stops are per-symbol; only check the bar's symbol.
+		if bar.Symbol != "" && bar.Symbol != sym {
+			continue
+		}
+		var (
+			triggered bool
+			closeSide strategy.Side
+			execPrice float64
+		)
+		if sr.posSide == strategy.PositionSideShort {
+			if bar.High >= sr.price {
+				triggered = true
+				closeSide = strategy.SideBuy
+				execPrice = sr.price * (1 + b.Slippage) // BUY pays a bit more
+			}
+		} else {
+			if bar.Low <= sr.price {
+				triggered = true
+				closeSide = strategy.SideSell
+				execPrice = sr.price * (1 - b.Slippage) // SELL receives a bit less
+			}
+		}
+		if !triggered {
+			continue
+		}
+		fee := sr.qty * execPrice * b.FeeRate
+		b.nextID++
+		fill := strategy.Fill{
+			ID:           fmt.Sprintf("sim-%d", b.nextID),
+			Symbol:       sym,
+			Side:         closeSide,
+			PositionSide: sr.posSide,
+			Qty:          sr.qty,
+			Price:        execPrice,
+			Fee:          fee,
+			Timestamp:    bar.CloseTime,
+		}
+		fills = append(fills, fill)
+		if trade := b.portfolio.applyFill(fill, bar.CloseTime); trade != nil {
+			b.portfolio.Trades = append(b.portfolio.Trades, *trade)
+		}
+		delete(b.activeStops, sym)
+	}
+	return fills
 }

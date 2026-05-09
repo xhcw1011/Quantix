@@ -135,3 +135,105 @@ func TestSimBroker_CancelOrder_NotFound(t *testing.T) {
 	err := b.CancelOrder("nonexistent-id")
 	assert.Error(t, err, "CancelOrder on unknown ID should return an error")
 }
+
+func TestSimBroker_StopLoss_LongHit(t *testing.T) {
+	pf := newTestPortfolio(10000)
+	b := NewSimBroker(0.001, 0.0005, pf, devLog())
+
+	// Open long with SL at 95
+	b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "ETH", Side: strategy.SideBuy, Qty: 1.0, StopLoss: 95.0,
+	})
+	// Bar 1: close at 100, no stop hit (Low > 95)
+	bar1 := exchange.Kline{Symbol: "ETH", High: 101, Low: 99, Close: 100, CloseTime: time.Unix(0, 0)}
+	fills1 := b.Process(bar1)
+	if len(fills1) != 1 || fills1[0].Side != strategy.SideBuy {
+		t.Fatalf("expected one BUY entry fill, got %+v", fills1)
+	}
+
+	// Bar 2: Low dips to 94 (crosses stop) — should emit a SELL close fill at 95
+	bar2 := exchange.Kline{Symbol: "ETH", High: 99, Low: 94, Close: 96, CloseTime: time.Unix(300, 0)}
+	fills2 := b.Process(bar2)
+	if len(fills2) != 1 {
+		t.Fatalf("expected one stop-close fill, got %d: %+v", len(fills2), fills2)
+	}
+	if fills2[0].Side != strategy.SideSell {
+		t.Fatalf("expected SideSell on stop close, got %s", fills2[0].Side)
+	}
+	if fills2[0].Price > 95.0 {
+		t.Fatalf("expected close at SL price (95) or worse with slippage, got %f", fills2[0].Price)
+	}
+}
+
+func TestSimBroker_StopLoss_LongNotHit(t *testing.T) {
+	pf := newTestPortfolio(10000)
+	b := NewSimBroker(0.001, 0.0005, pf, devLog())
+
+	b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "ETH", Side: strategy.SideBuy, Qty: 1.0, StopLoss: 95.0,
+	})
+	bar1 := exchange.Kline{Symbol: "ETH", High: 101, Low: 99, Close: 100, CloseTime: time.Unix(0, 0)}
+	b.Process(bar1)
+
+	// Bar with Low=96 — does NOT cross 95
+	bar2 := exchange.Kline{Symbol: "ETH", High: 102, Low: 96, Close: 100, CloseTime: time.Unix(300, 0)}
+	fills := b.Process(bar2)
+	if len(fills) != 0 {
+		t.Fatalf("expected no fills (stop not hit), got %d", len(fills))
+	}
+}
+
+func TestSimBroker_StopLoss_ShortHit(t *testing.T) {
+	pf := newTestPortfolio(10000)
+	b := NewSimBroker(0.001, 0.0005, pf, devLog())
+
+	// Open short with SL at 105
+	b.PlaceOrder(strategy.OrderRequest{
+		Symbol:       "ETH",
+		Side:         strategy.SideSell,
+		PositionSide: strategy.PositionSideShort,
+		Qty:          1.0,
+		StopLoss:     105.0,
+	})
+	bar1 := exchange.Kline{Symbol: "ETH", High: 101, Low: 99, Close: 100, CloseTime: time.Unix(0, 0)}
+	b.Process(bar1)
+
+	// Bar 2: High=106 (crosses 105 stop)
+	bar2 := exchange.Kline{Symbol: "ETH", High: 106, Low: 100, Close: 102, CloseTime: time.Unix(300, 0)}
+	fills := b.Process(bar2)
+	if len(fills) != 1 {
+		t.Fatalf("expected one stop-close fill, got %d", len(fills))
+	}
+	if fills[0].Side != strategy.SideBuy || fills[0].PositionSide != strategy.PositionSideShort {
+		t.Fatalf("expected SideBuy + PositionSideShort, got Side=%s PosSide=%s", fills[0].Side, fills[0].PositionSide)
+	}
+	if fills[0].Price < 105.0 {
+		t.Fatalf("expected close at SL price (105) or worse, got %f", fills[0].Price)
+	}
+}
+
+func TestSimBroker_StopLoss_ClosingFillClearsStop(t *testing.T) {
+	pf := newTestPortfolio(10000)
+	b := NewSimBroker(0.001, 0.0005, pf, devLog())
+
+	// Open long with SL
+	b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "ETH", Side: strategy.SideBuy, Qty: 1.0, StopLoss: 95.0,
+	})
+	bar1 := exchange.Kline{Symbol: "ETH", High: 101, Low: 99, Close: 100, CloseTime: time.Unix(0, 0)}
+	b.Process(bar1)
+
+	// Manual close: SELL the long
+	b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "ETH", Side: strategy.SideSell, Qty: 1.0,
+	})
+	bar2 := exchange.Kline{Symbol: "ETH", High: 102, Low: 100, Close: 101, CloseTime: time.Unix(300, 0)}
+	b.Process(bar2)
+
+	// Bar 3: Low dives to 90 — NO stop fill should emit (already closed)
+	bar3 := exchange.Kline{Symbol: "ETH", High: 95, Low: 90, Close: 92, CloseTime: time.Unix(600, 0)}
+	fills := b.Process(bar3)
+	if len(fills) != 0 {
+		t.Fatalf("expected no stop fill after manual close, got %d: %+v", len(fills), fills)
+	}
+}
