@@ -52,5 +52,11 @@ logs/
 # Compiled binaries
 bin/
 
+# Claude Code worktrees (isolated dev workspaces)
+.claude/worktrees/
+
 # Swagger generated (can regenerate)
 # docs/docs.go
+
+# Cross-compiled binaries from deploy.sh
+build/
