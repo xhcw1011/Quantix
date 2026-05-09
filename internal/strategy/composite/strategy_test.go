@@ -1,6 +1,7 @@
 package composite
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -37,12 +38,19 @@ func (f *fakeAlpha) Name() string                          { return f.name }
 func (f *fakeAlpha) Predict(_ alpha.Features) alpha.Signal { return f.out }
 
 func makeBars(n int, base float64) []exchange.Kline {
+	// Anchor bars so the LAST bar's CloseTime is ~now, ensuring the
+	// live-mode gate opens by the final bar (existing tests pre-date the
+	// gate and assume orders fire). Earlier bars are stale but get caught
+	// up by warmup; gate flips open on the first within-2min CloseTime.
 	bars := make([]exchange.Kline, n)
+	end := time.Now()
 	for i := range bars {
 		px := base + float64(i)*0.5
+		open := end.Add(time.Duration(-(n - i)) * 5 * time.Minute)
 		bars[i] = exchange.Kline{
-			OpenTime: time.Unix(int64(i*300), 0),
-			Open:     px, High: px + 0.5, Low: px - 0.5, Close: px,
+			OpenTime:  open,
+			CloseTime: open.Add(5 * time.Minute),
+			Open:      px, High: px + 0.5, Low: px - 0.5, Close: px,
 			Volume: 1,
 		}
 	}
@@ -206,5 +214,131 @@ func TestStrategy_OnFillIgnoresOtherSymbols(t *testing.T) {
 	})
 	if s.posQty != 0 {
 		t.Fatalf("BTCUSDT fill should not affect ETHUSDT posQty, got %f", s.posQty)
+	}
+}
+
+func TestStrategy_SkipsStaleBackfillBars(t *testing.T) {
+	a := &fakeAlpha{name: "x", out: alpha.Signal{Direction: alpha.DirLong, Strength: 0.9}}
+	s := New([]Alpha{a}, Config{Symbol: "ETHUSDT", WarmupBars: 5})
+
+	broker := &fakeBroker{}
+	ctx := strategy.NewContext(&fakePortfolio{cash: 10000}, broker, zap.NewNop())
+
+	// Build 60 bars where ALL CloseTime are >2 min in past (stale backfill).
+	// Even with WarmupBars satisfied, no orders should fire.
+	// Anchor far enough back that 60×5min stays entirely in the past.
+	bars := make([]exchange.Kline, 60)
+	staleAnchor := time.Now().Add(-10 * time.Hour)
+	for i := range bars {
+		px := 2300.0 + float64(i)*0.5
+		bars[i] = exchange.Kline{
+			OpenTime:  staleAnchor.Add(time.Duration(i) * 5 * time.Minute),
+			CloseTime: staleAnchor.Add(time.Duration(i+1) * 5 * time.Minute),
+			Open:      px, High: px + 0.5, Low: px - 0.5, Close: px,
+			Volume:    1,
+		}
+	}
+	for _, b := range bars {
+		s.OnBar(ctx, b)
+	}
+	if len(broker.orders) != 0 {
+		t.Fatalf("expected 0 orders during backfill replay, got %d", len(broker.orders))
+	}
+}
+
+func TestStrategy_TradesAfterFirstLiveBar(t *testing.T) {
+	// 60 stale backfill bars (no orders), then 1 live bar (close within 2min) → orders allowed.
+	a := &fakeAlpha{name: "x", out: alpha.Signal{Direction: alpha.DirLong, Strength: 0.9}}
+	s := New([]Alpha{a}, Config{Symbol: "ETHUSDT", WarmupBars: 5})
+
+	broker := &fakeBroker{}
+	ctx := strategy.NewContext(&fakePortfolio{cash: 10000}, broker, zap.NewNop())
+
+	// Anchor far enough back that 60×5min stays entirely in the past.
+	staleAnchor := time.Now().Add(-10 * time.Hour)
+	for i := 0; i < 60; i++ {
+		px := 2300.0 + float64(i)*0.5
+		s.OnBar(ctx, exchange.Kline{
+			OpenTime:  staleAnchor.Add(time.Duration(i) * 5 * time.Minute),
+			CloseTime: staleAnchor.Add(time.Duration(i+1) * 5 * time.Minute),
+			Open:      px, High: px + 0.5, Low: px - 0.5, Close: px,
+			Volume:    1,
+		})
+	}
+	if len(broker.orders) != 0 {
+		t.Fatalf("backfill placed orders: %d", len(broker.orders))
+	}
+
+	// Live bar — CloseTime ~now
+	live := exchange.Kline{
+		OpenTime:  time.Now().Add(-5 * time.Minute),
+		CloseTime: time.Now().Add(-30 * time.Second),
+		Open:      2330, High: 2331, Low: 2329, Close: 2330.5,
+		Volume:    1,
+	}
+	s.OnBar(ctx, live)
+	if len(broker.orders) == 0 {
+		t.Fatalf("expected order on first live bar, got 0")
+	}
+}
+
+func TestStrategy_BacktestReplayBypassesLiveGate(t *testing.T) {
+	// In backtest mode, set ctx.Extra["backtest_replay"]=true; stale bars trade.
+	a := &fakeAlpha{name: "x", out: alpha.Signal{Direction: alpha.DirLong, Strength: 0.9}}
+	s := New([]Alpha{a}, Config{Symbol: "ETHUSDT", WarmupBars: 5})
+
+	broker := &fakeBroker{}
+	ctx := strategy.NewContext(&fakePortfolio{cash: 10000}, broker, zap.NewNop())
+	ctx.Extra["backtest_replay"] = true
+
+	staleAnchor := time.Now().Add(-30 * 24 * time.Hour) // ancient bars
+	for i := 0; i < 60; i++ {
+		px := 2300.0 + float64(i)*0.5
+		s.OnBar(ctx, exchange.Kline{
+			OpenTime:  staleAnchor.Add(time.Duration(i) * 5 * time.Minute),
+			CloseTime: staleAnchor.Add(time.Duration(i+1) * 5 * time.Minute),
+			Open:      px, High: px + 0.5, Low: px - 0.5, Close: px,
+			Volume:    1,
+		})
+	}
+	if len(broker.orders) == 0 {
+		t.Fatalf("backtest_replay=true should bypass live-gate, got 0 orders")
+	}
+}
+
+func TestStrategy_StopLossRoundedToTickSize(t *testing.T) {
+	// SL price must be rounded to 0.01 (ETHUSDT tick) — Binance rejects -1111 otherwise.
+	a := &fakeAlpha{name: "x", out: alpha.Signal{Direction: alpha.DirLong, Strength: 0.9}}
+	s := New([]Alpha{a}, Config{Symbol: "ETHUSDT", WarmupBars: 5, SLATR: 1.5})
+
+	broker := &fakeBroker{}
+	ctx := strategy.NewContext(&fakePortfolio{cash: 10000}, broker, zap.NewNop())
+
+	// Build bars with ATR producing fractional SL distance. Use live timestamps.
+	now := time.Now()
+	for i := 0; i < 80; i++ {
+		// Sin wave to give ATR > 0
+		px := 2300.0 + float64(i)*0.5
+		s.OnBar(ctx, exchange.Kline{
+			OpenTime:  now.Add(time.Duration(-80+i) * 5 * time.Minute),
+			CloseTime: now.Add(time.Duration(-80+i)*5*time.Minute + 5*time.Minute),
+			Open:      px, High: px + 0.7, Low: px - 0.6, Close: px + 0.3,
+			Volume:    1,
+		})
+	}
+
+	if len(broker.orders) == 0 {
+		t.Fatalf("expected at least 1 order")
+	}
+	for i, o := range broker.orders {
+		if o.StopLoss == 0 {
+			continue // some orders may have 0 SL if direction was 0; skip
+		}
+		// Multiply by 100, must equal an integer (no sub-cent precision).
+		x := o.StopLoss * 100
+		if math.Abs(x-math.Round(x)) > 1e-6 {
+			t.Fatalf("order[%d] StopLoss=%f not tick-rounded (×100=%f, residual=%f)",
+				i, o.StopLoss, x, math.Abs(x-math.Round(x)))
+		}
 	}
 }

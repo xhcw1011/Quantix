@@ -5,6 +5,8 @@ package composite
 
 import (
 	"context"
+	"math"
+	"time"
 
 	"github.com/Quantix/quantix/internal/alpha"
 	"github.com/Quantix/quantix/internal/exchange"
@@ -48,6 +50,7 @@ type Strategy struct {
 	bars         []exchange.Kline
 	posQty       float64 // current position size (signed: + = long, - = short)
 	firstBarSeen bool    // true after first bar; setup runs once
+	liveReady    bool    // true once first non-stale (or backtest_replay) bar seen
 	userID       int     // from ctx.Extra; 0 in backtest
 	engineID     string  // from ctx.Extra; "" in backtest
 	rdb          *redis.Client // Redis for state persistence; nil in backtest
@@ -73,6 +76,19 @@ func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		s.setupFromContext(ctx)
 		s.firstBarSeen = true
 	}
+
+	// ── Live-mode gate: skip stale backfill bars to avoid trading on
+	//    historical signals during engine warmup. Mirror aistrat pattern.
+	//    cmd/backtest sets ctx.Extra["backtest_replay"]=true to bypass.
+	if !s.liveReady {
+		isBacktest, _ := ctx.Extra["backtest_replay"].(bool)
+		if isBacktest || time.Since(bar.CloseTime) < 2*time.Minute {
+			s.liveReady = true
+		} else {
+			return
+		}
+	}
+
 	if len(s.bars) < s.cfg.WarmupBars {
 		return
 	}
@@ -99,8 +115,10 @@ func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 
 	side := strategy.SideBuy
+	posSide := strategy.PositionSideLong
 	if best.Direction < 0 {
 		side = strategy.SideSell
+		posSide = strategy.PositionSideShort
 	}
 
 	// Position-aware: skip if already aligned with target direction.
@@ -118,12 +136,17 @@ func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if best.Direction < 0 {
 		slPrice = feat.Close + slDist // short: SL above
 	}
+	// Round SL to 0.01 (ETHUSDT tick size). Binance rejects sub-cent precision
+	// with code -1111. Phase 5 will introduce per-symbol tick-size metadata.
+	slPrice = math.Round(slPrice*100) / 100
+
 	ctx.PlaceOrder(strategy.OrderRequest{
-		Symbol:   s.cfg.Symbol,
-		Side:     side,
-		Type:     strategy.OrderMarket,
-		Qty:      qty,
-		StopLoss: slPrice,
+		Symbol:       s.cfg.Symbol,
+		Side:         side,
+		PositionSide: posSide,
+		Type:         strategy.OrderMarket,
+		Qty:          qty,
+		StopLoss:     slPrice,
 	})
 }
 
