@@ -175,3 +175,36 @@ func TestStrategy_SkipsWhenAlreadyAlignedShort(t *testing.T) {
 		t.Fatalf("expected no orders when already aligned short, got %d", len(broker.orders))
 	}
 }
+
+func TestStrategy_PositionTrackedAfterFill(t *testing.T) {
+	a := &fakeAlpha{name: "x", out: alpha.Signal{Direction: alpha.DirLong, Strength: 0.9}}
+	s := New([]Alpha{a}, Config{Symbol: "ETHUSDT"})
+	ctx := strategy.NewContext(&fakePortfolio{cash: 10000}, &fakeBroker{}, zap.NewNop())
+
+	s.OnFill(ctx, strategy.Fill{
+		Symbol: "ETHUSDT", Side: strategy.SideBuy, Qty: 0.5, Price: 2300,
+	})
+	if s.posQty != 0.5 {
+		t.Fatalf("posQty=%f want 0.5", s.posQty)
+	}
+
+	s.OnFill(ctx, strategy.Fill{
+		Symbol: "ETHUSDT", Side: strategy.SideSell, Qty: 0.5, Price: 2310,
+	})
+	if s.posQty != 0 {
+		t.Fatalf("posQty=%f want 0 after closing", s.posQty)
+	}
+}
+
+func TestStrategy_OnFillIgnoresOtherSymbols(t *testing.T) {
+	a := &fakeAlpha{name: "x", out: alpha.Signal{Direction: alpha.DirLong, Strength: 0.9}}
+	s := New([]Alpha{a}, Config{Symbol: "ETHUSDT"})
+	ctx := strategy.NewContext(&fakePortfolio{cash: 10000}, &fakeBroker{}, zap.NewNop())
+
+	s.OnFill(ctx, strategy.Fill{
+		Symbol: "BTCUSDT", Side: strategy.SideBuy, Qty: 0.5, Price: 60000,
+	})
+	if s.posQty != 0 {
+		t.Fatalf("BTCUSDT fill should not affect ETHUSDT posQty, got %f", s.posQty)
+	}
+}

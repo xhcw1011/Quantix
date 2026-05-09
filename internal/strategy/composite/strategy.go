@@ -116,4 +116,13 @@ func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	})
 }
 
-func (s *Strategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {}
+func (s *Strategy) OnFill(_ *strategy.Context, fill strategy.Fill) {
+	if fill.Symbol != s.cfg.Symbol {
+		return
+	}
+	if fill.Side == strategy.SideBuy {
+		s.posQty += fill.Qty
+	} else {
+		s.posQty -= fill.Qty
+	}
+}
