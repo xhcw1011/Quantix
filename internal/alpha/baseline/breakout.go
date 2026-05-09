@@ -36,7 +36,7 @@ func (b *Breakout) Predict(f alpha.Features) alpha.Signal {
 			Direction: alpha.DirLong,
 			Strength:  strength,
 			TargetR:   1.5,
-			Reason:    fmt.Sprintf("close>%g (h10), %.2fATR", f.High10, strength),
+			Reason:    fmt.Sprintf("close>%.2f (h10), %.2fATR", f.High10, strength),
 		}
 	}
 	if f.Close < f.Low10 {
@@ -48,7 +48,7 @@ func (b *Breakout) Predict(f alpha.Features) alpha.Signal {
 			Direction: alpha.DirShort,
 			Strength:  strength,
 			TargetR:   1.5,
-			Reason:    fmt.Sprintf("close<%g (l10), %.2fATR", f.Low10, strength),
+			Reason:    fmt.Sprintf("close<%.2f (l10), %.2fATR", f.Low10, strength),
 		}
 	}
 	return alpha.Signal{Reason: "inside_range"}
