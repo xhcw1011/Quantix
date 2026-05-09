@@ -26,6 +26,9 @@ func (s *Strategy) setupFromContext(ctx *strategy.Context) {
 	if v, ok := ctx.Extra["redis_client"].(*redis.Client); ok {
 		s.rdb = v
 	}
+	// Recovery: read any prior state. Order matters — must come after
+	// rdb and engineID are set.
+	s.recoverState(context.Background())
 }
 
 // compositeState is the JSON shape persisted to Redis.
@@ -57,4 +60,24 @@ func (s *Strategy) persistState(ctx context.Context) {
 		return
 	}
 	_ = s.rdb.Set(ctx, key, b, 0).Err()
+}
+
+// recoverState reads any persisted state from Redis. Silently no-ops when
+// rdb or key is missing, or when no prior state exists. Errors are logged
+// nowhere yet (Phase 5 polish) — fresh start on any failure is the safe
+// default.
+func (s *Strategy) recoverState(ctx context.Context) {
+	key := s.stateKey()
+	if s.rdb == nil || key == "" {
+		return
+	}
+	got, err := s.rdb.Get(ctx, key).Result()
+	if err != nil {
+		return // missing key OR Redis error — start fresh
+	}
+	var st compositeState
+	if err := json.Unmarshal([]byte(got), &st); err != nil {
+		return // malformed payload — start fresh, don't crash
+	}
+	s.posQty = st.PosQty
 }
