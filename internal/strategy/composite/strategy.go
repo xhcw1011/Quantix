@@ -56,5 +56,63 @@ func New(alphas []Alpha, cfg Config) *Strategy {
 
 func (s *Strategy) Name() string { return "composite" }
 
-func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline)  {}
+func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
+	s.bars = append(s.bars, bar)
+	barCap := s.cfg.WarmupBars * 4
+	if len(s.bars) > barCap {
+		s.bars = s.bars[len(s.bars)-barCap:]
+	}
+	if len(s.bars) < s.cfg.WarmupBars {
+		return
+	}
+
+	feat := alpha.BuildFeatures(s.cfg.Symbol, s.bars)
+	if feat.ATR == 0 {
+		return
+	}
+
+	best := alpha.Signal{}
+	for _, a := range s.alphas {
+		sig := a.Predict(feat)
+		if sig.Direction == 0 {
+			continue
+		}
+		if abs(sig.Strength) > abs(best.Strength) {
+			best = sig
+		}
+	}
+	if best.Direction == 0 || best.Strength < s.cfg.MinSignalScore {
+		return
+	}
+
+	side := strategy.SideBuy
+	if best.Direction < 0 {
+		side = strategy.SideSell
+	}
+
+	// Position-aware: skip if already aligned with target direction.
+	if (best.Direction > 0 && s.posQty > 0) || (best.Direction < 0 && s.posQty < 0) {
+		return
+	}
+
+	qty := positionSize(ctx, feat, s.cfg)
+	if qty <= 0 {
+		return
+	}
+
+	ctx.PlaceOrder(strategy.OrderRequest{
+		Symbol: s.cfg.Symbol,
+		Side:   side,
+		Type:   strategy.OrderMarket,
+		Qty:    qty,
+	})
+}
+
 func (s *Strategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {}
+
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
