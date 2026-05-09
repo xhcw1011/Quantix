@@ -44,6 +44,7 @@ import (
 	// Strategy side-effect registrations
 	_ "github.com/Quantix/quantix/internal/strategy/aistrat"
 	_ "github.com/Quantix/quantix/internal/strategy/aistrat_v4"
+	_ "github.com/Quantix/quantix/internal/strategy/composite"
 	_ "github.com/Quantix/quantix/internal/strategy/grid"
 	_ "github.com/Quantix/quantix/internal/strategy/macross"
 	_ "github.com/Quantix/quantix/internal/strategy/meanreversion"
