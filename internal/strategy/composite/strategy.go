@@ -40,10 +40,13 @@ func (c Config) withDefaults() Config {
 
 // Strategy is a strategy.Strategy implementation that composes N alphas.
 type Strategy struct {
-	cfg    Config
-	alphas []Alpha
-	bars   []exchange.Kline
-	posQty float64 // current position size (signed: + = long, - = short)
+	cfg          Config
+	alphas       []Alpha
+	bars         []exchange.Kline
+	posQty       float64 // current position size (signed: + = long, - = short)
+	firstBarSeen bool    // true after first bar; setup runs once
+	userID       int     // from ctx.Extra; 0 in backtest
+	engineID     string  // from ctx.Extra; "" in backtest
 }
 
 // New returns a Composite strategy. Panics if alphas is empty.
@@ -61,6 +64,10 @@ func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	barCap := s.cfg.WarmupBars * 4
 	if len(s.bars) > barCap {
 		s.bars = s.bars[len(s.bars)-barCap:]
+	}
+	if !s.firstBarSeen {
+		s.setupFromContext(ctx)
+		s.firstBarSeen = true
 	}
 	if len(s.bars) < s.cfg.WarmupBars {
 		return
