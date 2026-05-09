@@ -71,13 +71,15 @@ func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		return
 	}
 
+	// Pick strongest directional signal. Strength is contractually [0, 1]
+	// (alpha.Signal docstring); we trust the contract — no abs() defense.
 	best := alpha.Signal{}
 	for _, a := range s.alphas {
 		sig := a.Predict(feat)
 		if sig.Direction == 0 {
 			continue
 		}
-		if abs(sig.Strength) > abs(best.Strength) {
+		if sig.Strength > best.Strength {
 			best = sig
 		}
 	}
@@ -100,19 +102,18 @@ func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		return
 	}
 
+	slDist := feat.ATR * s.cfg.SLATR
+	slPrice := feat.Close - slDist // long: SL below
+	if best.Direction < 0 {
+		slPrice = feat.Close + slDist // short: SL above
+	}
 	ctx.PlaceOrder(strategy.OrderRequest{
-		Symbol: s.cfg.Symbol,
-		Side:   side,
-		Type:   strategy.OrderMarket,
-		Qty:    qty,
+		Symbol:   s.cfg.Symbol,
+		Side:     side,
+		Type:     strategy.OrderMarket,
+		Qty:      qty,
+		StopLoss: slPrice,
 	})
 }
 
 func (s *Strategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {}
-
-func abs(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
