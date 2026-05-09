@@ -4,9 +4,12 @@
 package composite
 
 import (
+	"context"
+
 	"github.com/Quantix/quantix/internal/alpha"
 	"github.com/Quantix/quantix/internal/exchange"
 	"github.com/Quantix/quantix/internal/strategy"
+	"github.com/redis/go-redis/v9"
 )
 
 // Alpha is re-exported so users don't need to import internal/alpha when
@@ -47,6 +50,7 @@ type Strategy struct {
 	firstBarSeen bool    // true after first bar; setup runs once
 	userID       int     // from ctx.Extra; 0 in backtest
 	engineID     string  // from ctx.Extra; "" in backtest
+	rdb          *redis.Client // Redis for state persistence; nil in backtest
 }
 
 // New returns a Composite strategy. Panics if alphas is empty.
@@ -132,4 +136,5 @@ func (s *Strategy) OnFill(_ *strategy.Context, fill strategy.Fill) {
 	} else {
 		s.posQty -= fill.Qty
 	}
+	s.persistState(context.Background())
 }

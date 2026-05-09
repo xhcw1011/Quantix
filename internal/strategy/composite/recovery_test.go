@@ -1,10 +1,14 @@
 package composite
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/Quantix/quantix/internal/alpha"
 	"github.com/Quantix/quantix/internal/strategy"
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -65,5 +69,59 @@ func TestSetupBacktestEmptyExtraOK(t *testing.T) {
 
 	if s.userID != 0 || s.engineID != "" {
 		t.Fatalf("backtest setup leaked: userID=%d engineID=%q", s.userID, s.engineID)
+	}
+}
+
+func TestOnFillPersistsToRedis(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	s := New([]Alpha{&fakeAlpha{}}, Config{Symbol: "ETHUSDT"})
+	s.engineID = "test-engine"
+	s.rdb = rdb
+
+	s.OnFill(nil, strategy.Fill{Symbol: "ETHUSDT", Side: strategy.SideBuy, Qty: 0.5})
+
+	got, err := rdb.Get(context.Background(), "quantix:composite:test-engine:state").Result()
+	if err != nil {
+		t.Fatalf("redis get: %v", err)
+	}
+	var st compositeState
+	if err := json.Unmarshal([]byte(got), &st); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if st.PosQty != 0.5 {
+		t.Fatalf("PosQty=%f want 0.5", st.PosQty)
+	}
+	if st.UpdatedAt.IsZero() {
+		t.Fatalf("UpdatedAt not set")
+	}
+}
+
+func TestPersistStateNoOpWithoutRedis(t *testing.T) {
+	// Backtest path: no rdb, no engineID. persistState must not panic.
+	s := New([]Alpha{&fakeAlpha{}}, Config{Symbol: "ETHUSDT"})
+	s.OnFill(nil, strategy.Fill{Symbol: "ETHUSDT", Side: strategy.SideBuy, Qty: 0.5})
+	if s.posQty != 0.5 {
+		t.Fatalf("posQty update broken: got %f", s.posQty)
+	}
+}
+
+func TestPersistStateNoOpWithoutEngineID(t *testing.T) {
+	// rdb present but engineID still empty (pre-setup). Must skip Redis write.
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	s := New([]Alpha{&fakeAlpha{}}, Config{Symbol: "ETHUSDT"})
+	s.rdb = rdb
+	// engineID stays ""
+
+	s.OnFill(nil, strategy.Fill{Symbol: "ETHUSDT", Side: strategy.SideBuy, Qty: 0.5})
+
+	keys := mr.Keys()
+	if len(keys) != 0 {
+		t.Fatalf("expected no Redis writes without engineID, got keys: %v", keys)
 	}
 }
