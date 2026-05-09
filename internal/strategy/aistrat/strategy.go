@@ -217,6 +217,15 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		return
 	}
 
+	// Persist tick-level peak/trailing changes; manageTrend only syncs on
+	// bar-close trailing-move, so intra-bar improvements would be lost on restart.
+	initPeak, initTrailing := p.peakPrice, p.trailing
+	defer func() {
+		if *pptr != nil && (p.peakPrice != initPeak || p.trailing != initTrailing) {
+			s.syncToRedis(p)
+		}
+	}()
+
 	// Cancel safety-net exchange SL once local trailing is active.
 	// Only after MinHoldBars so the position is always protected.
 	if p.safetyNetSL && s.stagedEP != nil {
