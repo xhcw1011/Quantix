@@ -25,12 +25,12 @@ func BuildFeatures(symbol string, bars []exchange.Kline) Features {
 	rsi := indicator.RSI(closes, 14)
 	atr := indicator.ATR(highs, lows, closes, 14)
 
-	hi10, lo10 := closes[len(closes)-1], closes[len(closes)-1]
-	start := len(closes) - 11
+	start := len(bars) - 11
 	if start < 0 {
 		start = 0
 	}
-	for i := start; i < len(closes)-1; i++ {
+	hi10, lo10 := highs[start], lows[start]
+	for i := start + 1; i < len(closes)-1; i++ {
 		if highs[i] > hi10 {
 			hi10 = highs[i]
 		}
