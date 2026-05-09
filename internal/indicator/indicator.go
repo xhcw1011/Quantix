@@ -4,7 +4,11 @@
 // indicator is not yet defined.
 package indicator
 
-import "github.com/markcheno/go-talib"
+import (
+	"math"
+
+	"github.com/markcheno/go-talib"
+)
 
 // SMA computes the Simple Moving Average over `period` bars.
 // Returns a slice of length len(values); the first period-1 values are 0.
@@ -89,47 +93,31 @@ func Prev(s []float64) float64 {
 
 // ATR returns Wilder's Average True Range as a series aligned with the
 // input slice. ATR[i]=0 for i < period (insufficient history).
+//
+// This uses Wilder smoothing (recursive: ATR_i = (ATR_{i-1}*(period-1) + TR_i)/period).
+// NOTE: aistrat's internal calcATR uses a rolling SMA of TRs, not Wilder. The
+// two will diverge in steady state — this is intentional. Do not "fix" the
+// discrepancy by replacing one with the other without a backtest comparison.
 func ATR(highs, lows, closes []float64, period int) []float64 {
 	n := len(highs)
 	out := make([]float64, n)
 	if n < period+1 || n != len(lows) || n != len(closes) || period <= 0 {
 		return out
 	}
-	// True range per bar
 	tr := make([]float64, n)
-	tr[0] = highs[0] - lows[0]
 	for i := 1; i < n; i++ {
 		hl := highs[i] - lows[i]
-		hc := highs[i] - closes[i-1]
-		if hc < 0 {
-			hc = -hc
-		}
-		lc := lows[i] - closes[i-1]
-		if lc < 0 {
-			lc = -lc
-		}
-		tr[i] = max3(hl, hc, lc)
+		hc := math.Abs(highs[i] - closes[i-1])
+		lc := math.Abs(lows[i] - closes[i-1])
+		tr[i] = max(hl, hc, lc)
 	}
-	// Initial ATR = simple average of first `period` TRs
 	sum := 0.0
 	for i := 1; i <= period; i++ {
 		sum += tr[i]
 	}
 	out[period] = sum / float64(period)
-	// Wilder's smoothing: ATR_i = (ATR_{i-1}*(period-1) + TR_i) / period
 	for i := period + 1; i < n; i++ {
 		out[i] = (out[i-1]*float64(period-1) + tr[i]) / float64(period)
 	}
 	return out
-}
-
-func max3(a, b, c float64) float64 {
-	m := a
-	if b > m {
-		m = b
-	}
-	if c > m {
-		m = c
-	}
-	return m
 }
