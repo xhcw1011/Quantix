@@ -55,6 +55,42 @@ func TestRegistry_DefaultsToBreakoutWhenNoAlphasSpecified(t *testing.T) {
 	}
 }
 
+func TestRegistry_BasisDispersionAlpha(t *testing.T) {
+	if !registry.Exists("composite") {
+		t.Fatalf("composite not registered")
+	}
+	s, err := registry.Create("composite", map[string]any{
+		"Symbol":                 "ETHUSDT",
+		"alpha_basis_dispersion": true,
+	}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("Create err: %v", err)
+	}
+	if s.Name() != "composite" {
+		t.Fatalf("Name=%q", s.Name())
+	}
+}
+
+func TestRegistry_LiquidationCascadeAlpha(t *testing.T) {
+	if !registry.Exists("composite") {
+		t.Fatalf("composite not registered")
+	}
+	s, err := registry.Create("composite", map[string]any{
+		"Symbol":                    "ETHUSDT",
+		"alpha_liquidation_cascade": true,
+	}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("Create err: %v", err)
+	}
+	if s.Name() != "composite" {
+		t.Fatalf("Name=%q", s.Name())
+	}
+	// Note: this constructs a real BinanceLiquidationWS which will start a
+	// background goroutine attempting to connect. That's intentional — the
+	// alpha is constructed lazily and will operate against an empty bucket
+	// set until WS data arrives, which is the safe degraded behavior.
+}
+
 func TestRegistry_PanicsWhenAllAlphasDisabledExplicitly(t *testing.T) {
 	// Explicit false on all alpha flags + no defaulting → panic per New() contract.
 	defer func() {

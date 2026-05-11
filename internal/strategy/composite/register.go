@@ -1,6 +1,8 @@
 package composite
 
 import (
+	"context"
+
 	"github.com/Quantix/quantix/internal/alpha/baseline"
 	"github.com/Quantix/quantix/internal/alpha/sentiment"
 	"github.com/Quantix/quantix/internal/strategy"
@@ -53,6 +55,18 @@ func buildAlphas(params map[string]any, log *zap.Logger) []Alpha {
 		fetcher := sentiment.NewCryptopanicFetcher()
 		alphas = append(alphas, sentiment.NewCryptopanicNews(fetcher, sentiment.CryptopanicConfig{}))
 		log.Info("alpha enabled", zap.String("name", "cryptopanic_news"))
+	}
+	if v, _ := params["alpha_basis_dispersion"].(bool); v {
+		fetcher := sentiment.NewBinanceBasisFetcher()
+		alphas = append(alphas, sentiment.NewBasisDispersion(fetcher, sentiment.BasisDispersionConfig{}))
+		log.Info("alpha enabled", zap.String("name", "basis_dispersion"))
+	}
+	if v, _ := params["alpha_liquidation_cascade"].(bool); v {
+		log.Info("alpha enabled", zap.String("name", "liquidation_cascade"))
+		collector := sentiment.NewBinanceLiquidationWS(log)
+		// Start collector with background context; lives for process lifetime.
+		collector.Start(context.Background())
+		alphas = append(alphas, sentiment.NewLiquidationCascade(collector, sentiment.LiquidationCascadeConfig{}))
 	}
 
 	if len(alphas) == 0 {
