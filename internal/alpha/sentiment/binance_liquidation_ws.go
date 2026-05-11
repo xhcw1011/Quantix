@@ -69,15 +69,29 @@ func (b *BinanceLiquidationWS) consume(ctx context.Context) error {
 	defer conn.Close()
 	b.log.Info("liquidation WS connected", zap.String("url", b.URL))
 
+	// Binance keeps the connection alive via server-side pings every 3 min.
+	// We respond by extending the read deadline whenever a ping arrives.
+	// forceOrder@arr is a sparse stream (liquidations are rare), so a short
+	// read deadline would falsely timeout the connection. 10 min covers the
+	// 3-min ping interval with margin; gorilla's default PongHandler also
+	// resets the deadline, so we just need the initial value to be lenient.
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
+	conn.SetPingHandler(func(appData string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
+	})
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
+		// Extend deadline on every successful read (covers cases where
+		// ping handler doesn't fire because data is flowing).
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
 		b.handle(msg)
 	}
 }
