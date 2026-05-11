@@ -54,6 +54,11 @@ func buildAlphas(params map[string]any, log *zap.Logger) []Alpha {
 		alphas = append(alphas, sentiment.NewCryptopanicNews(fetcher, sentiment.CryptopanicConfig{}))
 		log.Info("alpha enabled", zap.String("name", "cryptopanic_news"))
 	}
+	if v, _ := params["alpha_basis_dispersion"].(bool); v {
+		fetcher := sentiment.NewBinanceBasisFetcher()
+		alphas = append(alphas, sentiment.NewBasisDispersion(fetcher, sentiment.BasisDispersionConfig{}))
+		log.Info("alpha enabled", zap.String("name", "basis_dispersion"))
+	}
 
 	if len(alphas) == 0 {
 		// Sentinel: explicit "no alphas" signal — fall through and let New() panic.
