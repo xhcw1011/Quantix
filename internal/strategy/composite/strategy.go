@@ -25,6 +25,8 @@ type Config struct {
 	SLATR          float64 // SL distance in ATR multiples (default 1.5)
 	MinSignalScore float64 // skip signals below this strength (default 0.3)
 	WarmupBars     int     // bars to accumulate before first prediction (default 60)
+	StepSize       float64 // qty granularity per symbol (default 0.001 ETHUSDT; TON=0.1)
+	TickSize       float64 // price granularity per symbol (default 0.01 ETHUSDT; TON=0.0001)
 }
 
 func (c Config) withDefaults() Config {
@@ -136,9 +138,12 @@ func (s *Strategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if best.Direction < 0 {
 		slPrice = feat.Close + slDist // short: SL above
 	}
-	// Round SL to 0.01 (ETHUSDT tick size). Binance rejects sub-cent precision
-	// with code -1111. Phase 5 will introduce per-symbol tick-size metadata.
-	slPrice = math.Round(slPrice*100) / 100
+	// Round SL to symbol tick size. Binance rejects sub-tick precision with -1111.
+	tick := s.cfg.TickSize
+	if tick <= 0 {
+		tick = 0.01 // ETHUSDT default
+	}
+	slPrice = math.Round(slPrice/tick) * tick
 
 	ctx.PlaceOrder(strategy.OrderRequest{
 		Symbol:       s.cfg.Symbol,

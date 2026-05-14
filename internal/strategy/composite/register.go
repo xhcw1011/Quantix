@@ -25,6 +25,12 @@ func init() {
 		if v, ok := params["WarmupBars"].(float64); ok {
 			cfg.WarmupBars = int(v)
 		}
+		if v, ok := params["StepSize"].(float64); ok {
+			cfg.StepSize = v
+		}
+		if v, ok := params["TickSize"].(float64); ok {
+			cfg.TickSize = v
+		}
 
 		alphas := buildAlphas(params, log)
 		s := New(alphas, cfg)
