@@ -853,6 +853,20 @@ func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
 		zap.Float64("cash", e.broker.Cash()),
 		zap.Float64("equity", equity),
 	)
+
+	if e.notifier != nil {
+		isClose := isClosingLong || isClosingShort
+		orderID := "unmatched"
+		if fill.ExchangeID != "" {
+			orderID = "unmatched-" + fill.ExchangeID
+		}
+		e.notifier.FillNotification(
+			e.cfg.StrategyID, orderID,
+			sym, fill.Side,
+			fill.FilledQty, fill.AvgPrice, fill.Fee, realized,
+			isClose,
+		)
+	}
 }
 
 // ─── livePortfolioView ────────────────────────────────────────────────────────
