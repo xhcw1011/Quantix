@@ -26,6 +26,7 @@ func main() {
 	credID := flag.Int("credential-id", 3, "exchange credential id in DB")
 	userID := flag.Int("user-id", 4, "user id owning the credential")
 	symbol := flag.String("symbol", "ETHUSDT", "symbol to clean up")
+	side := flag.String("side", "", "filter PositionSide: LONG, SHORT, or empty for both. Empty also cancels all open orders; non-empty does not touch open orders.")
 	cfgPath := flag.String("config", "config/config.yaml", "config file")
 	dryRun := flag.Bool("dry-run", false, "print what would be done, don't execute")
 	flag.Parse()
@@ -73,9 +74,13 @@ func main() {
 
 	var ours []exchange.PositionMarginInfo
 	for _, p := range positions {
-		if p.Symbol == *symbol {
-			ours = append(ours, p)
+		if p.Symbol != *symbol {
+			continue
 		}
+		if *side != "" && p.PositionSide != *side {
+			continue
+		}
+		ours = append(ours, p)
 	}
 
 	if len(ours) == 0 {
@@ -103,13 +108,18 @@ func main() {
 	}
 
 	// 2. Cancel all open orders (staged TPs, etc.).
-	fmt.Printf("[%s] canceling all open orders\n", *symbol)
-	if !*dryRun {
-		if err := broker.CancelAllOpenOrders(ctx, *symbol); err != nil {
-			fmt.Printf("  ⚠ cancel: %v\n", err)
-		} else {
-			fmt.Printf("  ✓ all open orders cancelled\n")
+	// Skip when side filter is set — don't touch the other side's protective orders.
+	if *side == "" {
+		fmt.Printf("[%s] canceling all open orders\n", *symbol)
+		if !*dryRun {
+			if err := broker.CancelAllOpenOrders(ctx, *symbol); err != nil {
+				fmt.Printf("  ⚠ cancel: %v\n", err)
+			} else {
+				fmt.Printf("  ✓ all open orders cancelled\n")
+			}
 		}
+	} else {
+		fmt.Printf("[%s] -side=%s set → preserving open orders (won't touch the other side's TP/SL)\n", *symbol, *side)
 	}
 
 	// 3. Verify.
