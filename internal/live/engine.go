@@ -280,6 +280,16 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 		}
 	}
 
+	// Adopt any exchange orders not tracked by OMS (orphans from crashes,
+	// races between order placement and DB write, manual orders). After this
+	// runs, subsequent fills on those orders go through the matched-fill path
+	// instead of unmatched-fill (so TG notifications fire normally).
+	if symbol != "" {
+		orphanCtx, orphanCancel := context.WithTimeout(ctx, 15*time.Second)
+		e.claimOrphanOrders(orphanCtx, symbol)
+		orphanCancel()
+	}
+
 	statusInterval := e.cfg.StatusInterval
 	if statusInterval == 0 {
 		statusInterval = time.Minute

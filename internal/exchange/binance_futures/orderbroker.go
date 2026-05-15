@@ -295,6 +295,38 @@ func (b *OrderBroker) CancelOrder(ctx context.Context, symbol, exchangeID string
 	return fmt.Errorf("binance futures cancel order: %w (algo cancel also failed: %v)", err, algoErr)
 }
 
+// ListOpenOrders implements exchange.OpenOrdersLister.
+// Returns all currently-resting orders on Binance USDM Futures for the given symbol
+// (limit + algo). Used by live.Engine on restart to adopt orphan exchange orders.
+func (b *OrderBroker) ListOpenOrders(ctx context.Context, symbol string) ([]exchange.OpenOrderInfo, error) {
+	orders, err := b.client.NewListOpenOrdersService().Symbol(symbol).Do(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("binance futures list open orders: %w", err)
+	}
+	res := make([]exchange.OpenOrderInfo, 0, len(orders))
+	for _, o := range orders {
+		qty, _ := strconv.ParseFloat(o.OrigQuantity, 64)
+		filled, _ := strconv.ParseFloat(o.ExecutedQuantity, 64)
+		price, _ := strconv.ParseFloat(o.Price, 64)
+		stopPx, _ := strconv.ParseFloat(o.StopPrice, 64)
+		res = append(res, exchange.OpenOrderInfo{
+			ExchangeID:    strconv.FormatInt(o.OrderID, 10),
+			ClientOrderID: o.ClientOrderID,
+			Symbol:        o.Symbol,
+			Side:          string(o.Side),
+			PositionSide:  string(o.PositionSide),
+			Type:          string(o.Type),
+			Status:        string(o.Status),
+			Qty:           qty,
+			FilledQty:     filled,
+			Price:         price,
+			StopPrice:     stopPx,
+			ReduceOnly:    o.ReduceOnly,
+		})
+	}
+	return res, nil
+}
+
 // CancelAllOpenOrders implements exchange.OpenOrdersCanceller.
 // Cancels all open orders for the given symbol on Binance USDM Futures.
 // Used by live.Engine on startup (clean-slate) to clear orphaned orders.

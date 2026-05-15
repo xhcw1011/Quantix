@@ -62,6 +62,31 @@ type OpenOrdersCanceller interface {
 	CancelAllOpenOrders(ctx context.Context, symbol string) error
 }
 
+// OpenOrderInfo describes a currently-resting order on the exchange.
+type OpenOrderInfo struct {
+	ExchangeID    string
+	ClientOrderID string
+	Symbol        string
+	Side          string  // "BUY" / "SELL"
+	PositionSide  string  // "LONG" / "SHORT" / ""
+	Type          string  // e.g. "LIMIT", "STOP_MARKET", "TAKE_PROFIT_MARKET"
+	Status        string  // exchange-native status string
+	Qty           float64
+	FilledQty     float64
+	Price         float64
+	StopPrice     float64
+	ReduceOnly    bool
+}
+
+// OpenOrdersLister is an optional extension of OrderClient that returns the
+// currently-resting orders on the exchange. live.Engine uses it on restart to
+// adopt any exchange orders not tracked by OMS (e.g. limit orders that survived
+// a crash before the DB row was written), so subsequent fills route through
+// the matched-fill path (with TG notification) instead of unmatched-fill.
+type OpenOrdersLister interface {
+	ListOpenOrders(ctx context.Context, symbol string) ([]OpenOrderInfo, error)
+}
+
 // OrderClient abstracts exchange-specific order operations.
 // Implementations: binance.OrderBroker (spot), binance_futures.OrderBroker (USDM),
 // okx.OrderBroker (SWAP demo/live).

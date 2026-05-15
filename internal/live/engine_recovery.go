@@ -151,6 +151,96 @@ func (e *Engine) recoverFromDB(ctx context.Context, symbol string) bool {
 	return true
 }
 
+// claimOrphanOrders queries the exchange for open orders and adopts any not
+// already tracked in OMS (e.g. limit orders that survived a crash before the DB
+// row was persisted). Adopted orders are restored at StatusOpen and registered
+// with the order poller so subsequent fills route through the matched-fill path
+// (with TG notification) instead of unmatched-fill.
+//
+// Called from engine.Run after recoverFromDB. No-op if the exchange does not
+// implement exchange.OpenOrdersLister.
+func (e *Engine) claimOrphanOrders(ctx context.Context, symbol string) {
+	lister, ok := e.broker.orderClient.(exchange.OpenOrdersLister)
+	if !ok {
+		return
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	openOrders, err := lister.ListOpenOrders(qCtx, symbol)
+	if err != nil {
+		e.log.Warn("orphan-claim: list exchange open orders failed", zap.Error(err))
+		return
+	}
+	if len(openOrders) == 0 {
+		return
+	}
+
+	known := make(map[string]bool)
+	for _, ord := range e.omsInst.All() {
+		if ord.ExchangeID != "" {
+			known[ord.ExchangeID] = true
+		}
+	}
+
+	sc, hasSC := e.broker.orderClient.(exchange.OrderStatusChecker)
+	claimed := 0
+	for _, exo := range openOrders {
+		if known[exo.ExchangeID] {
+			continue
+		}
+		ord := &oms.Order{
+			ID:            "ADOPTED-" + exo.ExchangeID,
+			ExchangeID:    exo.ExchangeID,
+			ClientOrderID: exo.ClientOrderID,
+			Symbol:        exo.Symbol,
+			Side:          strategy.Side(exo.Side),
+			PositionSide:  strategy.PositionSide(exo.PositionSide),
+			Type:          strategy.OrderType(exo.Type),
+			Status:        oms.StatusOpen,
+			Mode:          oms.ModeLive,
+			StrategyID:    e.cfg.StrategyID,
+			Qty:           exo.Qty,
+			Price:         exo.Price,
+			StopPrice:     exo.StopPrice,
+			FilledQty:     exo.FilledQty,
+			CreatedAt:     time.Now(),
+			UpdatedAt:     time.Now(),
+		}
+		if err := e.omsInst.Restore(ord); err != nil {
+			e.log.Warn("orphan-claim: OMS restore failed",
+				zap.String("exchange_id", exo.ExchangeID), zap.Error(err))
+			continue
+		}
+		e.log.Info("orphan-claim: adopted exchange order",
+			zap.String("oms_id", ord.ID),
+			zap.String("exchange_id", exo.ExchangeID),
+			zap.String("side", exo.Side),
+			zap.String("position_side", exo.PositionSide),
+			zap.String("type", exo.Type),
+			zap.Float64("qty", exo.Qty),
+			zap.Float64("price", exo.Price),
+			zap.Float64("stop_price", exo.StopPrice),
+			zap.Bool("reduce_only", exo.ReduceOnly),
+		)
+		if hasSC {
+			req := strategy.OrderRequest{
+				Symbol:       exo.Symbol,
+				Side:         strategy.Side(exo.Side),
+				PositionSide: strategy.PositionSide(exo.PositionSide),
+				Type:         strategy.OrderType(exo.Type),
+				Qty:          exo.Qty,
+				Price:        exo.Price,
+				StopPrice:    exo.StopPrice,
+			}
+			go e.broker.pollOrderUntilFilled(e.broker.engineCtx, sc, exo.ExchangeID, ord.ID, req)
+		}
+		claimed++
+	}
+	if claimed > 0 {
+		e.log.Info("orphan-claim: done", zap.Int("count", claimed))
+	}
+}
+
 // SetPositionSyncer injects the Redis-backed position syncer.
 func (e *Engine) SetPositionSyncer(s *position.Syncer) {
 	e.posSyncer = s
