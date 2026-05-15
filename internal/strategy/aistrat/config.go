@@ -1,6 +1,7 @@
 package aistrat
 
 import (
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -13,6 +14,8 @@ func init() {
 	registry.Register("ai", func(params map[string]any, log *zap.Logger) (strategy.Strategy, error) {
 		cfg := DefaultConfig()
 		if v, ok := params["Symbol"].(string); ok { cfg.Symbol = v }
+		if v, ok := params["APIKey"].(string); ok { cfg.APIKey = v }
+		if v, ok := params["Model"].(string); ok { cfg.Model = v }
 		if v, ok := params["ConfidenceThreshold"]; ok { cfg.ConfidenceThreshold = toFloat(v) }
 		if v, ok := params["LookbackBars"]; ok { cfg.LookbackBars = toInt(v) }
 		if v, ok := params["CallIntervalBars"]; ok { cfg.CallIntervalBars = toInt(v) }
@@ -26,15 +29,6 @@ func init() {
 		if v, ok := params["TrendRiskPerTrade"]; ok { cfg.TrendRiskPerTrade = toFloat(v) }
 		if v, ok := params["ATRK"]; ok { cfg.ATRK = toFloat(v) }
 		if v, ok := params["TrailingATRK"]; ok { cfg.TrailingATRK = toFloat(v) }
-		if v, ok := params["EnableTrailing"].(bool); ok { cfg.EnableTrailing = v }
-		if v, ok := params["EnableTimeExit"].(bool); ok { cfg.EnableTimeExit = v }
-		if v, ok := params["EnableTechReversal"].(bool); ok { cfg.EnableTechReversal = v }
-		if v, ok := params["EnableStalePeakExit"].(bool); ok { cfg.EnableStalePeakExit = v }
-		if v, ok := params["EnableEmergencyExit"].(bool); ok { cfg.EnableEmergencyExit = v }
-		if v, ok := params["EnableBounceTP"].(bool); ok { cfg.EnableBounceTP = v }
-		if v, ok := params["EntryLimitOffsetUSD"]; ok { cfg.EntryLimitOffsetUSD = toFloat(v) }
-		if v, ok := params["SLDistanceMultiplier"]; ok { cfg.SLDistanceMultiplier = toFloat(v) }
-		if v, ok := params["EnableEntry1hAlignmentFilter"].(bool); ok { cfg.EnableEntry1hAlignmentFilter = v }
 		if v, ok := params["MaxDailyLossPct"]; ok { cfg.MaxDailyLossPct = toFloat(v) }
 		if v, ok := params["MaxConsecLoss"]; ok { cfg.MaxConsecLoss = toInt(v) }
 		if v, ok := params["EnableShort"].(bool); ok { cfg.EnableShort = v }
@@ -43,12 +37,6 @@ func init() {
 		if v, ok := params["RangeSLPct"]; ok { cfg.RangeSLPct = toFloat(v) }
 		if v, ok := params["GridMaxLayers"]; ok { cfg.GridMaxLayers = toInt(v) }
 		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
-		if v, ok := params["GridMinTPDist"]; ok { cfg.GridMinTPDist = toFloat(v) }
-		if v, ok := params["GridFixedSLDist"]; ok { cfg.GridFixedSLDist = toFloat(v) }
-		if v, ok := params["GridLayerSpacing"]; ok { cfg.GridLayerSpacing = toFloat(v) }
-		if v, ok := params["ReversionBlockOpposingTrendDir"].(bool); ok { cfg.ReversionBlockOpposingTrendDir = v }
-		if v, ok := params["ReversionMaxBBExpansionRatio"]; ok { cfg.ReversionMaxBBExpansionRatio = toFloat(v) }
-		if v, ok := params["ReversionMaxBBLowerOvershoot"]; ok { cfg.ReversionMaxBBLowerOvershoot = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
 		if v, ok := params["GridQtyRatio"]; ok { cfg.GridQtyRatio = toFloat(v) }
@@ -136,6 +124,9 @@ func init() {
 		if v, ok := params["LimitTimeoutBars"]; ok { cfg.LimitTimeoutBars = toInt(v) }
 		if v, ok := params["MinHoldBars"]; ok { cfg.MinHoldBars = toInt(v) }
 		if v, ok := params["MinTrendBars"]; ok { cfg.MinTrendBars = toInt(v) }
+		if v, ok := params["GPTTemperature"]; ok { cfg.GPTTemperature = toFloat(v) }
+		if v, ok := params["GPTMaxTokens"]; ok { cfg.GPTMaxTokens = toInt(v) }
+		if v, ok := params["GPTTimeout"]; ok { cfg.GPTTimeout = time.Duration(toFloat(v)) * time.Second }
 		if v, ok := params["ForceTrend"].(bool); ok { cfg.ForceTrend = v }
 		if v, ok := params["HedgeOnDrawdown"].(bool); ok { cfg.HedgeOnDrawdown = v }
 		if v, ok := params["HedgeDrawdownPct"]; ok { cfg.HedgeDrawdownPct = toFloat(v) }
@@ -151,6 +142,9 @@ func init() {
 				for _, item := range vv { if s, ok := item.(string); ok { cfg.Intervals = append(cfg.Intervals, s) } }
 			}
 		}
+		if cfg.APIKey == "" {
+			return nil, fmt.Errorf("ai strategy requires APIKey parameter")
+		}
 		return New(cfg, log), nil
 	})
 }
@@ -159,10 +153,12 @@ func init() {
 
 type Config struct {
 	Symbol              string
+	APIKey              string
+	Model               string
 	ConfidenceThreshold float64
 	LookbackBars        int
 	CallIntervalBars      int
-	RangeCallIntervalBars int // signal eval interval (in bars) when regime=RANGE and no positions (default 3)
+	RangeCallIntervalBars int // GPT call interval (in bars) when regime=RANGE and no positions (default 3)
 	EnableShort           bool
 	HedgeMode           bool          // true = long+short simultaneously; false = single strongest direction
 	ForceTrend          bool          // true = disable Range mode, always use Trend mode
@@ -193,22 +189,6 @@ type Config struct {
 	SwingSLMaxATR float64 // STRONG_TREND swing SL cap as ATR multiple (default 1.8)
 	TrailingATRK  float64 // trailing distance = entryATR × TrailingATRK (default 2.0; safety net, not primary exit)
 
-	// ── Exit toggles (let SL be the only exit when these are all false) ──
-	// Defaults preserve legacy behavior. Set false to disable individual exit paths.
-	EnableTrailing       bool    // if false, skip trailing exit (both bar+tick paths)
-	EnableTimeExit       bool    // if false, skip "held >3h in weak/exit mode" close
-	EnableTechReversal   bool    // if false, skip checkReversal (opposing tech signal)
-	EnableStalePeakExit  bool    // if false, skip "45m no new peak in EXIT_MODE" close (tick path)
-	EnableEmergencyExit  bool    // if false, skip "pnlR < -0.9 + EXIT_MODE" emergency close (tick path)
-	EnableBounceTP       bool    // if false, skip "peak retreat after partial TP" close (tick path)
-	EntryLimitOffsetUSD  float64 // dollar offset for breakout regime-shortcut entries (0 = market; e.g. 5 = limit ±$5)
-	SLDistanceMultiplier float64 // multiply final SL distance by this factor (default 1.0)
-	// EnableEntry1hAlignmentFilter: reject reversion entries when 1h trend opposes them.
-	// Reversion buy is rejected when 1h is in EXIT mode for LONG (1h falling).
-	// Reversion sell is rejected when 1h is in EXIT mode for SHORT (1h rising).
-	// Mirror of the existing tech_reversal close gate (1h-aligned skip).
-	EnableEntry1hAlignmentFilter bool
-
 	// ── GPT TP targeting — use market structure for profit targets ──
 	GptTPMinR float64 // min GPT TP distance as R-multiple; floor to cover fees (default 0.5)
 	GptTPMaxR float64 // max GPT TP distance as R-multiple; cap to stay reachable (default 1.5)
@@ -229,26 +209,7 @@ type Config struct {
 	GridSpacingPct float64 // spacing between grid levels as fallback (default 0.005 = 0.5%)
 	GridTPPct      float64 // grid order take-profit as fallback (default 0.004 = 0.4%)
 	GridQtyRatio   float64 // grid qty as ratio of base qty (default 0.5)
-	GridMaxTPDist  float64 // max TP distance in $ — caps TP when BB is wide (default 12.0)
-	GridMinTPDist  float64 // min TP distance in $ — floor when BB is narrow (default 5.0)
-	GridFixedSLDist float64 // fixed-distance SL: exit grid if price moves > this $ from base entry (default 50.0)
-	GridLayerSpacing float64 // fixed $ between grid layers: layer N triggers at base ± (N × this) (default 10.0)
-	// ── Reversion entry filters (added 04-28 after $-73 fixed_sl event) ──
-	//
-	// A: ReversionBlockOpposingTrendDir blocks reversion LONG when
-	// lastTrendDir=-1 (and SHORT when lastTrendDir=+1). Catches the "刚开始
-	// 单边下跌时接飞刀" pattern. trend_dir comes from detectRegime — already
-	// computed each bar.
-	ReversionBlockOpposingTrendDir bool
-	// B: ReversionMaxBBExpansionRatio rejects entries when BB width has
-	// expanded too quickly. Computed as bbWidth[now] / bbWidth[5_bars_ago].
-	// > this ratio = volatility breakout starting, not range trade. 0 disables.
-	// Default 1.5 (50% expansion in 25 minutes on 5m).
-	ReversionMaxBBExpansionRatio float64
-	// C: ReversionMaxBBLowerOvershoot caps how far below BB lower the price
-	// can be when opening LONG (mirror for SHORT/upper). 0.002 = 0.2%. Beyond
-	// that = price already broke band hard, momentum continuing, not reverting.
-	ReversionMaxBBLowerOvershoot float64
+	GridMaxTPDist  float64 // max TP distance in $ — caps TP when BB is wide (default 8.0)
 
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
@@ -322,10 +283,15 @@ type Config struct {
 
 	// Entry/exit tuning
 	EntryATRK        float64       // entry offset = ATR × EntryATRK (default 0.5; adapts to volatility)
-	MaxEntryDevPct   float64       // max signal entry deviation from spot (default 0.005)
+	MaxEntryDevPct   float64       // max GPT entry deviation from spot (default 0.005)
 	LimitTimeoutBars int           // bars to wait for limit fill (default 2)
 	MinHoldBars      int           // minimum bars before TP/SL checks (default 3)
 	MinTrendBars     int           // minimum bars before trend management (default 5)
+
+	// GPT tuning
+	GPTTemperature float64       // GPT temperature (default 0.3)
+	GPTMaxTokens   int           // GPT max completion tokens (default 400)
+	GPTTimeout     time.Duration // GPT API call timeout (default 15s)
 
 	// Risk limits
 	MaxDailyLossPct float64
@@ -335,7 +301,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		// ─── 基础 ──────────────────────────────────────────────────────
-		Symbol: "ETHUSDT",
+		Symbol: "ETHUSDT", Model: "gpt-5.4-mini",
 		Leverage: 10, EnableShort: true, ForceTrend: false,
 
 		// ─── 核心风险参数（最常调整）─────────────────────────────────
@@ -346,17 +312,6 @@ func DefaultConfig() Config {
 		SwingSLMinATR: 2.5,   // STRONG_TREND SL 下限 = ATR × 2.5（放宽：给swing SL足够空间）
 		SwingSLMaxATR: 4.0,   // STRONG_TREND SL 上限 = ATR × 4.0（放宽：强趋势需要更多回撤空间）
 		TrailingATRK:  3.0,   // trailing = entryATR × 3.0
-
-		// Exit toggles + entry/SL adjustments — defaults preserve legacy behavior
-		EnableTrailing:       true,
-		EnableTimeExit:       true,
-		EnableTechReversal:   true,
-		EnableStalePeakExit:  true,
-		EnableEmergencyExit:  true,
-		EnableBounceTP:       true,
-		EntryLimitOffsetUSD:  0.0,
-		SLDistanceMultiplier: 1.0,
-		EnableEntry1hAlignmentFilter: false, // default off to preserve legacy backtest baselines
 
 		// ─── 入场门槛 ─────────────────────────────────────────────
 		ConfidenceThreshold: 0.80,  // 默认/逆趋势入场门槛
@@ -415,24 +370,15 @@ func DefaultConfig() Config {
 		EMAFast: 20, EMASlow: 50, BBPeriod: 20, BBStdDev: 2.0,
 		ATRPeriod: 60, VolMAPeriod: 20,
 
+		// ─── GPT 调用 ─────────────────────────────────────────────
+		GPTTemperature: 0.1, GPTMaxTokens: 200, GPTTimeout: 15 * time.Second,
+
 		// ─── Range模式（当前禁用）────────────────────────────────
 		RangeTPPct: 0.012, RangeSLPct: 0.010,
 		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
-		GridMaxLayers: 3, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5,
-		// GridFixedSLDist=0 disables the fixed-distance SL. Classic grid design
-		// relies on range-bound assumption rather than hard SL. Re-enable if
-		// liquidation risk in trending markets becomes the bigger concern.
-		GridMaxTPDist: 12.0, GridMinTPDist: 5.0, GridFixedSLDist: 0.0, GridLayerSpacing: 10.0,
-		// 04-29 data-driven recalibration: log analysis of 27 matched OPEN→CLOSE
-		// records showed pxLo%/pxUp% (price-vs-band) is the only single feature
-		// that cleanly separates winners from losers (3/3 sub-zero broke band
-		// → 100% loss). trend_dir alone wasn't predictive: td=-1 LONG had 5
-		// wins (+$126) and 5 losses (-$93), so A would net hurt more than help.
-		ReversionBlockOpposingTrendDir: false, // A disabled — trend_dir filter loses good entries
-		ReversionMaxBBExpansionRatio:   0,     // B disabled — heuristic threshold un-calibrated
-		ReversionMaxBBLowerOvershoot:   0.0,   // C strict — reject ANY break of BB band (overshoot = 0)
+		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────

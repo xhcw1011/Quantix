@@ -14,30 +14,6 @@ import (
 // Default: TP at 1.5R (50% qty). Trend: TP at 2.0R (50% qty).
 // ATR-adaptive: min(R*level, ATR*3) — tightens in low volatility.
 // Remaining 50% managed by trailing stop + bounce TP.
-// placeGridTP places a single reduce-only limit order at the grid TP price on the exchange.
-// Maker fee (0.02%) instead of reactive market order (0.05%).
-func (s *AIStrategy) placeGridTP(ctx *strategy.Context, pos *posState) {
-	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
-	if !ok { return }
-
-	closeSide := "SELL"
-	posSide := "LONG"
-	if pos.side == "SHORT" {
-		closeSide = "BUY"
-		posSide = "SHORT"
-	}
-
-	tps := []strategy.StagedTP{{Price: pos.takeProfit, Qty: pos.remainQty}}
-	ok = ep.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, 0, pos.remainQty, tps)
-	if ok {
-		pos.stagedTPPlaced = true
-		s.log.Info("SIG: grid TP placed on exchange (maker)",
-			zap.String("side", pos.side),
-			zap.Float64("tp", pos.takeProfit),
-			zap.Float64("qty", pos.remainQty))
-	}
-}
-
 // Breakeven triggered by pnlR >= BreakevenR (code-level, not TP-dependent).
 func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState) {
 	ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer)
@@ -105,9 +81,9 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 		tps = append(tps, strategy.StagedTP{Price: tpPrice, Qty: q})
 	}
 
-	s.log.Info("SIG: TP calculation",
+	s.log.Info("AI: TP calculation",
 		zap.Float64("R", R), zap.Float64("entryATR", pos.entryATR),
-		zap.Float64("alt_tp_hint", pos.gptTPPrice),
+		zap.Float64("gptTP", pos.gptTPPrice),
 		zap.Any("levels", levels), zap.Any("tp_prices", tps))
 
 	ok = ep.PlaceStagedTPOrders(s.cfg.Symbol, posSide, closeSide, pos.stopLoss, qty, tps)
@@ -121,7 +97,7 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 			}
 		}
 		s.saveStagedTPsToRedis(pos)
-		s.log.Info("SIG: staged TP orders placed on exchange",
+		s.log.Info("AI: staged TP orders placed on exchange",
 			zap.String("side", pos.side),
 			zap.String("tp_mode", tpMode),
 			zap.String("regime", string(pos.entryRegime)),
@@ -134,12 +110,7 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 
 // ─── Close Helpers ───────────────────────────────────────────────────────────
 
-// closePos closes a position with market order.
-// triggerPrice: the price that triggered the close (tick price for TICK paths,
-// bar close for bar-driven paths). Pass 0 to fall back to latest bar close.
-// Used for accurate est_pnl logging — bar close lags real fill price during
-// tick-triggered closes (TP/SL/trailing) and produces wildly wrong PnL numbers.
-func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posState, reason string, triggerPrice float64) {
+func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posState, reason string) {
 	qty := math.Floor(p.remainQty*1000) / 1000
 	if qty <= 0 { *pptr = nil; return }
 
@@ -147,7 +118,7 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 	// In that case, skip placing a redundant close order — just clean up local state.
 	// Verify with syncer that THIS specific side has no position, not just the global flag.
 	if s.syncer != nil && s.syncer.PositionClosedExternally.Load() && !s.syncer.HasPosition(p.side) {
-		s.log.Info("SIG: position already closed by exchange — skipping close order",
+		s.log.Info("AI: position already closed by exchange — skipping close order",
 			zap.String("side", p.side), zap.String("reason", reason))
 		s.syncer.PositionClosedExternally.Store(false)
 		// Still cancel any TP/SL orders on exchange (they're now orphaned)
@@ -183,24 +154,26 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 				gridQty += g.qty
 			} else if g.orderID != "" {
 				ctx.CancelOrder(g.orderID)
-				s.log.Info("SIG: cancelled unfilled grid order", zap.String("id", g.orderID))
+				s.log.Info("AI: cancelled unfilled grid order", zap.String("id", g.orderID))
 			}
 		}
 		if gridQty > 0 {
-			s.log.Info("SIG: closing grid orders with base",
+			s.log.Info("AI: closing grid orders with base",
 				zap.Int("layers", len(p.gridOrders)), zap.Float64("grid_qty", gridQty))
 		}
 	}
 
-	// All exits use market order for guaranteed fill.
-	// Grid TP tried limit orders but the price basis (bar close vs tick) caused
-	// stale limit prices that risked non-fill.
+	// Grid TP: price is at our target, use limit order for maker fee (0.02% vs 0.05%).
+	// All other exits (SL, trailing, regime_exit): use market for guaranteed fill.
 	useMarket := true
+	if reason == "grid_tp" {
+		useMarket = false
+	}
 	if !s.placeCloseOrder(ctx, p.side, qty, useMarket) {
 		// Close order FAILED. Check syncer: if exchange has no position,
 		// the position was already closed (manual, liquidation, TP fill, etc.) — safe to clear state.
 		if s.syncer != nil && !s.syncer.HasPosition(p.side) {
-			s.log.Warn("SIG: CLOSE FAILED but exchange has no position — clearing state",
+			s.log.Warn("AI: CLOSE FAILED but exchange has no position — clearing state",
 				zap.String("side", p.side), zap.String("reason", reason))
 			s.accumLong = 0
 			s.accumShort = 0
@@ -213,7 +186,7 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 		// to prevent ReduceOnly reject spam (Binance -2022).
 		p.closeFailCount++
 		if p.closeFailCount >= 3 {
-			s.log.Warn("SIG: CLOSE FAILED 3x — assuming position closed externally, clearing state",
+			s.log.Warn("AI: CLOSE FAILED 3x — assuming position closed externally, clearing state",
 				zap.String("side", p.side), zap.String("reason", reason))
 			s.accumLong = 0
 			s.accumShort = 0
@@ -221,30 +194,22 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 			*pptr = nil
 			return
 		}
-		s.log.Error("SIG: CLOSE FAILED — will retry",
+		s.log.Error("AI: CLOSE FAILED — will retry",
 			zap.String("side", p.side), zap.String("reason", reason),
 			zap.Int("fail_count", p.closeFailCount))
 		s.lastCloseFailAt = time.Now()
 		return
 	}
-	closePrice := triggerPrice
-	if closePrice <= 0 {
-		bars := s.primaryBars()
-		if len(bars) > 0 { closePrice = bars[len(bars)-1].Close }
-	}
-	// Use weighted average entry across base + filled grid layers for accurate
-	// est_pnl. p.entryPrice is the BASE entry only; if grid layers have filled,
-	// the actual cost basis is the weighted average. Trend positions have no
-	// grid layers, so weightedAvgEntry returns p.entryPrice unchanged.
-	avgEntry := weightedAvgEntry(p)
+	bars := s.primaryBars()
+	closePrice := 0.0
+	if len(bars) > 0 { closePrice = bars[len(bars)-1].Close }
 	pnl := 0.0
-	if p.side == "LONG" { pnl = (closePrice - avgEntry) * qty }
-	if p.side == "SHORT" { pnl = (avgEntry - closePrice) * qty }
-	s.log.Info("SIG: CLOSE", zap.String("side", p.side), zap.String("reason", reason),
-		zap.Float64("entry", p.entryPrice), zap.Float64("avg_entry", avgEntry),
-		zap.Float64("close", closePrice), zap.Float64("qty", qty),
-		zap.Bool("market", useMarket), zap.Float64("est_pnl", pnl))
-	s.logEvent("close", p.side, reason, closePrice, avgEntry, qty, 0, pnl, "")
+	if p.side == "LONG" { pnl = (closePrice - p.entryPrice) * qty }
+	if p.side == "SHORT" { pnl = (p.entryPrice - closePrice) * qty }
+	s.log.Info("AI: CLOSE", zap.String("side", p.side), zap.String("reason", reason),
+		zap.Float64("entry", p.entryPrice), zap.Float64("qty", qty), zap.Bool("market", useMarket),
+		zap.Float64("est_pnl", pnl))
+	s.logEvent("close", p.side, reason, closePrice, p.entryPrice, qty, 0, pnl, "")
 
 	// Track hedge cooldown: if closing a Range position while opposite Trend exists
 	if p.mode == modeRange {
@@ -274,19 +239,19 @@ func (s *AIStrategy) checkDayReset(ctx *strategy.Context, price float64) {
 		}
 		s.dayHalted = false
 		s.consecLoss = 0
-		s.log.Info("SIG: new day", zap.Float64("equity", s.dayStartEquity))
+		s.log.Info("AI: new day", zap.Float64("equity", s.dayStartEquity))
 	}
 	// Check for transfer-related balance changes — adjust dayStart
 	// to prevent false daily-loss halts when user moves funds in/out.
 	if adj, ok := ctx.Extra["equity_adjusted"].(float64); ok && adj > 0 {
 		old := s.dayStartEquity
-		s.log.Info("SIG: dayStartEquity adjusted for transfer",
+		s.log.Info("AI: dayStartEquity adjusted for transfer",
 			zap.Float64("old", old), zap.Float64("new", adj))
 		s.dayStartEquity = adj
 		// Only auto-clear halt if equity INCREASED (deposit), not on withdraw
 		if s.dayHalted && adj > old {
 			s.dayHalted = false
-			s.log.Info("SIG: daily halt cleared — equity increased (deposit)")
+			s.log.Info("AI: daily halt cleared — equity increased (deposit)")
 		}
 		delete(ctx.Extra, "equity_adjusted")
 	}
@@ -295,7 +260,7 @@ func (s *AIStrategy) checkDayReset(ctx *strategy.Context, price float64) {
 	if pf := ctx.Portfolio; pf != nil && s.dayStartEquity > 0 {
 		equity := pf.Equity(map[string]float64{s.cfg.Symbol: price})
 		if equity > 0 && equity < s.dayStartEquity*0.5 && s.longPos == nil && s.shortPos == nil {
-			s.log.Warn("SIG: dayStartEquity seems stale (>50% drop with no positions) — resetting",
+			s.log.Warn("AI: dayStartEquity seems stale (>50% drop with no positions) — resetting",
 				zap.Float64("old_start", s.dayStartEquity), zap.Float64("current", equity))
 			s.dayStartEquity = equity
 		}
@@ -307,7 +272,7 @@ func (s *AIStrategy) checkDayReset(ctx *strategy.Context, price float64) {
 			lossPct := (s.dayStartEquity - equity) / s.dayStartEquity
 			if lossPct >= s.cfg.MaxDailyLossPct {
 				s.dayHalted = true
-				s.log.Warn("SIG: daily loss limit reached — halting",
+				s.log.Warn("AI: daily loss limit reached — halting",
 					zap.Float64("loss_pct", lossPct),
 					zap.Float64("equity", equity),
 					zap.Float64("start_equity", s.dayStartEquity))

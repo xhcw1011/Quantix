@@ -130,17 +130,14 @@ func (s *AIStrategy) detectHourlyMode(side string) hourlyMode {
 	emaNow := ema80[len(ema80)-1]
 	slope := ema80[len(ema80)-1] - ema80[len(ema80)-2]
 
-	// Compute for both sides at once.
-	// Strong + Exit are now both 2-condition for symmetry. Previously Exit was
-	// 1-condition (price-vs-EMA only), which over-classified normal pullbacks
-	// as "1h opposing", in turn making the 1h-aligned entry filter too restrictive.
+	// Compute for both sides at once
 	s.cachedHourlyLong = hourlyTrendWeak
 	if price > emaNow && slope > 0 { s.cachedHourlyLong = hourlyTrendStrong }
-	if price < emaNow && slope < 0 { s.cachedHourlyLong = hourlyExitMode }
+	if price < emaNow { s.cachedHourlyLong = hourlyExitMode }
 
 	s.cachedHourlyShort = hourlyTrendWeak
 	if price < emaNow && slope < 0 { s.cachedHourlyShort = hourlyTrendStrong }
-	if price > emaNow && slope > 0 { s.cachedHourlyShort = hourlyExitMode }
+	if price > emaNow { s.cachedHourlyShort = hourlyExitMode }
 
 	s.hourlyModeBars = nBars
 	// Also sync lastHourlyDir for consistency with signal.go filter
@@ -152,57 +149,10 @@ func (s *AIStrategy) detectHourlyMode(side string) hourlyMode {
 
 // ─── Regime Detection ────────────────────────────────────────────────────────
 
-// detectRegime returns the confirmed regime after hysteresis smoothing.
-// Raw regime is computed fresh every bar; transitions require 2 consecutive
-// bars of the same new regime before committing. Prevents single-bar flicker
-// from thrashing downstream decisions (GRID regime-flip exit, breakout
-// shortcut, etc.). Sets s.lastTrendDir as a side effect (not hystereized —
-// trend_dir is computed from stable 2h data).
-// First bar after init bootstraps immediately (no 2-bar wait).
+// detectRegime identifies the current market structure and sets s.lastTrendDir.
+// lastTrendDir: +1 = bullish (price rising), -1 = bearish (price falling), 0 = neutral.
+// Only affects new entries — existing positions are managed by their entryRegime.
 func (s *AIStrategy) detectRegime() Regime {
-	raw := s.computeRawRegime()
-
-	// Bootstrap: first call commits immediately.
-	if s.confirmedRegime == "" {
-		s.confirmedRegime = raw
-		s.pendingRegime = raw
-		s.pendingCount = 0
-		return raw
-	}
-
-	// Same as confirmed → no transition in progress.
-	if raw == s.confirmedRegime {
-		s.pendingRegime = raw
-		s.pendingCount = 0
-		return s.confirmedRegime
-	}
-
-	// Different from confirmed — track pending transition.
-	if raw == s.pendingRegime {
-		s.pendingCount++
-	} else {
-		s.pendingRegime = raw
-		s.pendingCount = 1
-	}
-
-	const hysteresisN = 2 // consecutive bars needed to confirm transition
-	if s.pendingCount >= hysteresisN {
-		s.log.Info("SIG: regime transition confirmed",
-			zap.String("from", string(s.confirmedRegime)),
-			zap.String("to", string(raw)),
-			zap.Int("confirmations", s.pendingCount))
-		s.confirmedRegime = raw
-		s.pendingCount = 0
-		return raw
-	}
-
-	// Pending but not yet confirmed — downstream sees stable prior regime.
-	return s.confirmedRegime
-}
-
-// computeRawRegime runs the raw classification logic without hysteresis.
-// Sets s.lastTrendDir as a side effect.
-func (s *AIStrategy) computeRawRegime() Regime {
 	bars := s.primaryBars()
 	atr := s.calcATR()
 	if atr <= 0 || len(bars) < s.cfg.RegimeN+1 {
@@ -311,7 +261,7 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 	// Manual positions (opened via exchange UI) have no strategy state → skip them.
 	if lp := s.syncer.GetLong(); lp != nil && lp.Qty > 0 {
 		if lp.R == 0 && lp.Mode == "" {
-			s.log.Info("SIG: skipping LONG recovery — manual position (no strategy state)",
+			s.log.Info("AI: skipping LONG recovery — manual position (no strategy state)",
 				zap.Float64("entry", lp.EntryPrice), zap.Float64("qty", lp.Qty))
 			goto recoverShort
 		}
@@ -358,17 +308,9 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			})
 		}
 
-		// Recompute TP for range positions using the same floating logic as
-		// openGrid: BB middle clamped to [min, max]. Consistent with initial
-		// TP and layer recalc paths.
-		if s.longPos.mode == modeRange {
-			s.longPos.takeProfit = s.computeGridTP("LONG", entry)
-		}
-
 		s.loadStagedTPsFromRedis(s.longPos)
-		s.log.Info("SIG: recovered LONG from syncer",
+		s.log.Info("AI: recovered LONG from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", lp.Qty),
-			zap.Float64("tp", s.longPos.takeProfit),
 			zap.Float64("stop", sl), zap.Float64("R", s.longPos.R),
 			zap.String("regime", string(s.longPos.entryRegime)),
 			zap.Int("staged_tps", len(s.longPos.stagedTPs)),
@@ -379,7 +321,7 @@ recoverShort:
 	// Recover SHORT — only if bot opened it.
 	if sp := s.syncer.GetShort(); sp != nil && sp.Qty > 0 {
 		if sp.R == 0 && sp.Mode == "" {
-			s.log.Info("SIG: skipping SHORT recovery — manual position (no strategy state)",
+			s.log.Info("AI: skipping SHORT recovery — manual position (no strategy state)",
 				zap.Float64("entry", sp.EntryPrice), zap.Float64("qty", sp.Qty))
 			return
 		}
@@ -424,14 +366,9 @@ recoverShort:
 			})
 		}
 
-		if s.shortPos.mode == modeRange {
-			s.shortPos.takeProfit = s.computeGridTP("SHORT", entry)
-		}
-
 		s.loadStagedTPsFromRedis(s.shortPos)
-		s.log.Info("SIG: recovered SHORT from syncer",
+		s.log.Info("AI: recovered SHORT from syncer",
 			zap.Float64("entry", entry), zap.Float64("qty", sp.Qty),
-			zap.Float64("tp", s.shortPos.takeProfit),
 			zap.Float64("stop", sl), zap.Float64("R", s.shortPos.R),
 			zap.String("regime", string(s.shortPos.entryRegime)),
 			zap.Int("staged_tps", len(s.shortPos.stagedTPs)),
@@ -536,75 +473,38 @@ func (s *AIStrategy) techSellSignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 	bars := s.primaryBars()
-	if len(bars) < 20 {
-		s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "insufficient_bars"), zap.Int("bars", len(bars)))
-		return 0, 0
-	}
+	if len(bars) < 20 { return 0, 0 }
 
 	price := bars[len(bars)-1].Close
-	curBar := bars[len(bars)-1]
-	lookback := 10
+	lookback := 10 // breakout window
 
-	// Trend regime shortcut (EXPANSION/STRONG_TREND/SLOW_TREND with matching dir):
-	// detectRegime has already validated direction over 2h × 8 bars of 15m data.
-	// The 10-bar break + blowoff + RSI filters below would contradict that:
-	//  - blowoff rejects "barRange > 2×ATR" but trend acceleration IS a big bar;
-	//  - 10-bar break requires price > prior high but in持续单向 trend price often
-	//    drifts within the 10-bar range without explicit break.
-	// Trust the regime signal. Keep RSI safety net to avoid extreme-overbought FOMO.
-	if s.lastTrendDir == 1 && (s.lastRegime == RegimeExpansion ||
-		s.lastRegime == RegimeStrongTrend || s.lastRegime == RegimeSlowTrend) {
-		closes := s.getCloses()
-		rsi := indicator.Last(indicator.RSI(closes, s.cfg.RSIPeriod))
-		if rsi > 80 {
-			s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "rsi_overbought_in_trend"),
-				zap.String("regime", string(s.lastRegime)), zap.Float64("rsi", rsi))
-			return 0, 0
-		}
-		s.log.Info("sig_accept", zap.String("fn", "breakoutBuy"), zap.String("reason", "trend_regime_with_dir"),
-			zap.String("regime", string(s.lastRegime)), zap.Float64("price", price), zap.Float64("rsi", rsi))
-		// Apply EntryLimitOffsetUSD: place LIMIT BUY below current to capture maker fee.
-		// Default 0 = market entry; e.g. 5 = LIMIT at price - $5.
-		entry := price - s.cfg.EntryLimitOffsetUSD
-		return 0.85, math.Round(entry*100) / 100
-	}
-
+	// Find highest high of last N bars (excluding current)
 	highestHigh := 0.0
 	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
 		if i < 0 { continue }
 		if bars[i].High > highestHigh { highestHigh = bars[i].High }
 	}
 
-	if price <= highestHigh {
-		s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "no_breakout_long"),
-			zap.Float64("price", price), zap.Float64("hi10", highestHigh),
-			zap.Float64("gap_pct", (price-highestHigh)/highestHigh*100))
-		return 0, 0
-	}
+	// Price must break above recent high
+	if price <= highestHigh { return 0, 0 }
 
-	// Bar range filter: skip blow-off bars (range > 2× ATR = overextended move)
-	atr := s.calcATR()
-	barRange := curBar.High - curBar.Low
-	if atr > 0 && barRange > atr*2 {
-		s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "bar_range_blowoff"),
-			zap.Float64("bar_range_atr", barRange/atr))
-		return 0, 0
-	}
+	curBar := bars[len(bars)-1]
 
+	// RSI: must not be extremely overbought (> 80 = exhaustion)
 	closes := s.getCloses()
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
-	if rsi > 80 {
-		s.log.Info("sig_reject", zap.String("fn", "breakoutBuy"), zap.String("reason", "rsi_overbought"), zap.Float64("rsi", rsi))
-		return 0, 0
-	}
+	if rsi > 80 { return 0, 0 }
 
 	conf = 0.75
+	// Breakout strength
 	breakoutPct := (price - highestHigh) / highestHigh
 	if breakoutPct > 0.001 { conf += 0.05 }
 	if breakoutPct > 0.003 { conf += 0.05 }
+	// Bullish candle is a bonus, not a requirement
 	if curBar.Close > curBar.Open { conf += 0.05 }
 
+	// Volume confirmation
 	if len(bars) > 20 {
 		avgVol := 0.0
 		for i := len(bars) - 21; i < len(bars)-1; i++ { avgVol += bars[i].Volume }
@@ -614,76 +514,42 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 
 	if conf > 0.95 { conf = 0.95 }
 
-	// Retest entry: enter at the breakout level (previous high), not current price.
-	// Wait for price to pull back to the breakout point (resistance → support).
-	// If price doesn't pull back, the limit order won't fill — better than chasing.
-	entry = math.Round(highestHigh*100) / 100
+	// Breakout = urgency: enter at market price, don't wait for pullback.
+	entry = math.Round(price*100) / 100
 
 	return conf, entry
 }
 
 func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 	bars := s.primaryBars()
-	if len(bars) < 20 {
-		s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "insufficient_bars"), zap.Int("bars", len(bars)))
-		return 0, 0
-	}
+	if len(bars) < 20 { return 0, 0 }
 
 	price := bars[len(bars)-1].Close
-	curBar := bars[len(bars)-1]
 	lookback := 10
 
-	// Trend regime shortcut: see breakoutBuySignal for rationale.
-	if s.lastTrendDir == -1 && (s.lastRegime == RegimeExpansion ||
-		s.lastRegime == RegimeStrongTrend || s.lastRegime == RegimeSlowTrend) {
-		closes := s.getCloses()
-		rsi := indicator.Last(indicator.RSI(closes, s.cfg.RSIPeriod))
-		if rsi < 20 {
-			s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "rsi_oversold_in_trend"),
-				zap.String("regime", string(s.lastRegime)), zap.Float64("rsi", rsi))
-			return 0, 0
-		}
-		s.log.Info("sig_accept", zap.String("fn", "breakoutSell"), zap.String("reason", "trend_regime_with_dir"),
-			zap.String("regime", string(s.lastRegime)), zap.Float64("price", price), zap.Float64("rsi", rsi))
-		// Apply EntryLimitOffsetUSD: place LIMIT SELL above current to capture maker fee.
-		entry := price + s.cfg.EntryLimitOffsetUSD
-		return 0.85, math.Round(entry*100) / 100
-	}
-
+	// Find lowest low of last N bars (excluding current)
 	lowestLow := math.MaxFloat64
 	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
 		if i < 0 { continue }
 		if bars[i].Low < lowestLow { lowestLow = bars[i].Low }
 	}
 
-	if price >= lowestLow {
-		s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "no_breakout_short"),
-			zap.Float64("price", price), zap.Float64("lo10", lowestLow),
-			zap.Float64("gap_pct", (lowestLow-price)/lowestLow*100))
-		return 0, 0
-	}
+	// Price must break below recent low
+	if price >= lowestLow { return 0, 0 }
 
-	// Bar range filter: skip blow-off bars
-	atr := s.calcATR()
-	barRange := curBar.High - curBar.Low
-	if atr > 0 && barRange > atr*2 {
-		s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "bar_range_blowoff"),
-			zap.Float64("bar_range_atr", barRange/atr))
-		return 0, 0
-	}
+	curBar := bars[len(bars)-1]
 
+	// RSI: must not be extremely oversold (< 20 = exhaustion)
 	closes := s.getCloses()
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
-	if rsi < 20 {
-		s.log.Info("sig_reject", zap.String("fn", "breakoutSell"), zap.String("reason", "rsi_oversold"), zap.Float64("rsi", rsi))
-		return 0, 0
-	}
+	if rsi < 20 { return 0, 0 }
 
 	conf = 0.75
 	breakoutPct := (lowestLow - price) / lowestLow
 	if breakoutPct > 0.001 { conf += 0.05 }
 	if breakoutPct > 0.003 { conf += 0.05 }
+	// Bearish candle is a bonus, not a requirement
 	if curBar.Close < curBar.Open { conf += 0.05 }
 
 	if len(bars) > 20 {
@@ -695,8 +561,8 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 
 	if conf > 0.95 { conf = 0.95 }
 
-	// Retest entry: enter at the breakout level (previous low), not current price.
-	entry = math.Round(lowestLow*100) / 100
+	// Breakout = urgency: enter at market price.
+	entry = math.Round(price*100) / 100
 
 	return conf, entry
 }
@@ -707,96 +573,18 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 	closes := s.getCloses()
-	if len(closes) < 30 {
-		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "insufficient_bars"), zap.Int("closes", len(closes)))
-		return 0, 0
-	}
+	if len(closes) < 30 { return 0, 0 }
 
 	price := closes[len(closes)-1]
 
+	// BB is the SOLE hard condition: price within 0.5% of lower band
 	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-	if len(bb.Lower) == 0 {
-		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "bb_unavailable"))
-		return 0, 0
-	}
+	if len(bb.Lower) == 0 { return 0, 0 }
 	bbLower := bb.Lower[len(bb.Lower)-1]
 	bbUpper := bb.Upper[len(bb.Upper)-1]
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
 
-	// BB too narrow = no meaningful range to trade. Skip.
-	bbWidth := bbUpper - bbLower
-	if bbWidth < price*s.cfg.BBWidthMin {
-		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "bb_narrow"),
-			zap.Float64("bb_width_pct", bbWidth/price*100),
-			zap.Float64("min_pct", s.cfg.BBWidthMin*100))
-		return 0, 0
-	}
-
-	// Must be in the lower half of BB. The +0.5% buffer below was too
-	// permissive: bbLower*1.005 puts the gate ~$11 above lower on ETH BB
-	// (~half the entire half-width), so price near or above bbMiddle was
-	// passing the "at lower" check. 04-28 21:35 SHORT @2269.75 hit the
-	// mirror version of this bug.
-	if price > bbMiddle {
-		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "above_bb_middle"),
-			zap.Float64("price", price), zap.Float64("bb_middle", bbMiddle))
-		return 0, 0
-	}
-	if price > bbLower*1.005 {
-		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "not_at_bb_lower"),
-			zap.Float64("price", price), zap.Float64("bb_lower", bbLower),
-			zap.Float64("px_above_lower_pct", (price-bbLower)/bbLower*100))
-		return 0, 0
-	}
-
-	// C: any break below BB lower = momentum continuing, not reverting.
-	// Threshold 0 = strict (price < bbLower rejected). Set negative to disable
-	// in tests if needed. 04-29 data: pxLo% < 0 had 100% loss rate (3/3).
-	if price < bbLower*(1-s.cfg.ReversionMaxBBLowerOvershoot) {
-		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "bb_lower_overshoot"),
-			zap.Float64("price", price), zap.Float64("bb_lower", bbLower),
-			zap.Float64("overshoot_pct", (bbLower-price)/bbLower*100))
-		return 0, 0
-	}
-
-	// A: opposing trend_dir — short-term direction against position = catching a falling knife
-	if s.cfg.ReversionBlockOpposingTrendDir && s.lastTrendDir == -1 {
-		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "opposing_trend_dir"),
-			zap.Int("trend_dir", s.lastTrendDir))
-		return 0, 0
-	}
-
-	// A2: 1h trend opposes — even if 5m looks like a reversion setup, 1h downtrend
-	// means we're catching a knife in the larger timeframe. Mirror of the existing
-	// 1h-aligned tech_reversal close gate. Gated by EnableEntry1hAlignmentFilter.
-	if s.cfg.EnableEntry1hAlignmentFilter && s.detectHourlyMode("LONG") == hourlyExitMode {
-		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "1h_opposes"))
-		return 0, 0
-	}
-
-	// B: BB rapid expansion = volatility breakout starting, not range — reject
-	if s.cfg.ReversionMaxBBExpansionRatio > 0 && len(bb.Lower) >= 6 {
-		bbWidthPrev := bb.Upper[len(bb.Upper)-6] - bb.Lower[len(bb.Lower)-6]
-		if bbWidthPrev > 0 {
-			ratio := bbWidth / bbWidthPrev
-			if ratio > s.cfg.ReversionMaxBBExpansionRatio {
-				s.log.Info("sig_reject", zap.String("fn", "reversionBuy"), zap.String("reason", "bb_expanding"),
-					zap.Float64("ratio", ratio), zap.Float64("max", s.cfg.ReversionMaxBBExpansionRatio),
-					zap.Float64("width_now", bbWidth), zap.Float64("width_5b_ago", bbWidthPrev))
-				return 0, 0
-			}
-		}
-	}
-
-	// Adverse momentum guard: reversion assumes mean-reversion, but in clear
-	// downtrend (急跌/破前 5 根低/3 根累计大跌) it'd catch a falling knife.
-	// regime_flip would tally the loss later (~$3-5 each); reject here instead.
-	if blocked, reason := s.isAdverseMomentum("LONG"); blocked {
-		s.log.Info("sig_reject", zap.String("fn", "reversionBuy"),
-			zap.String("reason", "adverse_momentum_"+reason),
-			zap.Float64("price", price))
-		return 0, 0
-	}
+	if price > bbLower*1.005 { return 0, 0 }
 
 	// Base confidence: 0.76 ensures entry when price touches BB band (RangeEntryConf=0.75).
 	// Bonuses from RSI and BB penetration push conf higher for stronger signals.
@@ -824,90 +612,17 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 	closes := s.getCloses()
-	if len(closes) < 30 {
-		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "insufficient_bars"), zap.Int("closes", len(closes)))
-		return 0, 0
-	}
+	if len(closes) < 30 { return 0, 0 }
 
 	price := closes[len(closes)-1]
 
 	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-	if len(bb.Upper) == 0 {
-		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "bb_unavailable"))
-		return 0, 0
-	}
+	if len(bb.Upper) == 0 { return 0, 0 }
 	bbLower := bb.Lower[len(bb.Lower)-1]
 	bbUpper := bb.Upper[len(bb.Upper)-1]
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
 
-	// BB too narrow = no meaningful range to trade. Skip.
-	bbWidth := bbUpper - bbLower
-	if bbWidth < price*s.cfg.BBWidthMin {
-		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "bb_narrow"),
-			zap.Float64("bb_width_pct", bbWidth/price*100),
-			zap.Float64("min_pct", s.cfg.BBWidthMin*100))
-		return 0, 0
-	}
-
-	// Must be in the upper half of BB. Mirror of the bbMiddle gate in
-	// reversionBuySignal. Without this, 04-28 21:35 fired SHORT @ $2269.75
-	// when bb_middle was $2273 and price was actually below middle —
-	// chasing momentum in a downtrend, not reverting from an extreme.
-	if price < bbMiddle {
-		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "below_bb_middle"),
-			zap.Float64("price", price), zap.Float64("bb_middle", bbMiddle))
-		return 0, 0
-	}
-	if price < bbUpper*0.995 {
-		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "not_at_bb_upper"),
-			zap.Float64("price", price), zap.Float64("bb_upper", bbUpper),
-			zap.Float64("px_below_upper_pct", (bbUpper-price)/bbUpper*100))
-		return 0, 0
-	}
-
-	// C: any break above BB upper = momentum continuing. Mirror of buy side.
-	if price > bbUpper*(1+s.cfg.ReversionMaxBBLowerOvershoot) {
-		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "bb_upper_overshoot"),
-			zap.Float64("price", price), zap.Float64("bb_upper", bbUpper),
-			zap.Float64("overshoot_pct", (price-bbUpper)/bbUpper*100))
-		return 0, 0
-	}
-
-	// A: opposing trend_dir — short-term uptrend means SHORT is fading momentum
-	if s.cfg.ReversionBlockOpposingTrendDir && s.lastTrendDir == 1 {
-		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "opposing_trend_dir"),
-			zap.Int("trend_dir", s.lastTrendDir))
-		return 0, 0
-	}
-
-	// A2: 1h trend opposes — 1h uptrend means SHORT is fighting the bigger timeframe.
-	// Mirror of reversionBuySignal's 1h check. Gated by EnableEntry1hAlignmentFilter.
-	if s.cfg.EnableEntry1hAlignmentFilter && s.detectHourlyMode("SHORT") == hourlyExitMode {
-		s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "1h_opposes"))
-		return 0, 0
-	}
-
-	// B: BB rapid expansion = breakout starting (downward this time, but symmetric)
-	if s.cfg.ReversionMaxBBExpansionRatio > 0 && len(bb.Lower) >= 6 {
-		bbWidthPrev := bb.Upper[len(bb.Upper)-6] - bb.Lower[len(bb.Lower)-6]
-		if bbWidthPrev > 0 {
-			ratio := bbWidth / bbWidthPrev
-			if ratio > s.cfg.ReversionMaxBBExpansionRatio {
-				s.log.Info("sig_reject", zap.String("fn", "reversionSell"), zap.String("reason", "bb_expanding"),
-					zap.Float64("ratio", ratio), zap.Float64("max", s.cfg.ReversionMaxBBExpansionRatio),
-					zap.Float64("width_now", bbWidth), zap.Float64("width_5b_ago", bbWidthPrev))
-				return 0, 0
-			}
-		}
-	}
-
-	// Adverse momentum guard: see reversionBuySignal for rationale.
-	if blocked, reason := s.isAdverseMomentum("SHORT"); blocked {
-		s.log.Info("sig_reject", zap.String("fn", "reversionSell"),
-			zap.String("reason", "adverse_momentum_"+reason),
-			zap.Float64("price", price))
-		return 0, 0
-	}
+	if price < bbUpper*0.995 { return 0, 0 }
 
 	conf = 0.76
 	if price > bbUpper { conf += 0.05 }
@@ -933,147 +648,6 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 
 func r2(v float64) float64 { return math.Round(v*100) / 100 }
 func r3(v float64) float64 { return math.Round(v*1000) / 1000 }
-
-// computeGridTP returns the correct TP price for a grid position.
-// Used by openGrid (initial), manageGrid (layer recalc), recoverFromSyncer.
-// Target = BB middle (direction-appropriate); clamped to
-// [GridMinTPDist, GridMaxTPDist] from entry. Guarantees consistent behavior
-// across position lifecycle — initial open and post-layer recalc both use
-// the same floating range.
-func (s *AIStrategy) computeGridTP(side string, entry float64) float64 {
-	maxTP := s.cfg.GridMaxTPDist
-	if maxTP <= 0 { maxTP = 12.0 }
-	minTP := s.cfg.GridMinTPDist
-	if minTP <= 0 { minTP = maxTP * 0.5 }
-
-	var tp float64
-	if side == "LONG" {
-		if s.lastBBMiddle > entry {
-			tp = s.lastBBMiddle
-		} else {
-			tp = entry + entry*s.cfg.GridTPPct
-		}
-		if tp-entry > maxTP { tp = entry + maxTP }
-		if tp-entry < minTP { tp = entry + minTP }
-	} else {
-		if s.lastBBMiddle > 0 && s.lastBBMiddle < entry {
-			tp = s.lastBBMiddle
-		} else {
-			tp = entry - entry*s.cfg.GridTPPct
-		}
-		if entry-tp > maxTP { tp = entry - maxTP }
-		if entry-tp < minTP { tp = entry - minTP }
-	}
-	return math.Round(tp*100) / 100
-}
-
-// weightedAvgEntry returns the average entry price across base position
-// + filled grid layers, weighted by qty. For trend positions (no grid layers)
-// returns p.entryPrice unchanged. Used in est_pnl calculation to give
-// accurate per-position PnL when grid layers have been added.
-func weightedAvgEntry(p *posState) float64 {
-	totalQty := p.initQty
-	weightedEntry := p.entryPrice * p.initQty
-	for _, g := range p.gridOrders {
-		if g.filled {
-			totalQty += g.qty
-			weightedEntry += g.entryPrice * g.qty
-		}
-	}
-	if totalQty <= 0 { return p.entryPrice }
-	return weightedEntry / totalQty
-}
-
-// isAdverseMomentum returns (true, reason) if recent 5m price action moves
-// strongly against the given direction. Used to:
-//   1. pause grid layer additions during sudden moves (manageGrid)
-//   2. block reversion entries during clear opposite momentum (reversionBuy/Sell)
-// for both: prevents catching falling knives / chasing peak in obvious急变 that
-// the slower regime/trend_dir signals haven't caught up to yet.
-//
-// side: "LONG" or "SHORT"
-//
-// Two triggers (only true 急变 / 急涨), any one fires:
-//  1. single_bar_shock: current bar net move > 1.5×ATR against direction
-//  2. cum3_shock: 3-bar net close-to-close move > 2.0×ATR against direction
-//
-// range_break (cur.Low < prior5Low) was removed 2026-04-23: in 持续单边
-// 行情 each new bar makes a new low, triggering range_break every bar and
-// permanently blocking grid layers (LONG @2364.76 had 30+ consecutive
-// rejections). single_bar_shock and cum3_shock are sufficient for catching
-// real急变 without this linear cascade.
-func (s *AIStrategy) isAdverseMomentum(side string) (bool, string) {
-	bars := s.primaryBars()
-	if len(bars) < 4 { return false, "" }
-	atr := s.calcATR()
-	if atr <= 0 { return false, "" }
-
-	cur := bars[len(bars)-1]
-
-	// 1. Single-bar shock
-	barMove := cur.Close - cur.Open
-	if side == "LONG" && barMove < -atr*1.5 { return true, "single_bar_shock" }
-	if side == "SHORT" && barMove > atr*1.5 { return true, "single_bar_shock" }
-
-	// 2. Cumulative 3-bar move
-	cum3 := bars[len(bars)-1].Close - bars[len(bars)-3].Close
-	if side == "LONG" && cum3 < -atr*2.0 { return true, "cum3_shock" }
-	if side == "SHORT" && cum3 > atr*2.0 { return true, "cum3_shock" }
-
-	return false, ""
-}
-
-// buildDiagFields returns regime-appropriate diagnostic fields for the per-bar
-// summary log. Values are recomputed each call — do not rely on cached
-// s.lastBB* because those are only written when the reversion signal ran past
-// the BB check (exactly the path we want to diagnose when it doesn't fire).
-func (s *AIStrategy) buildDiagFields(regime Regime) []zap.Field {
-	closes := s.getCloses()
-	if len(closes) < 30 { return nil }
-	price := closes[len(closes)-1]
-	rsi := r2(indicator.Last(indicator.RSI(closes, s.cfg.RSIPeriod)))
-
-	if regime == RegimeRange {
-		bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-		if len(bb.Lower) == 0 { return []zap.Field{zap.Float64("rsi", rsi)} }
-		lo := bb.Lower[len(bb.Lower)-1]
-		mid := bb.Middle[len(bb.Middle)-1]
-		up := bb.Upper[len(bb.Upper)-1]
-		return []zap.Field{
-			zap.Float64("bb_lower", r2(lo)),
-			zap.Float64("bb_middle", r2(mid)),
-			zap.Float64("bb_upper", r2(up)),
-			zap.Float64("bb_width_pct", r3((up-lo)/price*100)),
-			zap.Float64("px_above_lo_pct", r3((price-lo)/lo*100)),
-			zap.Float64("px_below_up_pct", r3((up-price)/up*100)),
-			zap.Float64("rsi", rsi),
-		}
-	}
-
-	// Trend path: 10-bar high/low + breakout gap + bar range / ATR
-	bars := s.primaryBars()
-	if len(bars) < 12 { return []zap.Field{zap.Float64("rsi", rsi)} }
-	lookback := 10
-	hi10 := 0.0
-	lo10 := math.MaxFloat64
-	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
-		if i < 0 { continue }
-		if bars[i].High > hi10 { hi10 = bars[i].High }
-		if bars[i].Low < lo10 { lo10 = bars[i].Low }
-	}
-	atr := s.calcATR()
-	cur := bars[len(bars)-1]
-	barRangeATR := 0.0
-	if atr > 0 { barRangeATR = r3((cur.High-cur.Low)/atr) }
-	return []zap.Field{
-		zap.Float64("hi10", r2(hi10)),
-		zap.Float64("lo10", r2(lo10)),
-		zap.Float64("brkout_long_pct", r3((price-hi10)/hi10*100)),
-		zap.Float64("brkout_short_pct", r3((lo10-price)/lo10*100)),
-		zap.Float64("bar_range_atr", barRangeATR),
-		zap.Float64("rsi", rsi),
-	}
-}
 
 // logEvent writes a trade event to DB for persistent analysis.
 func (s *AIStrategy) logEvent(eventType, side, reason string, price, entryPrice, qty, confidence, pnl float64, details string) {

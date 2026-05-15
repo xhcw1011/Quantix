@@ -62,7 +62,7 @@ func (s *AIStrategy) openHedgeScalp(ctx *strategy.Context, side string, currentP
 	}
 	if side == "LONG" { s.longPos = pos } else { s.shortPos = pos }
 
-	s.log.Info("SIG: OPEN HEDGE SCALP",
+	s.log.Info("AI: OPEN HEDGE SCALP",
 		zap.String("side", side), zap.Float64("entry", entryPrice),
 		zap.Float64("tp", takeProfit), zap.Float64("sl", stopLoss),
 		zap.Float64("qty", qty),
@@ -82,7 +82,7 @@ func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, 
 
 	// Guard: BB levels must be available (set by reversionBuy/SellSignal)
 	if s.lastBBLower <= 0 || s.lastBBUpper <= 0 || s.lastBBMiddle <= 0 {
-		s.log.Warn("SIG: openGrid skipped — BB levels not available")
+		s.log.Warn("AI: openGrid skipped — BB levels not available")
 		return
 	}
 
@@ -90,17 +90,36 @@ func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, 
 	// Grid trades rely on the range holding — SL at range edge, not ATR.
 	buffer := atr * 0.5
 	minSL := entryPrice * s.cfg.MinSLDistPct
+	// TP = min(BB middle, entry ± GridMaxTPDist) — caps profit target when BB is wide.
+	maxTP := s.cfg.GridMaxTPDist
+	if maxTP <= 0 { maxTP = 8.0 }
 
-	takeProfit := s.computeGridTP(side, entryPrice)
-	var stopLoss float64
+	var stopLoss, takeProfit float64
 	if side == "LONG" {
 		sl := s.lastBBLower - buffer
 		if entryPrice-sl < minSL { sl = entryPrice - minSL }
 		stopLoss = math.Round(sl*100) / 100
+		if s.lastBBMiddle > entryPrice {
+			takeProfit = math.Round(s.lastBBMiddle*100) / 100
+		} else {
+			takeProfit = math.Round((entryPrice+entryPrice*s.cfg.GridTPPct)*100) / 100
+		}
+		// Cap TP distance
+		if takeProfit-entryPrice > maxTP {
+			takeProfit = math.Round((entryPrice+maxTP)*100) / 100
+		}
 	} else {
 		sl := s.lastBBUpper + buffer
 		if sl-entryPrice < minSL { sl = entryPrice + minSL }
 		stopLoss = math.Round(sl*100) / 100
+		if s.lastBBMiddle > 0 && s.lastBBMiddle < entryPrice {
+			takeProfit = math.Round(s.lastBBMiddle*100) / 100
+		} else {
+			takeProfit = math.Round((entryPrice-entryPrice*s.cfg.GridTPPct)*100) / 100
+		}
+		if entryPrice-takeProfit > maxTP {
+			takeProfit = math.Round((entryPrice-maxTP)*100) / 100
+		}
 	}
 
 	R := math.Abs(entryPrice - stopLoss)
@@ -136,7 +155,7 @@ func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, 
 	}
 	if side == "LONG" { s.longPos = pos } else { s.shortPos = pos }
 
-	s.log.Info("SIG: OPEN GRID",
+	s.log.Info("AI: OPEN GRID",
 		zap.String("side", side), zap.Float64("entry", entryPrice),
 		zap.Float64("tp", takeProfit), zap.Float64("sl", stopLoss),
 		zap.Float64("R", R), zap.Float64("qty", qty))
@@ -181,17 +200,6 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 		}
 	}
 	stopLoss = math.Round(stopLoss*100) / 100
-	// SLDistanceMultiplier: widen the SL distance uniformly across all SL paths.
-	// Default 1.0 = no change. Set > 1.0 to give positions more room.
-	if mul := s.cfg.SLDistanceMultiplier; mul > 0 && mul != 1.0 {
-		dist := math.Abs(entryPrice - stopLoss) * mul
-		if side == "LONG" {
-			stopLoss = entryPrice - dist
-		} else {
-			stopLoss = entryPrice + dist
-		}
-		stopLoss = math.Round(stopLoss*100) / 100
-	}
 	if side == "LONG" && stopLoss >= entryPrice { return }
 	if side == "SHORT" && stopLoss <= entryPrice { return }
 
@@ -200,7 +208,7 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 
 	// MaxRPercent: skip trade if SL is too wide relative to price
 	if s.cfg.MaxRPercent > 0 && R/entryPrice > s.cfg.MaxRPercent {
-		s.log.Info("SIG: skip — R too wide", zap.Float64("R", R), zap.Float64("max", entryPrice*s.cfg.MaxRPercent))
+		s.log.Info("AI: skip — R too wide", zap.Float64("R", R), zap.Float64("max", entryPrice*s.cfg.MaxRPercent))
 		return
 	}
 
@@ -244,7 +252,7 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	}
 	if side == "LONG" { s.longPos = pos } else { s.shortPos = pos }
 
-	s.log.Info("SIG: OPEN TREND",
+	s.log.Info("AI: OPEN TREND",
 		zap.String("side", side), zap.Float64("entry", entryPrice),
 		zap.Float64("sl", stopLoss), zap.Float64("R", R), zap.Float64("qty", qty))
 	s.logEvent("open", side, "trend", currentPrice, entryPrice, qty, 0, 0,
@@ -321,7 +329,7 @@ func (s *AIStrategy) addGPTGrid(pos *posState, side string, gptEntry float64) {
 		filled: false, limitBar: s.barCount,
 	}
 	pos.gridOrders = append(pos.gridOrders, g)
-	s.log.Info("SIG: GPT entry as grid add-on",
+	s.log.Info("AI: GPT entry as grid add-on",
 		zap.String("side", side), zap.Float64("gpt_entry", gptEntry),
 		zap.Float64("grid_qty", gridQty), zap.Float64("grid_tp", gridTP))
 }
