@@ -383,7 +383,7 @@ func DefaultConfig() Config {
 
 		// ─── 风控 ─────────────────────────────────────────────────
 		MaxDailyLossPct: 0.10, MaxConsecLoss: 3,
-		HedgeOnDrawdown: false, HedgeDrawdownPct: 0.005,
+		HedgeMode: true, HedgeOnDrawdown: true, HedgeDrawdownPct: 0.005,
 		HedgeCooldown: 15 * time.Minute, HedgeQtyRatio: 0.3, HedgeTPRatio: 0.5,
 	}
 }

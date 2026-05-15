@@ -522,7 +522,10 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	// ── Direction conflict resolution ──
 	// Grid/reversion mode: allow simultaneous long+short (hedge) — grid needs both sides.
-	// Trend mode: single-direction only (strongest signal wins).
+	// Trend mode dispatch precedence:
+	//   1. HedgeOnDrawdown + canHedge → openHedgeScalp (30% qty, capped TP)
+	//   2. HedgeMode=true → fall through to full-size openTrend on opposite side
+	//   3. Otherwise → single direction (block opposite)
 	hedgeAllowed := false
 	if isReversion {
 		// Grid mode: both directions allowed simultaneously.
@@ -535,8 +538,8 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			}
 		}
 		// Existing opposite-side position does NOT block new entry in grid mode.
-	} else if !s.cfg.HedgeMode {
-		// Trend mode: single direction.
+	} else {
+		// Trend mode.
 		if longConf >= entryConfLong && shortConf >= entryConfShort {
 			if longConf >= shortConf {
 				shortConf = 0
@@ -544,26 +547,31 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				longConf = 0
 			}
 		}
-		if s.longPos != nil && shortConf >= entryConfShort {
-			if s.cfg.HedgeOnDrawdown && s.canHedge(price, s.longPos) {
+		// Priority 1: drawdown hedge → small scalp, takes precedence over HedgeMode.
+		if s.cfg.HedgeOnDrawdown {
+			if s.longPos != nil && shortConf >= entryConfShort && s.canHedge(price, s.longPos) {
 				hedgeAllowed = true
 				s.log.Info("AI: hedge-on-drawdown → SHORT scalp",
 					zap.Float64("main_entry", s.longPos.entryPrice),
 					zap.Float64("price", price))
-			} else {
-				shortConf = 0
 			}
-		}
-		if s.shortPos != nil && longConf >= entryConfLong {
-			if s.cfg.HedgeOnDrawdown && s.canHedge(price, s.shortPos) {
+			if s.shortPos != nil && longConf >= entryConfLong && s.canHedge(price, s.shortPos) {
 				hedgeAllowed = true
 				s.log.Info("AI: hedge-on-drawdown → LONG scalp",
 					zap.Float64("main_entry", s.shortPos.entryPrice),
 					zap.Float64("price", price))
-			} else {
+			}
+		}
+		// Priority 2: HedgeMode off and no drawdown-scalp → enforce single direction.
+		if !hedgeAllowed && !s.cfg.HedgeMode {
+			if s.longPos != nil && shortConf >= entryConfShort {
+				shortConf = 0
+			}
+			if s.shortPos != nil && longConf >= entryConfLong {
 				longConf = 0
 			}
 		}
+		// HedgeMode=true with hedgeAllowed=false → fall through; full-size opposite trend allowed.
 	}
 
 	// Entry price is now determined per-mode in the entry block below:
