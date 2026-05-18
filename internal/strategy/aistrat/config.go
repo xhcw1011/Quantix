@@ -147,6 +147,35 @@ func init() {
 		}
 		return New(cfg, log), nil
 	})
+
+	// ─── UI presets ─────────────────────────────────────────────────────────
+	// Surfaced via GET /api/strategies/ai/presets so users pick a starting
+	// config without filling 30+ knobs. Selecting a preset just sets `params`
+	// — they're free to tweak before clicking Start.
+	registry.RegisterPreset("ai", registry.Preset{
+		Name:        "Default (hedge both)",
+		Description: "1671323-era stable config. HedgeMode + HedgeOnDrawdown both on. Recommended for ETHUSDT live.",
+		Params:      map[string]any{}, // empty = use DefaultConfig() as-is
+	})
+	registry.RegisterPreset("ai", registry.Preset{
+		Name:        "Drawdown-hedge only",
+		Description: "Single-direction trend; counter-side scalp only when main position draws down >0.5%. Less position turnover.",
+		Params: map[string]any{
+			"HedgeMode":        false,
+			"HedgeOnDrawdown":  true,
+			"HedgeDrawdownPct": 0.005,
+		},
+	})
+	registry.RegisterPreset("ai", registry.Preset{
+		Name:        "Conservative (no hedge)",
+		Description: "No counter-side at all. Tight risk: MaxConsecLoss=2, MaxDailyLossPct=5%.",
+		Params: map[string]any{
+			"HedgeMode":       false,
+			"HedgeOnDrawdown": false,
+			"MaxConsecLoss":   2,
+			"MaxDailyLossPct": 0.05,
+		},
+	})
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────

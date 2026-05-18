@@ -173,6 +173,34 @@ func (s *Server) getEngineByID(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, info)
 }
 
+// listStrategyPresets returns the preset configurations registered for a strategy.
+// Empty array (not 404) when the strategy has no presets.
+//
+//	@Summary		List strategy presets
+//	@Description	Returns one-click param bundles for a strategy
+//	@Tags			strategies
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			name	path	string	true	"Strategy name"
+//	@Success		200		{array}	registry.Preset
+//	@Router			/api/strategies/{name}/presets [get]
+func (s *Server) listStrategyPresets(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		jsonError(w, "strategy name is required", http.StatusBadRequest)
+		return
+	}
+	if !registry.Exists(name) {
+		jsonError(w, "unknown strategy: "+name, http.StatusNotFound)
+		return
+	}
+	presets := registry.Presets(name)
+	if presets == nil {
+		presets = []registry.Preset{} // ensure JSON array, not null
+	}
+	jsonOK(w, presets)
+}
+
 // recentLogs returns the last N lines of today's quantix log file, optionally
 // filtered by an engine_id substring. Used by the Live Log Viewer page so the
 // operator can read strategy decisions without SSH'ing the server.

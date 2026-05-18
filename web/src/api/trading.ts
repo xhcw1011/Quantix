@@ -37,6 +37,7 @@ export const getSummary = () => api.get('/summary')
 
 // Strategies
 export const listStrategies = () => api.get('/strategies')
+export const listStrategyPresets = (name: string) => api.get(`/strategies/${name}/presets`)
 
 // Engine — multi-engine (new)
 export const listEngines = () => api.get('/engines')

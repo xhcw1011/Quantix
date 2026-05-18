@@ -39,6 +39,23 @@ func init() {
 			zap.Int("alphas", len(alphas)))
 		return s, nil
 	})
+
+	registry.RegisterPreset("composite", registry.Preset{
+		Name:        "Breakout only",
+		Description: "Default — just the price-action breakout alpha.",
+		Params:      map[string]any{"alpha_breakout": true},
+	})
+	registry.RegisterPreset("composite", registry.Preset{
+		Name:        "Multi-alpha (sentiment pack)",
+		Description: "Breakout + funding_extreme + cryptopanic_news + basis_dispersion + liquidation_cascade. Requires API keys for external sources.",
+		Params: map[string]any{
+			"alpha_breakout":            true,
+			"alpha_funding_extreme":     true,
+			"alpha_cryptopanic":         true,
+			"alpha_basis_dispersion":    true,
+			"alpha_liquidation_cascade": true,
+		},
+	})
 }
 
 // buildAlphas constructs the alpha list from params. Each alpha is enabled

@@ -180,6 +180,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Strategies
 	mux.Handle("GET /api/strategies", auth(http.HandlerFunc(s.handleListStrategies)))
+	mux.Handle("GET /api/strategies/{name}/presets", auth(http.HandlerFunc(s.listStrategyPresets)))
 
 	// Engine control — multi-engine (new)
 	mux.Handle("GET /api/engines", auth(http.HandlerFunc(s.listEngines)))
