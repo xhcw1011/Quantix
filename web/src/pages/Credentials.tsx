@@ -26,15 +26,47 @@ const initialForm = {
   market_type: 'spot',
 }
 
+type HealthState = 'unknown' | 'testing' | 'ok' | 'fail'
+
+interface HealthInfo {
+  state: HealthState
+  message?: string  // shown as tooltip / under label
+  usdt?: number     // balance from successful test
+}
+
 export default function Credentials() {
   const [creds, setCreds] = useState<Credential[]>([])
   const [form, setForm] = useState(initialForm)
   const [loading, setLoading] = useState(false)
-  const [testResults, setTestResults] = useState<Record<number, string>>({})
+  const [health, setHealth] = useState<Record<number, HealthInfo>>({})
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
 
-  const load = () => listCredentials().then((r) => setCreds(r.data || []))
+  const runTest = async (id: number) => {
+    setHealth((prev) => ({ ...prev, [id]: { state: 'testing' } }))
+    try {
+      const r = await testCredential(id)
+      if (r.data.ok) {
+        setHealth((prev) => ({
+          ...prev,
+          [id]: { state: 'ok', usdt: r.data.usdt_balance, message: `USDT: ${r.data.usdt_balance?.toFixed(2) ?? '?'}` },
+        }))
+      } else {
+        setHealth((prev) => ({ ...prev, [id]: { state: 'fail', message: r.data.error || 'Connection failed' } }))
+      }
+    } catch (e: any) {
+      setHealth((prev) => ({ ...prev, [id]: { state: 'fail', message: e?.response?.data?.error || 'Request failed' } }))
+    }
+  }
+
+  const load = () =>
+    listCredentials().then((r) => {
+      const list: Credential[] = r.data || []
+      setCreds(list)
+      // Auto-test active credentials on load so the badges populate without a click.
+      list.filter((c) => c.is_active).forEach((c) => { runTest(c.id) })
+    })
+
   useEffect(() => { load() }, [])
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -59,20 +91,8 @@ export default function Credentials() {
     load()
   }
 
-  const handleTest = async (id: number) => {
-    setTestResults((prev) => ({ ...prev, [id]: 'Testing...' }))
-    try {
-      const r = await testCredential(id)
-      setTestResults((prev) => ({
-        ...prev,
-        [id]: r.data.ok
-          ? `✅ Connected — USDT: ${r.data.usdt_balance?.toFixed(2) || '?'}`
-          : `❌ ${r.data.error}`,
-      }))
-    } catch {
-      setTestResults((prev) => ({ ...prev, [id]: '❌ Request failed' }))
-    }
-  }
+  // handleTest is now just a thin alias to runTest (kept for clarity at the call site).
+  const handleTest = runTest
 
   return (
     <div className="space-y-6">
@@ -84,8 +104,24 @@ export default function Credentials() {
         {creds.length === 0 ? (
           <p className="text-slate-500 text-sm">No credentials added yet.</p>
         ) : (
-          creds.map((c) => (
+          creds.map((c) => {
+            const h = health[c.id] || { state: 'unknown' as HealthState }
+            const dot =
+              h.state === 'ok' ? 'bg-green-400'
+              : h.state === 'fail' ? 'bg-red-500'
+              : h.state === 'testing' ? 'bg-amber-400 animate-pulse'
+              : 'bg-slate-500'
+            const statusText =
+              h.state === 'ok' ? `✅ Connected — ${h.message ?? ''}`
+              : h.state === 'fail' ? `❌ ${h.message ?? 'Connection failed'}`
+              : h.state === 'testing' ? 'Testing…'
+              : ''
+            return (
             <div key={c.id} className="flex items-center gap-3 p-3 bg-slate-700/50 rounded-lg">
+              <span
+                className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${dot}`}
+                title={statusText || 'Not tested yet'}
+              />
               <div className="flex-1">
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-sm">{c.label}</span>
@@ -95,16 +131,15 @@ export default function Credentials() {
                   <span className="text-xs text-slate-400">{c.market_type}</span>
                 </div>
                 <p className="text-xs text-slate-400 mt-0.5">Key: {c.api_key_mask}</p>
-                {testResults[c.id] && (
-                  <p className="text-xs mt-1">{testResults[c.id]}</p>
-                )}
+                {statusText && <p className={`text-xs mt-1 ${h.state === 'fail' ? 'text-red-400' : 'text-slate-300'}`}>{statusText}</p>}
               </div>
               <div className="flex gap-2">
                 <button
                   onClick={() => handleTest(c.id)}
-                  className="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 rounded"
+                  disabled={h.state === 'testing'}
+                  className="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded"
                 >
-                  Test
+                  {h.state === 'testing' ? 'Testing…' : 'Test'}
                 </button>
                 <button
                   onClick={() => handleDelete(c.id)}
@@ -114,7 +149,7 @@ export default function Credentials() {
                 </button>
               </div>
             </div>
-          ))
+          )})
         )}
       </div>
 
