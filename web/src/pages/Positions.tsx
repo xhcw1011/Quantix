@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getPositions } from '../api/trading'
+import { getPositions, closeEnginePosition } from '../api/trading'
 import { useTradeSocket } from '../hooks/useTradeSocket'
 
 interface PositionView {
@@ -26,6 +26,27 @@ export default function Positions() {
   const [engines, setEngines] = useState<EnginePositions[]>([])
   const [loading, setLoading] = useState(true)
   const [apiError, setApiError] = useState<string | null>(null)
+  const [closingKey, setClosingKey] = useState<string | null>(null)
+
+  const handleClose = async (engineID: string, symbol: string, side: 'LONG' | 'SHORT', qty: number) => {
+    const ok = window.confirm(
+      `Close ${side} ${qty} ${symbol} on engine ${engineID}?\n\n` +
+      `This places a reduce-only market order on the exchange. ` +
+      `The engine continues running.`
+    )
+    if (!ok) return
+    const key = `${engineID}-${side}`
+    setClosingKey(key)
+    try {
+      const r = await closeEnginePosition(engineID, side)
+      alert(`Closed: ${r.data.qty} ${r.data.symbol} @ $${r.data.fill_price}`)
+      refresh()
+    } catch (e: any) {
+      alert(`Close failed: ${e.response?.data?.error || e.message}`)
+    } finally {
+      setClosingKey(null)
+    }
+  }
 
   const refresh = () => {
     setLoading(true)
@@ -113,10 +134,15 @@ export default function Positions() {
                       <th className="pb-2 text-right">Last Price</th>
                       <th className="pb-2 text-right">Unrealized P&L</th>
                       <th className="pb-2 text-right">Realized P&L</th>
+                      <th className="pb-2 text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {eng.positions.map((p, i) => (
+                    {eng.positions.map((p, i) => {
+                      const side = p.position_side === 'LONG' || p.position_side === 'SHORT' ? p.position_side : null
+                      const key = `${eng.engine_id}-${side}`
+                      const isClosing = closingKey === key
+                      return (
                       <tr key={i} className="border-b border-slate-700/50 hover:bg-slate-700/30">
                         <td className="py-2 font-medium">{p.symbol}</td>
                         <td className="py-2">
@@ -137,8 +163,22 @@ export default function Positions() {
                         <td className={`py-2 text-right font-mono ${p.realized_pnl > 0 ? 'text-green-400' : p.realized_pnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
                           {p.realized_pnl === 0 ? '—' : `$${p.realized_pnl.toFixed(4)}`}
                         </td>
+                        <td className="py-2 text-right">
+                          {side ? (
+                            <button
+                              disabled={isClosing || eng.mode !== 'live'}
+                              onClick={() => handleClose(eng.engine_id, p.symbol, side, p.qty)}
+                              className="px-2 py-0.5 text-xs bg-red-900/40 hover:bg-red-900/60 disabled:opacity-40 disabled:cursor-not-allowed text-red-200 border border-red-800/40 rounded transition-colors"
+                              title={eng.mode !== 'live' ? 'Only live engines support close-position' : `Close ${side} side via reduce-only market order`}
+                            >
+                              {isClosing ? 'Closing…' : `Close ${side}`}
+                            </button>
+                          ) : (
+                            <span className="text-xs text-slate-600">—</span>
+                          )}
+                        </td>
                       </tr>
-                    ))}
+                    )})}
                   </tbody>
                 </table>
               </div>
