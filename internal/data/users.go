@@ -432,7 +432,8 @@ func (s *Store) InsertEquitySnapshot(ctx context.Context, e *EquitySnapshot) err
 }
 
 // GetEquitySnapshots returns the most recent equity snapshots for a user/strategy.
-func (s *Store) GetEquitySnapshots(ctx context.Context, userID int, strategyID string, limit int) ([]EquitySnapshot, error) {
+// If sinceUnix > 0, snapshots older than that timestamp are excluded.
+func (s *Store) GetEquitySnapshots(ctx context.Context, userID int, strategyID string, limit int, sinceUnix int64) ([]EquitySnapshot, error) {
 	q := `
 		SELECT id, user_id, strategy_id, equity, cash, unrealized_pnl, realized_pnl, snapshotted_at
 		FROM equity_snapshots
@@ -441,6 +442,10 @@ func (s *Store) GetEquitySnapshots(ctx context.Context, userID int, strategyID s
 	if strategyID != "" {
 		args = append(args, strategyID)
 		q += fmt.Sprintf(" AND strategy_id = $%d", len(args))
+	}
+	if sinceUnix > 0 {
+		args = append(args, time.Unix(sinceUnix, 0))
+		q += fmt.Sprintf(" AND snapshotted_at >= $%d", len(args))
 	}
 	args = append(args, limit)
 	q += fmt.Sprintf(" ORDER BY snapshotted_at ASC LIMIT $%d", len(args))

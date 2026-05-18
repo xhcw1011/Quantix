@@ -48,19 +48,19 @@ function StatCard({ label, value, sub, color = 'text-white' }: {
   )
 }
 
+type Period = '1d' | '7d' | '30d' | 'all'
+
 export default function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null)
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [fills, setFills] = useState<Fill[]>([])
   const [apiError, setApiError] = useState<string | null>(null)
+  const [period, setPeriod] = useState<Period>('7d')
 
   useEffect(() => {
     getSummary()
       .then((r) => setSummary(r.data))
       .catch((e) => setApiError(e.response?.data?.error || 'Failed to load summary'))
-    getEquity(undefined, 200)
-      .then((r) => setSnapshots(r.data.snapshots || []))
-      .catch(() => {})
     getFills(10, 0)
       .then((r) => setFills(r.data.fills || []))
       .catch(() => {})
@@ -70,6 +70,13 @@ export default function Dashboard() {
     }, 30000)
     return () => clearInterval(interval)
   }, [])
+
+  // Refetch equity whenever period changes.
+  useEffect(() => {
+    getEquity(undefined, 5000, period)
+      .then((r) => setSnapshots(r.data.snapshots || []))
+      .catch(() => {})
+  }, [period])
 
   // Real-time WS: update summary equity on equity events, prepend fills on fill events
   useTradeSocket((msg: any) => {
@@ -82,11 +89,18 @@ export default function Dashboard() {
     }
   })
 
-  const chartData = snapshots.map((s) => ({
-    time: new Date(s.snapshotted_at).toLocaleTimeString(),
-    equity: +s.equity.toFixed(2),
-    cash: +s.cash.toFixed(2),
-  }))
+  // For multi-day periods, show date+time on x-axis; for 1d, show time only.
+  const longRange = period !== '1d'
+  const chartData = snapshots.map((s) => {
+    const d = new Date(s.snapshotted_at)
+    return {
+      time: longRange
+        ? `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+        : d.toLocaleTimeString(),
+      equity: +s.equity.toFixed(2),
+      cash: +s.cash.toFixed(2),
+    }
+  })
 
   const fmt = (n: number) => `$${n.toFixed(2)}`
   const statusColor = summary?.engine_status === 'running' ? 'text-green-400' : 'text-slate-400'
@@ -130,7 +144,24 @@ export default function Dashboard() {
 
       {/* Equity chart */}
       <div className="bg-slate-800 rounded-xl p-4">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Equity Curve</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold text-slate-300">Equity Curve</h2>
+          <div className="flex gap-1">
+            {(['1d', '7d', '30d', 'all'] as Period[]).map(p => (
+              <button
+                key={p}
+                onClick={() => setPeriod(p)}
+                className={`px-2 py-0.5 text-xs rounded ${
+                  period === p
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-700 text-slate-400 hover:bg-slate-600 hover:text-slate-200'
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        </div>
         {chartData.length === 0 ? (
           <p className="text-slate-500 text-sm text-center py-8">
             No equity data yet. Start the engine to begin recording.

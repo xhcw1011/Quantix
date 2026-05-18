@@ -30,8 +30,8 @@ export const getFills = (
 
 export const getPositions = () => api.get('/positions')
 
-export const getEquity = (strategyId?: string, limit = 200) =>
-  api.get('/equity', { params: { strategy_id: strategyId, limit } })
+export const getEquity = (strategyId?: string, limit = 200, period?: '1d' | '7d' | '30d' | 'all') =>
+  api.get('/equity', { params: { strategy_id: strategyId, limit, period } })
 
 export const getSummary = () => api.get('/summary')
 

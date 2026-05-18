@@ -122,7 +122,9 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 //	@Produce		json
 //	@Security		BearerAuth
 //	@Param			strategy_id	query	string	false	"Filter by strategy ID"
-//	@Param			limit		query	int		false	"Max records (default 200)"
+//	@Param			limit		query	int		false	"Max records (default 200, max 5000)"
+//	@Param			since		query	int		false	"Unix timestamp seconds; only snapshots >= this time"
+//	@Param			period		query	string	false	"Convenience filter: 1d, 7d, 30d, all (overrides since)"
 //	@Success		200			{object}	map[string]interface{}
 //	@Failure		500			{object}	errorResp
 //	@Router			/api/equity [get]
@@ -131,11 +133,41 @@ func (s *Server) handleEquity(w http.ResponseWriter, r *http.Request) {
 	strategyID := r.URL.Query().Get("strategy_id")
 	limitStr := r.URL.Query().Get("limit")
 	limit, _ := strconv.Atoi(limitStr)
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 || limit > 5000 {
 		limit = 200
 	}
 
-	snapshots, err := s.store.GetEquitySnapshots(r.Context(), userID, strategyID, limit)
+	var since int64
+	if v := r.URL.Query().Get("since"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			since = n
+		}
+	}
+	// period is a friendlier alias for since; "all" clears it.
+	switch r.URL.Query().Get("period") {
+	case "1d":
+		since = time.Now().Add(-24 * time.Hour).Unix()
+		if limit < 500 {
+			limit = 500
+		}
+	case "7d":
+		since = time.Now().Add(-7 * 24 * time.Hour).Unix()
+		if limit < 2000 {
+			limit = 2000
+		}
+	case "30d":
+		since = time.Now().Add(-30 * 24 * time.Hour).Unix()
+		if limit < 5000 {
+			limit = 5000
+		}
+	case "all":
+		since = 0
+		if limit < 5000 {
+			limit = 5000
+		}
+	}
+
+	snapshots, err := s.store.GetEquitySnapshots(r.Context(), userID, strategyID, limit, since)
 	if err != nil {
 		jsonError(w, "server error", http.StatusInternalServerError)
 		return
@@ -156,7 +188,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromCtx(r)
 
 	// Latest equity snapshot
-	snapshots, _ := s.store.GetEquitySnapshots(r.Context(), userID, "", 1)
+	snapshots, _ := s.store.GetEquitySnapshots(r.Context(), userID, "", 1, 0)
 	var equity, cash, unrealized, realized float64
 	if len(snapshots) > 0 {
 		latest := snapshots[len(snapshots)-1]
