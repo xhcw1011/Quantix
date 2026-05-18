@@ -110,6 +110,56 @@ func (s *AIStrategy) Name() string {
 	return fmt.Sprintf("AI(%s/every%dbars)", s.cfg.Model, s.cfg.CallIntervalBars)
 }
 
+// posModeString returns a human-readable name for a posMode.
+func posModeString(m posMode) string {
+	switch m {
+	case modeTrend:
+		return "trend"
+	case modeRange:
+		return "range"
+	default:
+		return "unknown"
+	}
+}
+
+// Status implements strategy.StatusReporter. Exposes operator-facing state for
+// the live dashboard: regime, position flags, hedge cooldown remaining.
+func (s *AIStrategy) Status() map[string]any {
+	cooldownRem := time.Duration(0)
+	if !s.lastHedgeClose.IsZero() && s.cfg.HedgeCooldown > 0 {
+		elapsed := time.Since(s.lastHedgeClose)
+		if elapsed < s.cfg.HedgeCooldown {
+			cooldownRem = s.cfg.HedgeCooldown - elapsed
+		}
+	}
+	out := map[string]any{
+		"regime":                   string(s.lastRegime),
+		"has_long":                 s.longPos != nil,
+		"has_short":                s.shortPos != nil,
+		"hedge_mode":               s.cfg.HedgeMode,
+		"hedge_on_drawdown":        s.cfg.HedgeOnDrawdown,
+		"hedge_cooldown_remaining": cooldownRem.Round(time.Second).String(),
+		"bar_count":                s.barCount,
+	}
+	if s.longPos != nil {
+		out["long_entry"] = s.longPos.entryPrice
+		out["long_qty"] = s.longPos.remainQty
+		out["long_sl"] = s.longPos.stopLoss
+		out["long_trailing"] = s.longPos.trailing
+		out["long_mode"] = posModeString(s.longPos.mode)
+		out["long_grid_layers"] = len(s.longPos.gridOrders)
+	}
+	if s.shortPos != nil {
+		out["short_entry"] = s.shortPos.entryPrice
+		out["short_qty"] = s.shortPos.remainQty
+		out["short_sl"] = s.shortPos.stopLoss
+		out["short_trailing"] = s.shortPos.trailing
+		out["short_mode"] = posModeString(s.shortPos.mode)
+		out["short_grid_layers"] = len(s.shortPos.gridOrders)
+	}
+	return out
+}
+
 func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	// Detect staged TP closing fills: opposite side to the position.
 	// LONG position closes via SELL; SHORT position closes via BUY.

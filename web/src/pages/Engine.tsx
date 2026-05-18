@@ -1,5 +1,63 @@
 import { useEffect, useState } from 'react'
 import { listCredentials, listEngines, listStrategies, startEngine, stopEngineById } from '../api/trading'
+import { useTradeSocket } from '../hooks/useTradeSocket'
+
+// LiveStatus subscribes to WS "status" messages and renders the latest snapshot
+// for the given engine_id. Server pushes once per minute from printStatus.
+function LiveStatus({ engineID }: { engineID: string }) {
+  const [data, setData] = useState<Record<string, any> | null>(null)
+  const [lastTs, setLastTs] = useState<number>(0)
+
+  useTradeSocket((msg: any) => {
+    if (msg?.type === 'status' && msg?.data?.engine_id === engineID) {
+      setData(msg.data)
+      setLastTs(Date.now())
+    }
+  })
+
+  if (!data) {
+    return (
+      <p className="text-xs text-slate-600 mt-2">
+        Live status: waiting for next snapshot (push interval ~60s)…
+      </p>
+    )
+  }
+  const ageS = Math.round((Date.now() - lastTs) / 1000)
+  const num = (v: any, d = 2) => typeof v === 'number' ? v.toFixed(d) : String(v ?? '—')
+  const stratFields = Object.entries(data).filter(([k]) => k.startsWith('strat_'))
+  return (
+    <div className="mt-3 border-t border-slate-700 pt-2 text-xs">
+      <div className="flex items-center justify-between text-slate-500 mb-1.5">
+        <span>Live status</span>
+        <span>updated {ageS}s ago</span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-x-3 gap-y-1 text-slate-300">
+        <div><span className="text-slate-500">Equity</span> <span className="font-mono">${num(data.equity)}</span></div>
+        <div><span className="text-slate-500">Cash</span> <span className="font-mono">${num(data.cash)}</span></div>
+        <div><span className="text-slate-500">Realized</span> <span className="font-mono">${num(data.realized_pnl)}</span></div>
+        <div><span className="text-slate-500">Return</span> <span className="font-mono">{num(data.total_return_pct)}%</span></div>
+        {data.strat_regime !== undefined && (
+          <div><span className="text-slate-500">Regime</span> <span className="font-mono">{data.strat_regime}</span></div>
+        )}
+        {data.strat_has_long !== undefined && (
+          <div><span className="text-slate-500">LONG</span> <span className={`font-mono ${data.strat_has_long ? 'text-green-300' : 'text-slate-500'}`}>{data.strat_has_long ? 'open' : '—'}</span></div>
+        )}
+        {data.strat_has_short !== undefined && (
+          <div><span className="text-slate-500">SHORT</span> <span className={`font-mono ${data.strat_has_short ? 'text-red-300' : 'text-slate-500'}`}>{data.strat_has_short ? 'open' : '—'}</span></div>
+        )}
+        {data.strat_hedge_cooldown_remaining !== undefined && data.strat_hedge_cooldown_remaining !== '0s' && (
+          <div><span className="text-slate-500">Hedge CD</span> <span className="font-mono">{data.strat_hedge_cooldown_remaining}</span></div>
+        )}
+      </div>
+      {stratFields.length > 0 && (
+        <details className="mt-2">
+          <summary className="text-slate-500 cursor-pointer">Strategy detail ({stratFields.length} fields)</summary>
+          <pre className="text-[10px] text-slate-400 mt-1 overflow-x-auto">{JSON.stringify(Object.fromEntries(stratFields), null, 2)}</pre>
+        </details>
+      )}
+    </div>
+  )
+}
 
 interface Credential {
   id: number
@@ -436,6 +494,7 @@ export default function Engine() {
                   <div><span className="block text-slate-500">Interval</span>{eng.interval}</div>
                   <div><span className="block text-slate-500">Started</span>{new Date(eng.started_at).toLocaleString()}</div>
                 </div>
+                {eng.mode === 'live' && <LiveStatus engineID={eng.engine_id} />}
               </div>
               <button
                 onClick={() => handleStop(eng.engine_id)}

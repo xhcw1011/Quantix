@@ -171,6 +171,14 @@ type TickReceiver interface {
 	OnTick(ctx *Context, price float64)
 }
 
+// StatusReporter is an optional interface strategies can implement to expose
+// their internal state for live operator dashboards (regime, position flags,
+// cooldown counters, etc.). Returned as a flat map for JSON serialization;
+// keys are strategy-specific.
+type StatusReporter interface {
+	Status() map[string]any
+}
+
 // StagedTP describes one level in a staged take-profit plan.
 type StagedTP struct {
 	Price float64

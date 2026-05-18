@@ -527,6 +527,9 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 			liveCfg.OnEquity = func(uid int, eq float64) {
 				hub.Broadcast(uid, map[string]any{"type": "equity", "equity": eq})
 			}
+			liveCfg.OnStatus = func(uid int, status map[string]any) {
+				hub.Broadcast(uid, map[string]any{"type": "status", "data": status})
+			}
 		}
 		tm := monitor.NewTradingMetrics()
 		eng, err := live.NewEngine(liveCfg, strat, rm, nil, tm, notifier, orderClient, m.log)

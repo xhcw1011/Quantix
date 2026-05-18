@@ -8,6 +8,7 @@ import (
 
 	"github.com/Quantix/quantix/internal/bus"
 	"github.com/Quantix/quantix/internal/oms"
+	"github.com/Quantix/quantix/internal/strategy"
 )
 
 func (e *Engine) printStatus() {
@@ -42,6 +43,28 @@ func (e *Engine) printStatus() {
 		zap.Int("open_positions", openPos),
 		zap.Bool("risk_halted", e.risk.Halted()),
 	)
+
+	// Push to WS dashboard via OnStatus callback (set by EngineManager when wsHub
+	// is wired). Includes engine-level metrics + any strategy-reported state.
+	if e.cfg.OnStatus != nil && e.cfg.UserID > 0 {
+		payload := map[string]any{
+			"engine_id":        e.cfg.StrategyID,
+			"uptime_sec":       int64(elapsed.Seconds()),
+			"wallet_balance":   e.broker.WalletBalance(),
+			"cash":             cash,
+			"equity":           equity,
+			"total_return_pct": totalReturn,
+			"realized_pnl":     rpnl,
+			"open_positions":   openPos,
+			"risk_halted":      e.risk.Halted(),
+		}
+		if sr, ok := e.strategy.(strategy.StatusReporter); ok {
+			for k, v := range sr.Status() {
+				payload["strat_"+k] = v
+			}
+		}
+		e.cfg.OnStatus(e.cfg.UserID, payload)
+	}
 
 	// Stale bar detection: warn if no kline data for > 2× bar interval.
 	// For 5m bars, threshold = 10min; for 1m bars, threshold = max(2min, 2×1min).

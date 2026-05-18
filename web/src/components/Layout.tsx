@@ -10,6 +10,7 @@ const navItems = [
   { path: '/engine', label: 'Engine', icon: '⚙️' },
   { path: '/backtest', label: 'Backtest', icon: '🔬' },
   { path: '/positions', label: 'Positions', icon: '📈' },
+  { path: '/logs', label: 'Logs', icon: '📜' },
   { path: '/settings', label: 'Settings', icon: '🔧' },
 ]
 

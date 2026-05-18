@@ -45,6 +45,8 @@ export const stopEngineById = (id: string) => api.delete(`/engines/${id}`)
 export const getEngineById = (id: string) => api.get(`/engines/${id}`)
 export const closeEnginePosition = (id: string, side: 'LONG' | 'SHORT') =>
   api.post(`/engines/${id}/close-position`, null, { params: { side } })
+export const getRecentLogs = (id: string, lines = 200, grep = '') =>
+  api.get(`/engines/${id}/recent-logs`, { params: { lines, grep } })
 
 // Engine — legacy (kept for internal use if needed)
 export const getEngineStatus = () => api.get('/engine/status')

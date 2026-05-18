@@ -1,11 +1,47 @@
 package api
 
 import (
+	"bufio"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Quantix/quantix/internal/strategy/registry"
 )
+
+// tailFile returns the last n lines of the file. Reads the whole file (fine for
+// daily log sizes we see — a few MB at most). Returns ([]string, nil) even when
+// the file doesn't exist (treats as empty).
+func tailFile(path string, n int) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // allow long lines
+	buf := make([]string, 0, n)
+	for sc.Scan() {
+		buf = append(buf, sc.Text())
+		if len(buf) > n*2 { // drop oldest in chunks to avoid huge slice
+			buf = buf[len(buf)-n:]
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if len(buf) > n {
+		buf = buf[len(buf)-n:]
+	}
+	return buf, nil
+}
 
 // handleListStrategies returns all registered strategy IDs.
 // Used by the frontend to populate the strategy dropdown dynamically.
@@ -135,6 +171,68 @@ func (s *Server) getEngineByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, info)
+}
+
+// recentLogs returns the last N lines of today's quantix log file, optionally
+// filtered by an engine_id substring. Used by the Live Log Viewer page so the
+// operator can read strategy decisions without SSH'ing the server.
+//
+//	@Summary		Recent log lines
+//	@Description	Returns last N lines of today's process log. Optional grep filter.
+//	@Tags			engines
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			id		path	string	true	"Engine ID (used for filtering only)"
+//	@Param			lines	query	int		false	"Number of trailing lines to return (default 200, max 2000)"
+//	@Param			grep	query	string	false	"Optional substring filter (case-sensitive)"
+//	@Success		200		{object}	map[string]any
+//	@Failure		500		{object}	errorResp
+//	@Router			/api/engines/{id}/recent-logs [get]
+func (s *Server) recentLogs(w http.ResponseWriter, r *http.Request) {
+	if s.logDir == "" {
+		jsonError(w, "log directory not configured", http.StatusServiceUnavailable)
+		return
+	}
+	engineID := r.PathValue("id")
+	limit := 200
+	if v := r.URL.Query().Get("lines"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 2000 {
+		limit = 2000
+	}
+	grep := r.URL.Query().Get("grep")
+
+	path := filepath.Join(s.logDir, fmt.Sprintf("quantix-%s.log", time.Now().Format("20060102")))
+	lines, err := tailFile(path, limit*4) // read more so we can filter
+	if err != nil {
+		jsonError(w, "read log: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	out := make([]string, 0, limit)
+	for _, l := range lines {
+		if engineID != "" && !strings.Contains(l, engineID) {
+			// fall through; many log lines don't mention engine_id, so don't strict-filter
+		}
+		if grep != "" && !strings.Contains(l, grep) {
+			continue
+		}
+		out = append(out, l)
+	}
+	// Trim to last `limit` AFTER filtering.
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+
+	jsonOK(w, map[string]any{
+		"engine_id": engineID,
+		"file":      path,
+		"count":     len(out),
+		"lines":     out,
+	})
 }
 
 // closeEnginePosition closes a single side of the engine's open position.

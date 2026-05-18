@@ -187,6 +187,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/engines/{id}", auth(http.HandlerFunc(s.stopEngineByID)))
 	mux.Handle("GET /api/engines/{id}", auth(http.HandlerFunc(s.getEngineByID)))
 	mux.Handle("POST /api/engines/{id}/close-position", auth(http.HandlerFunc(s.closeEnginePosition)))
+	mux.Handle("GET /api/engines/{id}/recent-logs", auth(http.HandlerFunc(s.recentLogs)))
 
 	// Engine control — legacy (deprecated, kept for backward compat)
 	mux.Handle("POST /api/engine/start", auth(http.HandlerFunc(s.handleEngineStart)))

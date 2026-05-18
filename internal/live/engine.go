@@ -43,8 +43,9 @@ type EngineConfig struct {
 	CredentialID int         // stored on each OrderRecord for audit trail
 
 	// Optional real-time push callbacks (set by API engine manager to wire WS hub).
-	OnFill   func(userID int, fill *data.Fill) // called after each DB-persisted fill
-	OnEquity func(userID int, equity float64)  // called after each equity snapshot
+	OnFill   func(userID int, fill *data.Fill)            // called after each DB-persisted fill
+	OnEquity func(userID int, equity float64)             // called after each equity snapshot
+	OnStatus func(userID int, status map[string]any)      // called after each periodic status print
 
 	// SkipCleanSlate skips cancelling all exchange orders on startup.
 	// Set to true when user has manual positions/orders that should not be touched.

@@ -11,6 +11,7 @@ import Engine from './pages/Engine'
 import Backtest from './pages/Backtest'
 import Admin from './pages/Admin'
 import Positions from './pages/Positions'
+import Logs from './pages/Logs'
 import Settings from './pages/Settings'
 
 // ─── Error Boundary ───────────────────────────────────────────────────────────
@@ -102,6 +103,7 @@ export default function App() {
                       <Route path="/engine" element={<Engine />} />
                       <Route path="/backtest" element={<Backtest />} />
                       <Route path="/positions" element={<Positions />} />
+                      <Route path="/logs" element={<Logs />} />
                       <Route path="/admin" element={<AdminRoute><Admin /></AdminRoute>} />
                       <Route path="/settings" element={<Settings />} />
                     </Routes>
