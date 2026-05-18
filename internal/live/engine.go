@@ -879,6 +879,54 @@ func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
 	}
 }
 
+// ClosePosition closes the position for (symbol, side) by querying the exchange
+// for actual qty and placing a reduce-only market order. Used by the operator
+// API so a single side can be closed without restarting the engine or running
+// the close-positions CLI. The fill comes back via the user-data stream and
+// flows through the normal cash/equity/TG path.
+//
+// side must be "LONG" or "SHORT". Returns the closed qty and avg fill price.
+func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, fillPrice float64, err error) {
+	if side != "LONG" && side != "SHORT" {
+		return 0, 0, fmt.Errorf("side must be LONG or SHORT (got %q)", side)
+	}
+	mq, ok := e.broker.orderClient.(exchange.MarginQuerier)
+	if !ok {
+		return 0, 0, fmt.Errorf("exchange does not support position query (not a futures broker)")
+	}
+	positions, err := mq.GetMarginRatios(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("query positions: %w", err)
+	}
+	var target *exchange.PositionMarginInfo
+	for i := range positions {
+		if positions[i].Symbol == symbol && positions[i].PositionSide == side {
+			target = &positions[i]
+			break
+		}
+	}
+	if target == nil || target.Size <= 0 {
+		return 0, 0, fmt.Errorf("no open %s position for %s", side, symbol)
+	}
+
+	closeSide := exchange.OrderSideBuy
+	if side == "LONG" {
+		closeSide = exchange.OrderSideSell
+	}
+	clientOrderID := fmt.Sprintf("api-close-%d", time.Now().UnixNano())
+	fill, err := e.broker.orderClient.PlaceMarketOrder(ctx, symbol, closeSide, side, target.Size, clientOrderID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("place close order: %w", err)
+	}
+	e.log.Info("API close-position executed",
+		zap.String("symbol", symbol),
+		zap.String("side", side),
+		zap.Float64("qty", target.Size),
+		zap.Float64("avg_price", fill.AvgPrice),
+		zap.String("exchange_id", fill.ExchangeID))
+	return target.Size, fill.AvgPrice, nil
+}
+
 // ─── livePortfolioView ────────────────────────────────────────────────────────
 
 type livePortfolioView struct {

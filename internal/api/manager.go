@@ -739,6 +739,32 @@ func (m *EngineManager) Stop(userID int, engineID string) error {
 	return nil
 }
 
+// ClosePosition closes a single side of the engine's open position via the
+// exchange, returning the closed qty and fill price. The engine must be in
+// live mode and the exchange must support position query (futures/swap).
+// Returns the engine's symbol as a courtesy so callers don't have to re-fetch.
+func (m *EngineManager) ClosePosition(ctx context.Context, userID int, engineID, side string) (symbol string, qty, price float64, err error) {
+	m.mu.RLock()
+	userEngines, ok := m.engines[userID]
+	if !ok {
+		m.mu.RUnlock()
+		return "", 0, 0, fmt.Errorf("no engines for user %d", userID)
+	}
+	re, ok := userEngines[engineID]
+	m.mu.RUnlock()
+	if !ok {
+		return "", 0, 0, fmt.Errorf("engine %q not found", engineID)
+	}
+	if re.engine == nil {
+		return "", 0, 0, fmt.Errorf("engine %q is not in live mode", engineID)
+	}
+	q, p, err := re.engine.ClosePosition(ctx, re.symbol, side)
+	if err != nil {
+		return re.symbol, 0, 0, err
+	}
+	return re.symbol, q, p, nil
+}
+
 // StopAll stops all engines for the given user (used by legacy endpoint).
 func (m *EngineManager) StopAll(userID int) {
 	m.mu.Lock()

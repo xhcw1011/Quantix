@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/Quantix/quantix/internal/strategy/registry"
 )
@@ -134,6 +135,48 @@ func (s *Server) getEngineByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, info)
+}
+
+// closeEnginePosition closes a single side of the engine's open position.
+//
+//	@Summary		Close one side of an engine's position
+//	@Description	Places a reduce-only market order to flatten the LONG or SHORT side
+//	@Description	for the symbol the engine is trading. Does not stop the engine.
+//	@Tags			engines
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			id		path		string	true	"Engine ID"
+//	@Param			side	query		string	true	"LONG or SHORT"
+//	@Success		200		{object}	map[string]any
+//	@Failure		400		{object}	errorResp
+//	@Failure		404		{object}	errorResp
+//	@Failure		500		{object}	errorResp
+//	@Router			/api/engines/{id}/close-position [post]
+func (s *Server) closeEnginePosition(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromCtx(r)
+	engineID := r.PathValue("id")
+	side := strings.ToUpper(r.URL.Query().Get("side"))
+	if engineID == "" {
+		jsonError(w, "engine id is required", http.StatusBadRequest)
+		return
+	}
+	if side != "LONG" && side != "SHORT" {
+		jsonError(w, "side must be LONG or SHORT", http.StatusBadRequest)
+		return
+	}
+	symbol, qty, price, err := s.manager.ClosePosition(r.Context(), userID, engineID, side)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"status":     "closed",
+		"engine_id":  engineID,
+		"symbol":     symbol,
+		"side":       side,
+		"qty":        qty,
+		"fill_price": price,
+	})
 }
 
 // ── Legacy endpoints (kept for backward compat) ───────────────────────────────

@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // adminListUsers handles GET /api/admin/users
@@ -156,4 +157,54 @@ func (s *Server) adminForceStopEngine(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, map[string]string{"status": "stopped", "engine_id": engineID})
+}
+
+// adminCloseEnginePosition closes one side of any user's engine (admin override).
+//
+//	@Summary		Admin: Close one side of any engine's position
+//	@Description	Same as POST /api/engines/{id}/close-position but routed via admin
+//	@Description	so an operator can flatten a side without owning the credential.
+//	@Tags			admin
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Param			user_id		path		int		true	"User ID"
+//	@Param			engine_id	path		string	true	"Engine ID"
+//	@Param			side		query		string	true	"LONG or SHORT"
+//	@Success		200			{object}	map[string]any
+//	@Failure		400			{object}	errorResp
+//	@Failure		403			{object}	errorResp
+//	@Failure		404			{object}	errorResp
+//	@Router			/api/admin/engines/{user_id}/{engine_id}/close-position [post]
+func (s *Server) adminCloseEnginePosition(w http.ResponseWriter, r *http.Request) {
+	userIDStr := r.PathValue("user_id")
+	engineID := r.PathValue("engine_id")
+	side := strings.ToUpper(r.URL.Query().Get("side"))
+
+	userID, err := strconv.Atoi(userIDStr)
+	if err != nil || userID <= 0 {
+		jsonError(w, "invalid user_id", http.StatusBadRequest)
+		return
+	}
+	if engineID == "" {
+		jsonError(w, "missing engine_id", http.StatusBadRequest)
+		return
+	}
+	if side != "LONG" && side != "SHORT" {
+		jsonError(w, "side must be LONG or SHORT", http.StatusBadRequest)
+		return
+	}
+	symbol, qty, price, err := s.manager.ClosePosition(r.Context(), userID, engineID, side)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"status":     "closed",
+		"user_id":    userID,
+		"engine_id":  engineID,
+		"symbol":     symbol,
+		"side":       side,
+		"qty":        qty,
+		"fill_price": price,
+	})
 }

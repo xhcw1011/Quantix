@@ -186,6 +186,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/engines", auth(http.HandlerFunc(s.startEngine)))
 	mux.Handle("DELETE /api/engines/{id}", auth(http.HandlerFunc(s.stopEngineByID)))
 	mux.Handle("GET /api/engines/{id}", auth(http.HandlerFunc(s.getEngineByID)))
+	mux.Handle("POST /api/engines/{id}/close-position", auth(http.HandlerFunc(s.closeEnginePosition)))
 
 	// Engine control — legacy (deprecated, kept for backward compat)
 	mux.Handle("POST /api/engine/start", auth(http.HandlerFunc(s.handleEngineStart)))
@@ -206,6 +207,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/admin/users/{id}/activate", admin(s.adminSetUserActive))
 	mux.Handle("GET /api/admin/engines", admin(s.adminListEngines))
 	mux.Handle("DELETE /api/admin/engines/{user_id}/{engine_id}", admin(s.adminForceStopEngine))
+	mux.Handle("POST /api/admin/engines/{user_id}/{engine_id}/close-position", admin(s.adminCloseEnginePosition))
 
 	// WebSocket
 	mux.Handle("GET /api/ws", auth(http.HandlerFunc(s.handleWS)))
