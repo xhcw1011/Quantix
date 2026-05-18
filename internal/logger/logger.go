@@ -4,11 +4,72 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+// dailyRotatingFile is a zapcore.WriteSyncer that rolls to a new file at midnight
+// (server local time). Filename pattern: quantix-YYYYMMDD.log inside logDir.
+// Previously the filename was resolved once at startup and never changed,
+// so all log output ended up in the file dated the day the process started.
+type dailyRotatingFile struct {
+	mu      sync.Mutex
+	dir     string
+	curDay  string
+	curFile *os.File
+}
+
+func newDailyRotatingFile(dir string) (*dailyRotatingFile, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("create log dir %s: %w", dir, err)
+	}
+	r := &dailyRotatingFile{dir: dir}
+	if err := r.rotateLocked(time.Now()); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// rotateLocked must be called with r.mu held.
+func (r *dailyRotatingFile) rotateLocked(now time.Time) error {
+	day := now.Format("20060102")
+	if r.curFile != nil && r.curDay == day {
+		return nil
+	}
+	if r.curFile != nil {
+		_ = r.curFile.Close()
+		r.curFile = nil
+	}
+	path := filepath.Join(r.dir, fmt.Sprintf("quantix-%s.log", day))
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open log file %s: %w", path, err)
+	}
+	r.curFile = f
+	r.curDay = day
+	return nil
+}
+
+func (r *dailyRotatingFile) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.rotateLocked(time.Now()); err != nil {
+		return 0, err
+	}
+	return r.curFile.Write(p)
+}
+
+func (r *dailyRotatingFile) Sync() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.curFile == nil {
+		return nil
+	}
+	return r.curFile.Sync()
+}
 
 // New creates a zap logger configured for the given environment.
 // env should be "production" or anything else for development mode.
@@ -22,14 +83,18 @@ func New(env, level, logDir string) (*zap.Logger, error) {
 	if env == "production" {
 		cfg := zap.NewProductionConfig()
 		cfg.Level = lvl
-		if logDir != "" {
-			fp, err := openLogFile(logDir)
-			if err != nil {
-				return nil, err
-			}
-			cfg.OutputPaths = append(cfg.OutputPaths, fp)
+		if logDir == "" {
+			return cfg.Build()
 		}
-		return cfg.Build()
+		// Production with logDir: rotate file daily so cross-day runs split correctly.
+		rot, err := newDailyRotatingFile(logDir)
+		if err != nil {
+			return nil, err
+		}
+		encoder := zapcore.NewJSONEncoder(cfg.EncoderConfig)
+		fileCore := zapcore.NewCore(encoder, zapcore.AddSync(rot), lvl)
+		stderrCore := zapcore.NewCore(encoder, zapcore.AddSync(os.Stderr), lvl)
+		return zap.New(zapcore.NewTee(fileCore, stderrCore), zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel)), nil
 	}
 
 	// Development: human-readable console output
@@ -47,14 +112,10 @@ func New(env, level, logDir string) (*zap.Logger, error) {
 		return zap.New(consoleCore, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel)), nil
 	}
 
-	// File core: JSON format for easy parsing
-	fp, err := openLogFile(logDir)
+	// File core: JSON-ish console format with daily rotation.
+	rot, err := newDailyRotatingFile(logDir)
 	if err != nil {
 		return nil, err
-	}
-	f, err := os.OpenFile(fp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("open log file: %w", err)
 	}
 
 	fileEncoderCfg := zap.NewDevelopmentEncoderConfig()
@@ -63,22 +124,13 @@ func New(env, level, logDir string) (*zap.Logger, error) {
 
 	fileCore := zapcore.NewCore(
 		zapcore.NewConsoleEncoder(fileEncoderCfg),
-		zapcore.AddSync(f),
+		zapcore.AddSync(rot),
 		lvl,
 	)
 
 	// When logDir is set, write ONLY to file (not stdout).
 	// This prevents duplicate lines when nohup redirects stdout to the same file.
 	return zap.New(fileCore, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel)), nil
-}
-
-// openLogFile ensures the log directory exists and returns the log file path for today.
-func openLogFile(logDir string) (string, error) {
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return "", fmt.Errorf("create log dir %s: %w", logDir, err)
-	}
-	filename := fmt.Sprintf("quantix-%s.log", time.Now().Format("20060102"))
-	return filepath.Join(logDir, filename), nil
 }
 
 // NewFileLogger creates a logger that writes ONLY to the given file path.
