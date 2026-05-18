@@ -8,6 +8,21 @@ interface Preset {
   params: Record<string, any>
 }
 
+// formatUptime takes an ISO timestamp and returns "Xd Yh", "Yh Mm", or "Mm Ss".
+// Returns "—" for invalid input. Recomputed each render — the parent rerenders
+// on loadEngines (every 10s) so the value stays current enough.
+function formatUptime(startedAt: string): string {
+  const t = new Date(startedAt).getTime()
+  if (!t || Number.isNaN(t)) return '—'
+  let s = Math.max(0, Math.floor((Date.now() - t) / 1000))
+  const d = Math.floor(s / 86400); s -= d * 86400
+  const h = Math.floor(s / 3600);  s -= h * 3600
+  const m = Math.floor(s / 60);    s -= m * 60
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m ${s}s`
+}
+
 // LiveStatus subscribes to WS "status" messages and renders the latest snapshot
 // for the given engine_id. Server pushes once per minute from printStatus.
 function LiveStatus({ engineID }: { engineID: string }) {
@@ -567,11 +582,12 @@ export default function Engine() {
                     </span>
                   )}
                 </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-xs text-slate-400">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mt-2 text-xs text-slate-400">
                   <div><span className="block text-slate-500">Strategy</span>{eng.strategy_id}</div>
                   <div><span className="block text-slate-500">Symbol</span>{eng.symbol}</div>
                   <div><span className="block text-slate-500">Interval</span>{eng.interval}</div>
                   <div><span className="block text-slate-500">Started</span>{new Date(eng.started_at).toLocaleString()}</div>
+                  <div><span className="block text-slate-500">Uptime</span>{formatUptime(eng.started_at)}</div>
                 </div>
                 {eng.mode === 'live' && <LiveStatus engineID={eng.engine_id} />}
               </div>

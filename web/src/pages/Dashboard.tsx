@@ -48,6 +48,46 @@ function StatCard({ label, value, sub, color = 'text-white' }: {
   )
 }
 
+// DashboardLiveStatus pulls the most recent WS status snapshot across all
+// engines and shows regime / has_long / has_short / hedge cooldown inline.
+// One row per engine so multi-engine setups stay readable.
+function DashboardLiveStatus() {
+  const [byEngine, setByEngine] = useState<Record<string, { ts: number; data: any }>>({})
+
+  useTradeSocket((msg: any) => {
+    if (msg?.type === 'status' && msg?.data?.engine_id) {
+      setByEngine((prev) => ({
+        ...prev,
+        [msg.data.engine_id]: { ts: Date.now(), data: msg.data },
+      }))
+    }
+  })
+
+  const entries = Object.entries(byEngine)
+  if (entries.length === 0) {
+    return <p className="text-xs text-slate-500">Live status: waiting for snapshot…</p>
+  }
+  return (
+    <div className="space-y-1">
+      {entries.map(([engineID, { ts, data }]) => {
+        const age = Math.max(0, Math.round((Date.now() - ts) / 1000))
+        return (
+          <div key={engineID} className="text-xs flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-300">
+            <span className="text-slate-500">{engineID}</span>
+            {data.strat_regime && <span><span className="text-slate-500">Regime</span> <span className="font-mono">{data.strat_regime}</span></span>}
+            <span><span className="text-slate-500">LONG</span> <span className={`font-mono ${data.strat_has_long ? 'text-green-300' : 'text-slate-600'}`}>{data.strat_has_long ? 'open' : '—'}</span></span>
+            <span><span className="text-slate-500">SHORT</span> <span className={`font-mono ${data.strat_has_short ? 'text-red-300' : 'text-slate-600'}`}>{data.strat_has_short ? 'open' : '—'}</span></span>
+            {data.strat_hedge_cooldown_remaining && data.strat_hedge_cooldown_remaining !== '0s' && (
+              <span><span className="text-slate-500">CD</span> <span className="font-mono">{data.strat_hedge_cooldown_remaining}</span></span>
+            )}
+            <span className="text-slate-500 ml-auto">{age}s ago</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 type Period = '1d' | '7d' | '30d' | 'all'
 
 export default function Dashboard() {
@@ -131,15 +171,18 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Engine status */}
-      <div className="bg-slate-800 rounded-xl p-4 flex items-center gap-3">
-        <div className={`w-2.5 h-2.5 rounded-full ${summary?.engine_status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-slate-500'}`} />
-        <span className={`text-sm font-medium ${statusColor}`}>
-          Engine: {summary?.engine_status || 'stopped'}
-        </span>
-        {summary?.strategy_id && (
-          <span className="text-xs text-slate-400 ml-2">Strategy: {summary.strategy_id}</span>
-        )}
+      {/* Engine status + compact Live Status (subscribes to WS status push) */}
+      <div className="bg-slate-800 rounded-xl p-4 space-y-2">
+        <div className="flex items-center gap-3">
+          <div className={`w-2.5 h-2.5 rounded-full ${summary?.engine_status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-slate-500'}`} />
+          <span className={`text-sm font-medium ${statusColor}`}>
+            Engine: {summary?.engine_status || 'stopped'}
+          </span>
+          {summary?.strategy_id && (
+            <span className="text-xs text-slate-400 ml-2">Strategy: {summary.strategy_id}</span>
+          )}
+        </div>
+        <DashboardLiveStatus />
       </div>
 
       {/* Equity chart */}
