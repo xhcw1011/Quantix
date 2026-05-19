@@ -156,17 +156,18 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	shouldAdd := false
 	var gridEntry, gridTP float64
 
+	// Per-layer TP = entry ± spacing. Each layer round-trips independently in
+	// chop markets instead of waiting for the shared base TP (BB middle).
+	// Base position still uses BB middle (set in openGrid). Closed layers free
+	// a slot for new layers at the same price band.
 	if p.side == "LONG" && price <= refPrice-spacing {
 		gridEntry = math.Round(price*100) / 100
-		// Grid layer TP: base position's TP (BB middle), not fixed percentage
-		gridTP = p.takeProfit
-		if gridTP <= gridEntry { gridTP = math.Round((gridEntry+spacing)*100) / 100 }
+		gridTP = math.Round((gridEntry+spacing)*100) / 100
 		shouldAdd = true
 	}
 	if p.side == "SHORT" && price >= refPrice+spacing {
 		gridEntry = math.Round(price*100) / 100
-		gridTP = p.takeProfit
-		if gridTP >= gridEntry { gridTP = math.Round((gridEntry-spacing)*100) / 100 }
+		gridTP = math.Round((gridEntry-spacing)*100) / 100
 		shouldAdd = true
 	}
 
