@@ -87,6 +87,16 @@ type OpenOrdersLister interface {
 	ListOpenOrders(ctx context.Context, symbol string) ([]OpenOrderInfo, error)
 }
 
+// LimitOrderMakerPlacer is an optional extension of OrderClient that places
+// post-only limit orders (Binance GTX / "good till crossing"). If the order
+// would immediately match against the existing book, the exchange REJECTS it
+// instead of accepting it as a taker — guaranteeing maker fee.
+// Brokers that don't implement this fall back to a regular GTC limit order
+// (which may execute as taker if marketable).
+type LimitOrderMakerPlacer interface {
+	PlaceLimitOrderMakerOnly(ctx context.Context, symbol string, side OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error)
+}
+
 // OrderClient abstracts exchange-specific order operations.
 // Implementations: binance.OrderBroker (spot), binance_futures.OrderBroker (USDM),
 // okx.OrderBroker (SWAP demo/live).

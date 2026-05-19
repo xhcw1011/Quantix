@@ -261,6 +261,14 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 }
 
 func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty float64, useLimit bool) string {
+	return s.placeOrderEx(ctx, side, price, qty, useLimit, false)
+}
+
+// placeOrderEx is the underlying helper. makerOnly forces post-only (GTX)
+// semantics on LIMIT orders so the strategy never accidentally pays a taker
+// fee — at the cost of the order being rejected if it would have crossed
+// the book. Used by grid layer adds; entries/closes keep regular GTC.
+func (s *AIStrategy) placeOrderEx(ctx *strategy.Context, side string, price, qty float64, useLimit, makerOnly bool) string {
 	psSide := strategy.PositionSideLong
 	orderSide := strategy.SideBuy
 	if side == "SHORT" {
@@ -273,6 +281,7 @@ func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty f
 	if useLimit {
 		req.Type = strategy.OrderLimit
 		req.Price = price
+		req.MakerOnly = makerOnly
 	}
 	return ctx.PlaceOrder(req)
 }

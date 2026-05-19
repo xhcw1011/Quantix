@@ -152,6 +152,54 @@ func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side e
 	return ordID, nil
 }
 
+// PlaceLimitOrderMakerOnly submits a post-only limit order (GTX time-in-force).
+// If the order would immediately match against the book the exchange returns
+// error code -2010 ("Order would immediately match and take") and the caller
+// must treat the order as not placed. Use when fee discipline matters more
+// than fill certainty — e.g. grid layer adds that can simply wait for the
+// next bar if the current placement would have taken.
+// Implements exchange.LimitOrderMakerPlacer.
+func (b *OrderBroker) PlaceLimitOrderMakerOnly(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error) {
+	qtyStr := fmt.Sprintf("%.3f", qty)
+	priceStr := fmt.Sprintf("%.2f", price)
+
+	svc := b.client.NewCreateOrderService().
+		Symbol(symbol).
+		Side(toBinanceSide(side)).
+		Type(goBinance.OrderTypeLimit).
+		TimeInForce(goBinance.TimeInForceTypeGTX). // post-only
+		Quantity(qtyStr).
+		Price(priceStr)
+
+	if ps := toFuturesPositionSide(positionSide); ps != "" {
+		svc = svc.PositionSide(ps)
+	}
+	if clientOrderID != "" {
+		svc = svc.NewClientOrderID(clientOrderID)
+	}
+
+	b.log.Info("Binance Futures maker-only limit order attempt",
+		zap.String("symbol", symbol), zap.String("side", string(side)),
+		zap.String("position_side", positionSide),
+		zap.String("qty", qtyStr), zap.String("price", priceStr))
+
+	result, err := svc.Do(ctx)
+	if err != nil {
+		// Caller may inspect err for -2010 ("would immediately match") and
+		// treat as "skip this layer, try next bar"; we return the wrapped
+		// error as-is so the inspection is possible at higher layers.
+		return "", fmt.Errorf("binance futures maker-only limit order: %w", err)
+	}
+
+	ordID := strconv.FormatInt(result.OrderID, 10)
+	b.log.Info("Binance Futures maker-only limit order placed",
+		zap.String("order_id", ordID),
+		zap.String("symbol", symbol),
+		zap.Float64("price", price),
+	)
+	return ordID, nil
+}
+
 // PlaceReduceOnlyLimitOrder places a GTC limit order with ReduceOnly=true.
 // Used for staged take-profit orders that close an existing position.
 func (b *OrderBroker) PlaceReduceOnlyLimitOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error) {

@@ -178,8 +178,10 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	totalQty := p.remainQty + gridQty
 	if totalQty > p.initQty*2 { return }
 
-	// Use limit order for grid layers (maker fee, 60% cheaper than market)
-	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, true)
+	// Maker-only LIMIT (GTX) — if would cross book, exchange rejects so we
+	// never accidentally pay taker fee. Rejection just means "skip this layer,
+	// try next bar" — the position remains as-is.
+	omsID := s.placeOrderEx(ctx, p.side, gridEntry, gridQty, true, true)
 	if omsID == "" { return }
 
 	g := &gridOrder{
