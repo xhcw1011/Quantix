@@ -39,19 +39,22 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price }
 	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price }
 
-	// ── Stop-loss (trend only — grid positions have no SL, ride the range) ──
-	if p.mode != modeRange {
-		if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
-			s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
-			closedSide := p.side
-			s.closePos(ctx, p, pptr, "stop_loss")
-			s.consecLoss++
-			s.stopBar = s.barCount
-			s.postSLReeval = true
-			s.postSLSide = closedSide
-			s.postSLPrice = price
-			return
-		}
+	// ── Stop-loss — fires for both trend AND grid (modeRange).
+	// Grid base SL set in openGrid (BB lower/upper ± ATR/2 buffer). Hitting it
+	// closes the WHOLE grid bundle (base + filled layers), not per-layer — the
+	// per-layer TPs handle profit-taking individually; SL is the safety floor.
+	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
+		mode := "trend"
+		if p.mode == modeRange { mode = "grid" }
+		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.String("mode", mode), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+		closedSide := p.side
+		s.closePos(ctx, p, pptr, "stop_loss")
+		s.consecLoss++
+		s.stopBar = s.barCount
+		s.postSLReeval = true
+		s.postSLSide = closedSide
+		s.postSLPrice = price
+		return
 	}
 
 	if p.barsHeld < s.cfg.MinHoldBars { return } // minimum hold
