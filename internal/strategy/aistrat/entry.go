@@ -290,14 +290,32 @@ func (s *AIStrategy) placeCloseOrder(ctx *strategy.Context, side string, qty flo
 		Symbol: s.cfg.Symbol, Side: closeSide, PositionSide: psSide, Qty: qty,
 	}
 	if !useMarket {
-		// Close with Maker limit: SELL slightly above market, BUY slightly below market
-		bars := s.primaryBars()
-		if len(bars) > 0 {
-			lastPrice := bars[len(bars)-1].Close
+		// Close with Maker limit: SELL above current price, BUY below current price.
+		// Reference price MUST be the latest tick (not bar close) — TP triggers when
+		// tick crosses the target, so by then current tick > bar close. Using a stale
+		// bar-close reference would put the limit BELOW current tick = instant taker fill.
+		//
+		// Offset = max($1.0, 0.25 × ATR) — wider than 1-2 ticks so we sit on the book
+		// for a moment instead of crossing immediately. For ETH ATR ≈ $5-15 this gives
+		// $1.25-$3.75 of breathing room, still close enough to fill within seconds.
+		ref := s.lastTickPrice
+		if ref <= 0 {
+			bars := s.primaryBars()
+			if len(bars) > 0 {
+				ref = bars[len(bars)-1].Close
+			}
+		}
+		if ref > 0 {
+			offset := 1.0
+			if atr := s.calcATR(); atr > 0 {
+				if quarter := atr * 0.25; quarter > offset {
+					offset = quarter
+				}
+			}
 			if side == "LONG" {
-				req.Price = math.Round((lastPrice+0.5)*100) / 100 // close LONG = SELL above market
+				req.Price = math.Round((ref+offset)*100) / 100 // close LONG = SELL above market
 			} else {
-				req.Price = math.Round((lastPrice-0.5)*100) / 100 // close SHORT = BUY below market
+				req.Price = math.Round((ref-offset)*100) / 100 // close SHORT = BUY below market
 			}
 			req.Type = strategy.OrderLimit
 		}

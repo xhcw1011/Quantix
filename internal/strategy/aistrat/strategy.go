@@ -80,6 +80,7 @@ type AIStrategy struct {
 	replayIdx       int         // current index into replaySignals
 
 	lastCloseFailAt time.Time // throttle close retries after failure (prevent tick-level spam)
+	lastTickPrice   float64   // most recent tick price seen (for accurate maker offset on close orders)
 
 	// Post-SL immediate reversal: set by tickManage when SL fires on tick data.
 	// Cleared on next OnBar when the urgent GPT check runs.
@@ -237,6 +238,9 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 // Implements strategy.TickReceiver.
 func (s *AIStrategy) OnTick(ctx *strategy.Context, price float64) {
 	if !s.warmedUp { return }
+	if price > 0 {
+		s.lastTickPrice = price
+	}
 	if s.longPos != nil && s.longPos.filled {
 		s.tickManage(ctx, price, s.longPos, &s.longPos)
 	}
