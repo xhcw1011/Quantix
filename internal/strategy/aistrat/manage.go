@@ -70,6 +70,34 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
 	price := bar.Close
 
+	// ── Staleness exit: release slot when grid can't recover ──
+	// Range positions have no SL by design. If a grid stays stuck for
+	// GridStaleBars market-time bars at deeper than GridStalePnlR drawdown,
+	// it blocks new signals and effectively halts the engine. Force-close
+	// to release the slot. Uses barsHeld (works in both live and backtest;
+	// initialized from DB created_at on restart, see helpers.go).
+	staleBars := s.cfg.GridStaleBars
+	stalePnlR := s.cfg.GridStalePnlR
+	if staleBars > 0 && stalePnlR < 0 && p.filled && p.R > 0 && p.barsHeld > staleBars {
+		pnlR := 0.0
+		if p.side == "LONG" {
+			pnlR = (price - p.entryPrice) / p.R
+		} else {
+			pnlR = (p.entryPrice - price) / p.R
+		}
+		if pnlR < stalePnlR {
+			s.log.Warn("AI: GRID staleness exit — slot held too long at deep drawdown",
+				zap.String("side", p.side),
+				zap.Int("bars_held", p.barsHeld),
+				zap.Float64("pnl_r", pnlR),
+				zap.Float64("entry", p.entryPrice),
+				zap.Float64("price", price))
+			s.closePos(ctx, p, pptr, "stale_exit")
+			s.consecLoss++
+			return
+		}
+	}
+
 	// ── Base position TP check ──
 	if p.takeProfit > 0 {
 		tpHit := false
@@ -136,14 +164,18 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	if s.cfg.ForceTrend { return }
 
 	// Dynamic grid spacing: compute FRESH BB each bar (not stale lastBB values).
-	spacing := p.entryPrice * s.cfg.GridSpacingPct
+	// Floor at configured GridSpacingPct to prevent layers from stacking in tight
+	// consolidation (low BB width) — when BB collapses, dynamic spacing would
+	// drop to $1-2 and fill every layer in a single bar.
+	fixedSpacing := p.entryPrice * s.cfg.GridSpacingPct
+	spacing := fixedSpacing
 	closes := s.getCloses()
 	if len(closes) >= 20 {
 		bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
 		if len(bb.Upper) > 0 && len(bb.Lower) > 0 {
 			bbWidth := bb.Upper[len(bb.Upper)-1] - bb.Lower[len(bb.Lower)-1]
 			dynamicSpacing := bbWidth / float64(s.cfg.GridMaxLayers+1)
-			if dynamicSpacing > 0 { spacing = dynamicSpacing }
+			if dynamicSpacing > fixedSpacing { spacing = dynamicSpacing }
 		}
 	}
 

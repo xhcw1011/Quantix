@@ -36,6 +36,8 @@ func init() {
 		if v, ok := params["RangeTPPct"]; ok { cfg.RangeTPPct = toFloat(v) }
 		if v, ok := params["RangeSLPct"]; ok { cfg.RangeSLPct = toFloat(v) }
 		if v, ok := params["GridMaxLayers"]; ok { cfg.GridMaxLayers = toInt(v) }
+		if v, ok := params["GridStaleBars"]; ok { cfg.GridStaleBars = toInt(v) }
+		if v, ok := params["GridStalePnlR"]; ok { cfg.GridStalePnlR = toFloat(v) }
 		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
@@ -239,6 +241,8 @@ type Config struct {
 	GridTPPct      float64 // grid order take-profit as fallback (default 0.004 = 0.4%)
 	GridQtyRatio   float64 // grid qty as ratio of base qty (default 0.5)
 	GridMaxTPDist  float64 // max TP distance in $ — caps TP when BB is wide (default 8.0)
+	GridStaleBars  int     // staleness exit: force-close if barsHeld > this (default 0 = disabled)
+	GridStalePnlR  float64 // staleness exit: only fire when pnlR < this (default 0 = disabled)
 
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
@@ -407,7 +411,7 @@ func DefaultConfig() Config {
 		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
-		GridMaxLayers: 2, GridSpacingPct: 0.005, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0,
+		GridMaxLayers: 4, GridSpacingPct: 0.01, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────

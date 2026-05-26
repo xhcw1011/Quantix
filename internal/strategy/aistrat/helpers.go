@@ -249,6 +249,69 @@ func calcDirectionScore(bars []exchange.Kline) float64 {
 	return float64(sameDir) / float64(len(bars)-1)
 }
 
+// adoptInitQty preserves persisted InitQty when sane, else derives a conservative
+// estimate from total Qty. Prevents the compounding bug where Redis/DB had
+// InitQty=0 (unset on first sync) and the old code set initQty = current total
+// (which already includes any grid layers) → next layer placement uses a 50%
+// of an inflated base → position grows each restart cycle.
+//
+// Conservative estimate: assume all GridMaxLayers were filled at GridQtyRatio.
+//   maxFactor = 1 + GridQtyRatio × GridMaxLayers
+//   initQty   = totalQty / maxFactor
+//
+// If estimate is too low, the cap `totalQty > initQty*2` in manageGrid simply
+// blocks new layers — safe-fail, never over-grows.
+func (s *AIStrategy) adoptInitQty(persisted, totalQty float64) float64 {
+	// Sane persisted value: > 0 and not absurdly larger than current qty.
+	if persisted > 0 && persisted <= totalQty+1e-9 {
+		return persisted
+	}
+	maxFactor := 1.0 + s.cfg.GridQtyRatio*float64(s.cfg.GridMaxLayers)
+	if maxFactor < 1 {
+		maxFactor = 1
+	}
+	return totalQty / maxFactor
+}
+
+// adoptBarsHeld derives an initial barsHeld value from the position's persisted
+// created_at, so the staleness check sees true age after a restart. Falls back
+// to max(persisted, 10) when DB lookup fails (preserves prior fallback).
+func (s *AIStrategy) adoptBarsHeld(side string, persisted int) int {
+	openedAt := s.adoptOpenedAt(side)
+	if openedAt.IsZero() {
+		return max(persisted, 10)
+	}
+	intervalSec := 300 // 5m default
+	if s.cfg.PrimaryInterval == "1m" { intervalSec = 60 }
+	if s.cfg.PrimaryInterval == "15m" { intervalSec = 900 }
+	if s.cfg.PrimaryInterval == "1h" { intervalSec = 3600 }
+	elapsed := int(time.Since(openedAt).Seconds() / float64(intervalSec))
+	if elapsed < max(persisted, 10) {
+		return max(persisted, 10)
+	}
+	return elapsed
+}
+
+// adoptOpenedAt returns the persisted created_at from strategy_positions for a
+// given side, falling back to now() when unavailable. Used to preserve the true
+// position age across engine restarts (which otherwise reset filledAt).
+func (s *AIStrategy) adoptOpenedAt(side string) time.Time {
+	if s.store == nil || s.userID == 0 || s.engineID == "" {
+		return time.Now()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	t, err := s.store.GetStrategyPositionOpenedAt(ctx, s.userID, s.engineID, side)
+	if err != nil || t.IsZero() {
+		s.log.Debug("AI: opened_at lookup failed, using now()", zap.String("side", side), zap.Error(err))
+		return time.Now()
+	}
+	s.log.Info("AI: adopted opened_at from DB",
+		zap.String("side", side), zap.Time("opened_at", t),
+		zap.Duration("age", time.Since(t)))
+	return t
+}
+
 // recoverFromSyncer loads positions from PositionSyncer (Redis/exchange).
 func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 	if s.syncer == nil {
@@ -284,9 +347,10 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			initQty: lp.InitQty, remainQty: lp.Qty,
 			R: lp.R, stopLoss: sl, takeProfit: tp,
 			trailing: lp.Trailing, peakPrice: lp.PeakPrice,
-			tp1RHit: lp.TP1Hit, barsHeld: max(lp.BarsHeld, 10), filled: true, filledAt: time.Now(),
+			tp1RHit: lp.TP1Hit, barsHeld: s.adoptBarsHeld("LONG", lp.BarsHeld),
+			filled: true, firstFillSeen: true, filledAt: s.adoptOpenedAt("LONG"),
 		}
-		if s.longPos.initQty == 0 { s.longPos.initQty = lp.Qty }
+		s.longPos.initQty = s.adoptInitQty(lp.InitQty, lp.Qty)
 		if s.longPos.R == 0 { s.longPos.R = math.Abs(entry - sl) }
 		if s.longPos.entryATR == 0 { s.longPos.entryATR = atr } // fallback to current ATR
 		// R = |entry - SL|, no cap. Consistent with "only ATR determines risk, never limits profit".
@@ -344,9 +408,10 @@ recoverShort:
 			initQty: sp.InitQty, remainQty: sp.Qty,
 			R: sp.R, stopLoss: sl, takeProfit: tp,
 			trailing: sp.Trailing, peakPrice: sp.PeakPrice,
-			tp1RHit: sp.TP1Hit, barsHeld: max(sp.BarsHeld, 10), filled: true, filledAt: time.Now(),
+			tp1RHit: sp.TP1Hit, barsHeld: s.adoptBarsHeld("SHORT", sp.BarsHeld),
+			filled: true, firstFillSeen: true, filledAt: s.adoptOpenedAt("SHORT"),
 		}
-		if s.shortPos.initQty == 0 { s.shortPos.initQty = sp.Qty }
+		s.shortPos.initQty = s.adoptInitQty(sp.InitQty, sp.Qty)
 		if s.shortPos.R == 0 { s.shortPos.R = math.Abs(entry - sl) }
 		if s.shortPos.entryATR == 0 { s.shortPos.entryATR = atr } // fallback to current ATR
 		if s.shortPos.peakPrice == 0 { s.shortPos.peakPrice = currentPrice }

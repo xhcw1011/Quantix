@@ -791,6 +791,21 @@ func (s *Store) UpsertStrategyPosition(ctx context.Context, userID int, engineID
 	return nil
 }
 
+// GetStrategyPositionOpenedAt returns the created_at timestamp of a strategy
+// position row — i.e. when the position was first opened (DB default NOW() on
+// INSERT, never touched by ON CONFLICT). Returns zero time if not found.
+func (s *Store) GetStrategyPositionOpenedAt(ctx context.Context, userID int, engineID, side string) (time.Time, error) {
+	var openedAt time.Time
+	err := s.pool.QueryRow(ctx,
+		`SELECT created_at FROM strategy_positions WHERE user_id=$1 AND engine_id=$2 AND side=$3`,
+		userID, engineID, side,
+	).Scan(&openedAt)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return openedAt, nil
+}
+
 // DeleteStrategyPosition removes a strategy position record.
 func (s *Store) DeleteStrategyPosition(ctx context.Context, userID int, engineID, side string) error {
 	_, err := s.pool.Exec(ctx,

@@ -4,11 +4,32 @@ package notify
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"go.uber.org/zap"
 )
+
+// fillAggregationWindow is how long FillNotification waits for additional
+// partial fills with the same orderID before flushing one consolidated message.
+// Binance routinely splits a single LIMIT order into multiple UDS fill events;
+// without aggregation users see N TG messages for one logical fill.
+const fillAggregationWindow = 3 * time.Second
+
+// pendingFill accumulates partial fills for a single orderID.
+type pendingFill struct {
+	strategyID string
+	symbol     string
+	side       string
+	qty        float64
+	fee        float64
+	realized   float64
+	avgPrice   float64
+	nFills     int
+	isClose    bool
+	timer      *time.Timer
+}
 
 // Notifier sends trading alerts via Telegram and/or email.
 // All methods are safe for concurrent use and are no-ops when both channels are disabled.
@@ -17,6 +38,10 @@ type Notifier struct {
 	chatID int64
 	email  *emailSender // may be nil
 	log    *zap.Logger
+
+	// Aggregation buffer for partial fills (one TG per logical order).
+	fillMu     sync.Mutex
+	fillBuffer map[string]*pendingFill
 }
 
 // New creates a Telegram notifier.
@@ -34,7 +59,7 @@ func New(token string, chatID int64, log *zap.Logger) *Notifier {
 	}
 
 	log.Info("Telegram notifier ready", zap.String("bot", bot.Self.UserName))
-	return &Notifier{bot: bot, chatID: chatID, log: log}
+	return &Notifier{bot: bot, chatID: chatID, log: log, fillBuffer: make(map[string]*pendingFill)}
 }
 
 // Enabled returns true when at least one notification channel is active.
@@ -65,49 +90,80 @@ func (n *Notifier) TradeSignal(symbol, side, strategyID string, price float64) {
 	))
 }
 
-// FillNotification notifies an order fill.
-// isClose=true marks the fill as a closing/reduce-only trade (TP, SL, trailing, manual close).
+// FillNotification queues a fill for aggregated TG delivery. Partial fills for
+// the same orderID within fillAggregationWindow are collapsed into one message
+// (qty + fee + realizedPnL summed, entry price = volume-weighted avg).
 //
-// Suppression rules (avoid noisy TG):
-//  - isClose with realized=0 AND fee=0: almost certainly a duplicate event (UDS + REST
-//    double-reporting same fill). The first event consumed the position; the second
-//    sees pos.Qty=0 → ApplyFill returns 0 realized, fee was already deducted so 0.
-//    Skipping these makes TG show one message per real close with correct PnL.
-//  - Closes with realized=0 but fee>0: real close that broke even. Show with "$0.00".
+// isClose=true marks the fill as a closing/reduce-only trade (TP, SL, trailing, manual close).
+// No suppression: prefer occasional duplicate notifications over silently dropping
+// legitimate closes.
 func (n *Notifier) FillNotification(strategyID, orderID, symbol, side string, qty, price, fee, realizedPnL float64, isClose bool) {
-	if isClose && realizedPnL == 0 && fee == 0 {
-		return // duplicate fill event — skip TG
+	if n.bot == nil && n.email == nil {
+		return
 	}
+	n.fillMu.Lock()
+	pf, exists := n.fillBuffer[orderID]
+	if !exists {
+		pf = &pendingFill{
+			strategyID: strategyID,
+			symbol:     symbol,
+			side:       side,
+			isClose:    isClose,
+		}
+		n.fillBuffer[orderID] = pf
+		key := orderID // capture for closure
+		pf.timer = time.AfterFunc(fillAggregationWindow, func() {
+			n.flushFillAggregation(key)
+		})
+	}
+	// Accumulate
+	totalQty := pf.qty + qty
+	if totalQty > 0 && price > 0 {
+		pf.avgPrice = (pf.qty*pf.avgPrice + qty*price) / totalQty
+	}
+	pf.qty = totalQty
+	pf.fee += fee
+	pf.realized += realizedPnL
+	pf.nFills++
+	n.fillMu.Unlock()
+}
+
+// flushFillAggregation sends the buffered fill for orderID as one TG message.
+func (n *Notifier) flushFillAggregation(orderID string) {
+	n.fillMu.Lock()
+	pf, ok := n.fillBuffer[orderID]
+	if !ok {
+		n.fillMu.Unlock()
+		return
+	}
+	delete(n.fillBuffer, orderID)
+	n.fillMu.Unlock()
 
 	emoji := "🟢"
 	action := "开仓"
 	dirCN := "买入"
-	if side == "SELL" {
+	if pf.side == "SELL" {
 		dirCN = "卖出"
 	}
-	if isClose {
+	if pf.isClose {
 		emoji = "🔴"
 		action = "平仓"
 	}
+	fillsSuffix := ""
+	if pf.nFills > 1 {
+		fillsSuffix = fmt.Sprintf(" (%d fills)", pf.nFills)
+	}
 	pnlStr := ""
-	if isClose {
-		// Always show PnL line for closes (even if 0 = break-even)
+	if pf.isClose || pf.realized != 0 {
 		sign := "+"
-		if realizedPnL < 0 {
+		if pf.realized < 0 {
 			sign = ""
 		}
-		pnlStr = fmt.Sprintf("\n已实现盈亏: `%s$%.2f`", sign, realizedPnL)
-	} else if realizedPnL != 0 {
-		// Opens normally have realized=0; show line only if non-zero (rare hedge edge case)
-		sign := "+"
-		if realizedPnL < 0 {
-			sign = ""
-		}
-		pnlStr = fmt.Sprintf("\n已实现盈亏: `%s$%.2f`", sign, realizedPnL)
+		pnlStr = fmt.Sprintf("\n已实现盈亏: `%s$%.2f`", sign, pf.realized)
 	}
 	n.send(fmt.Sprintf(
-		"%s *%s* [%s]\n`%s %.6f %s @ $%.2f`\n手续费: `$%.4f`%s\n_%s_",
-		emoji, action, strategyID, dirCN, qty, symbol, price, fee, pnlStr,
+		"%s *%s* [%s]\n`%s %.6f %s @ $%.2f`%s\n手续费: `$%.4f`%s\n_%s_",
+		emoji, action, pf.strategyID, dirCN, pf.qty, pf.symbol, pf.avgPrice, fillsSuffix, pf.fee, pnlStr,
 		time.Now().Format("15:04:05"),
 	))
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -175,8 +176,34 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	if fill.Side == strategy.SideBuy && fill.PositionSide == strategy.PositionSideLong {
 		pos = s.longPos // opening long
 	}
-	if pos == nil || pos.filled { return }
+	if pos == nil {
+		return
+	}
 
+	// Branch on firstFillSeen (not pos.filled): market orders are pre-set
+	// filled=true at entry time before any fill event arrives, so gating on
+	// pos.filled would treat the FIRST actual fill as an "accumulator" event
+	// → double count. firstFillSeen flips only when a real fill arrives.
+	if pos.firstFillSeen {
+		// Subsequent fill for this position. Accumulate ONLY if it matches
+		// the BASE order (partial fill of base limit). Grid layer fills have
+		// different orderIDs and are tracked separately by manageGrid.
+		if pos.orderID != "" && strings.HasPrefix(fill.ID, pos.orderID) {
+			totalQty := pos.remainQty + fill.Qty
+			if totalQty > 0 && fill.Price > 0 {
+				pos.entryPrice = (pos.remainQty*pos.entryPrice + fill.Qty*fill.Price) / totalQty
+			}
+			pos.remainQty = totalQty
+			pos.initQty = totalQty
+			s.log.Info("AI: base partial fill accumulated",
+				zap.String("side", pos.side), zap.Float64("fill_qty", fill.Qty),
+				zap.Float64("total_qty", totalQty), zap.Float64("avg_entry", pos.entryPrice))
+			s.syncToRedis(pos)
+		}
+		return
+	}
+
+	pos.firstFillSeen = true
 	pos.filled = true
 	pos.filledAt = time.Now()
 	pos.lastPeakAt = time.Now()
@@ -188,8 +215,14 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 		pos.trailing = pos.stopLoss
 		pos.R = math.Abs(fill.Price - pos.stopLoss)
 	}
+	// Use ACTUAL filled qty, not target qty from order request.
+	if fill.Qty > 0 {
+		pos.remainQty = fill.Qty
+		pos.initQty = fill.Qty
+	}
 	s.log.Info("AI: fill confirmed",
 		zap.String("side", pos.side), zap.Float64("fill", fill.Price),
+		zap.Float64("qty", fill.Qty),
 		zap.Float64("stop", pos.stopLoss), zap.Float64("tp", pos.takeProfit))
 
 	s.syncToRedis(pos)

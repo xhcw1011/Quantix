@@ -257,6 +257,25 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	if hasPositions {
 		e.log.Info("clean-slate: skipped — syncer has active positions, preserving exchange orders")
 	}
+
+	// Seed PositionManager from syncer so close-fill realized PnL is correct.
+	// Without this, ApplyFill on a closing fill returns 0 because the manager
+	// never observed the opening trade (which happened pre-restart). Side effect:
+	// fills.realized_pnl stays 0 in DB and TG notifications miss the PnL line.
+	if e.posSyncer != nil {
+		if lp := e.posSyncer.GetLong(); lp != nil && lp.Qty > 0 && lp.EntryPrice > 0 {
+			e.positions.SeedPosition(lp.Symbol, "LONG", lp.Qty, lp.EntryPrice)
+			e.log.Info("seeded PositionManager from syncer",
+				zap.String("side", "LONG"), zap.String("symbol", lp.Symbol),
+				zap.Float64("qty", lp.Qty), zap.Float64("entry", lp.EntryPrice))
+		}
+		if sp := e.posSyncer.GetShort(); sp != nil && sp.Qty > 0 && sp.EntryPrice > 0 {
+			e.positions.SeedPosition(sp.Symbol, "SHORT", sp.Qty, sp.EntryPrice)
+			e.log.Info("seeded PositionManager from syncer",
+				zap.String("side", "SHORT"), zap.String("symbol", sp.Symbol),
+				zap.Float64("qty", sp.Qty), zap.Float64("entry", sp.EntryPrice))
+		}
+	}
 	if !recovered && !skipClean {
 		if oc, ok := e.broker.orderClient.(exchange.OpenOrdersCanceller); ok {
 			cleanCtx, cleanFn := context.WithTimeout(ctx, 10*time.Second)
@@ -724,6 +743,7 @@ func (e *Engine) processFills(ctx context.Context) {
 					StrategyID:      e.cfg.StrategyID,
 					Symbol:          event.Fill.Symbol,
 					Side:            string(event.Fill.Side),
+					PositionSide:    string(event.Fill.PositionSide),
 					Qty:             event.Fill.Qty,
 					Price:           event.Fill.Price,
 					Fee:             event.Fill.Fee,

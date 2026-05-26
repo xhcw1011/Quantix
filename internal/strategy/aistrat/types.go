@@ -56,6 +56,11 @@ type posState struct {
 	barsHeld   int
 	filled     bool
 	filledAt   time.Time
+	// firstFillSeen flips true on the first OnFill event matching this position.
+	// Distinguishes the "filled=true preset by entry.go for market orders" state
+	// from the "actual fill event received" state. Required to avoid double-
+	// counting the market order's first fill in the partial-fill accumulator.
+	firstFillSeen bool
 	orderID    string
 	limitBar   int
 

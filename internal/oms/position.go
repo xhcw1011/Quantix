@@ -109,6 +109,24 @@ func (pm *PositionManager) ApplyFill(fill strategy.Fill) float64 {
 	return realized
 }
 
+// SeedPosition installs an existing open position into the manager — used on
+// engine restart to rebuild state from the syncer (Redis/exchange). Without
+// this, a closing fill on an adopted position returns realized=0 because the
+// manager never observed the opening trade.
+func (pm *PositionManager) SeedPosition(symbol, positionSide string, qty, avgEntryPrice float64) {
+	if qty <= 0 || avgEntryPrice <= 0 {
+		return
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.positions[posKey(symbol, positionSide)] = &LivePosition{
+		Symbol:        symbol,
+		PositionSide:  positionSide,
+		Qty:           qty,
+		AvgEntryPrice: avgEntryPrice,
+	}
+}
+
 // Position returns a copy of the net/long position for the given symbol.
 // Use LongPosition / ShortPosition for hedge-mode futures.
 // ok is false if no position exists.
