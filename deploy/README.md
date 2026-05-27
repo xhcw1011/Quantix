@@ -59,9 +59,13 @@ ssh -i ~/work/pem/test.pem ubuntu@54.46.102.153 'sudo systemctl status quantix-a
 ssh -i ~/work/pem/test.pem ubuntu@54.46.102.153 \
   'tail -f /opt/quantix/logs/quantix-$(date +%Y%m%d).log'
 
-# Health check
+# Health check (backend) — bound 127.0.0.1:9118, only reachable from server
 ssh -i ~/work/pem/test.pem ubuntu@54.46.102.153 \
-  'curl -s http://localhost:9300/api/health'
+  'curl -s http://localhost:9118/api/health'
+
+# Health check (via nginx) — public-facing, what users actually hit
+ssh -i ~/work/pem/test.pem ubuntu@54.46.102.153 \
+  'curl -s http://localhost:9119/api/health'
 ```
 
 You should also receive a Telegram message within ~30s of service start.
@@ -88,13 +92,12 @@ ssh ubuntu@54.46.102.153 'sudo mv /opt/quantix/bin/quantix-api.prev /opt/quantix
 
 ## Security notes
 
-- `:9300` listens on all interfaces by default. Lock down via UFW:
-  ```bash
-  sudo ufw allow 22
-  sudo ufw allow from YOUR_HOME_IP to any port 9300
-  sudo ufw enable
-  ```
-- For HTTPS / public access, put nginx in front. Not done by the script.
+- Backend `quantix-api` binds `127.0.0.1:9118` (loopback only). Not exposed
+  to the public internet — only reachable from the server itself.
+- nginx (port `9119`) serves the static frontend from `/opt/quantix/web` and
+  reverse-proxies `/api/*` to the backend. **This** is the port to open in
+  the AWS Security Group / firewall.
+- For HTTPS, terminate TLS in nginx (Let's Encrypt). Not done by the script.
 - DB password is in `/etc/quantix/env` (chmod 600). Don't commit it.
 - Encryption key MUST match local: encrypted exchange credentials in DB are AES-GCM with that key.
 

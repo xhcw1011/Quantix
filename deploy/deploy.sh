@@ -91,12 +91,27 @@ else
   ok "Built: $(ls -lh ./build/quantix-api-linux | awk '{print $5}')"
 fi
 
+# ─── 2b. Build web frontend (skipped for --binary-only) ──────────────────────
+if ! $BINARY_ONLY && [ -f ./web/package.json ]; then
+  step "Build web frontend (npm run build)"
+  if $DRY_RUN; then
+    echo "[DRY] (cd web && npm install && npm run build)"
+  elif command -v npm >/dev/null 2>&1; then
+    ( cd web && npm install --silent && npm run build ) || die "web build failed"
+    [ -d ./web/dist ] || die "web/dist not produced by build"
+    ok "Web built: $(du -sh ./web/dist | cut -f1)"
+  else
+    warn "npm not found locally — using existing web/dist if present"
+    [ -d ./web/dist ] || die "no web/dist and npm not installed"
+  fi
+fi
+
 if $BINARY_ONLY; then
   step "Binary-only mode: push + restart"
   scp_push ./build/quantix-api-linux "$REMOTE_DIR/quantix-api"
   ssh_run "sudo install -m 755 -o $SSH_USER -g $SSH_USER $REMOTE_DIR/quantix-api $INSTALL_DIR/bin/quantix-api && sudo systemctl restart quantix-api"
   sleep 4
-  ssh_run "curl -sf http://localhost:9300/api/health && echo ' ← health OK'"
+  ssh_run "curl -sf http://localhost:9118/api/health && echo ' ← health OK'"
   ok "Binary updated. Done."
   exit 0
 fi
@@ -123,7 +138,7 @@ cat > "$ENV_FILE" <<EOF
 QUANTIX_ENCRYPTION_KEY=$QUANTIX_ENCRYPTION_KEY
 QUANTIX_JWT_SECRET=$QUANTIX_JWT_SECRET
 QUANTIX_LIVE_CONFIRM=true
-QUANTIX_API_ADDR=:9300
+QUANTIX_API_ADDR=127.0.0.1:9118
 QUANTIX_API_CONFIG=$INSTALL_DIR/config/config.yaml
 EOF
 ok "Wrote $ENV_FILE"
@@ -210,6 +225,9 @@ if ! $DRY_RUN; then
     ./build/quantix-api.service \
     ./migrations \
     ./deploy/bootstrap-server.sh \
+    ./deploy/nginx-quantix.conf \
+    ./deploy/nginx-upgrade-map.conf \
+    ./web/dist \
     ./scripts/monitor.py \
     "$SSH_USER@$SSH_HOST:$REMOTE_DIR/"
   ok "Pushed"
@@ -229,7 +247,7 @@ step "Wait for service and verify"
 if ! $DRY_RUN; then
   for i in $(seq 1 20); do
     sleep 2
-    if ssh_run "curl -sf http://localhost:9300/api/health" 2>/dev/null | grep -q healthy; then
+    if ssh_run "curl -sf http://localhost:9118/api/health" 2>/dev/null | grep -q healthy; then
       ok "Service responded healthy after ${i}×2s"
       break
     fi
@@ -246,7 +264,7 @@ Server:    $SSH_USER@$SSH_HOST
 Install:   $INSTALL_DIR
 Service:   sudo systemctl {status|restart|stop} quantix-api
 Logs:      ssh -i $SSH_KEY $SSH_USER@$SSH_HOST 'tail -f $INSTALL_DIR/logs/quantix-\$(date +%Y%m%d).log'
-Health:    ssh -i $SSH_KEY $SSH_USER@$SSH_HOST 'curl -s http://localhost:9300/api/health'
+Health:    ssh -i $SSH_KEY $SSH_USER@$SSH_HOST 'curl -s http://localhost:9118/api/health'
 
 \033[1;33m! IMPORTANT: local engine is still running. Stop it BEFORE the server engine
   picks up your live binance credentials, or both will hammer the same exchange:\033[0m

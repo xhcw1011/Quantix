@@ -177,12 +177,50 @@ fi
 step "Health check"
 for i in $(seq 1 15); do
   sleep 2
-  if curl -sf http://localhost:9300/api/health 2>/dev/null | grep -q healthy; then
+  if curl -sf http://localhost:9118/api/health 2>/dev/null | grep -q healthy; then
     ok "API healthy"
     break
   fi
   [ $i -eq 15 ] && { warn "API not healthy after 30s"; journalctl -u quantix-api -n 30 --no-pager; exit 1; }
 done
+
+# ─── 9b. Install nginx + frontend ────────────────────────────────────────────
+step "Install nginx + web frontend"
+if ! command -v nginx >/dev/null; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx
+  systemctl enable --now nginx
+  ok "nginx installed"
+else
+  ok "nginx already present"
+fi
+
+# Web frontend: rsync staged dist/ into /opt/quantix/web (idempotent).
+if [ -d "$REMOTE_DIR/dist" ]; then
+  mkdir -p "$INSTALL_DIR/web"
+  rsync -a --delete "$REMOTE_DIR/dist/" "$INSTALL_DIR/web/"
+  chown -R www-data:www-data "$INSTALL_DIR/web"
+  ok "Frontend installed to $INSTALL_DIR/web ($(du -sh $INSTALL_DIR/web | cut -f1))"
+else
+  warn "web/dist not in bundle — skipping frontend install"
+fi
+
+# nginx site config + upgrade-map (drop in, validate, reload).
+if [ -f "$REMOTE_DIR/nginx-quantix.conf" ]; then
+  install -m 644 "$REMOTE_DIR/nginx-quantix.conf" /etc/nginx/sites-available/quantix
+  ln -sf /etc/nginx/sites-available/quantix /etc/nginx/sites-enabled/quantix
+  ok "Quantix site config installed"
+fi
+if [ -f "$REMOTE_DIR/nginx-upgrade-map.conf" ]; then
+  install -m 644 "$REMOTE_DIR/nginx-upgrade-map.conf" /etc/nginx/conf.d/quantix-upgrade-map.conf
+  ok "Quantix upgrade-map installed"
+fi
+if nginx -t >/dev/null 2>&1; then
+  systemctl reload nginx
+  ok "nginx reloaded — frontend live at :9119"
+else
+  warn "nginx config test failed:"
+  nginx -t || true
+fi
 
 # ─── 10. Install monitor cron (every 2h) ─────────────────────────────────────
 step "Install monitor cron"
