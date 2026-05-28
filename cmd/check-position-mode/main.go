@@ -9,6 +9,7 @@ import (
 	"time"
 
 	binance "github.com/adshao/go-binance/v2/futures"
+	delivery "github.com/adshao/go-binance/v2/delivery"
 
 	"github.com/Quantix/quantix/internal/api"
 	"github.com/Quantix/quantix/internal/config"
@@ -163,6 +164,54 @@ func main() {
 		fmt.Println("  OK — closing tiny qty succeeded")
 	}
 
+	// 3c. Check COIN-margined (CM) Futures account — since 2026-04-10 it must
+	// stay in sync with UM. Stale CM positions/orders block UM order placement.
+	fmt.Println("\n--- COIN-MARGINED (CM) Futures account ---")
+	delivery.UseTestnet = cred.Demo
+	cmClient := delivery.NewClient(k, s)
+	cmMode, err := cmClient.NewGetPositionModeService().Do(ctx)
+	if err != nil {
+		fmt.Printf("  CM GetPositionMode ERROR: %v\n", err)
+	} else {
+		fmt.Printf("  CM DualSidePosition: %v\n", cmMode.DualSidePosition)
+	}
+	cmOpenOrders, err := cmClient.NewListOpenOrdersService().Do(ctx)
+	if err != nil {
+		fmt.Printf("  CM open orders ERROR: %v\n", err)
+	} else {
+		fmt.Printf("  CM open orders: %d\n", len(cmOpenOrders))
+		for _, o := range cmOpenOrders {
+			fmt.Printf("    sym=%s id=%d side=%s posSide=%s type=%s qty=%s price=%s\n",
+				o.Symbol, o.OrderID, o.Side, o.PositionSide, o.Type, o.OrigQuantity, o.Price)
+		}
+	}
+	cmRisk, err := cmClient.NewGetPositionRiskService().Do(ctx)
+	if err != nil {
+		fmt.Printf("  CM positionRisk ERROR: %v\n", err)
+	} else {
+		nonZero := 0
+		for _, p := range cmRisk {
+			if p.PositionAmt != "0" && p.PositionAmt != "0.000" {
+				fmt.Printf("    sym=%s posSide=%s amt=%s entry=%s\n",
+					p.Symbol, p.PositionSide, p.PositionAmt, p.EntryPrice)
+				nonZero++
+			}
+		}
+		fmt.Printf("  CM non-zero positions: %d\n", nonZero)
+	}
+
+	fmt.Println("\n--- Open ALGO orders ---")
+	algoOrders, err := client.NewListOpenAlgoOrdersService().Do(ctx)
+	if err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Printf("  %d open algo orders\n", len(algoOrders))
+		for _, o := range algoOrders {
+			fmt.Printf("    id=%v sym=%v orderType=%v side=%v posSide=%v triggerPrice=%v status=%v closePos=%v\n",
+				o.AlgoId, o.Symbol, o.OrderType, o.Side, o.PositionSide, o.TriggerPrice, o.AlgoStatus, o.ClosePosition)
+		}
+	}
+
 	fmt.Println("\n--- Open orders on ETHUSDT ---")
 	openOrders, err := client.NewListOpenOrdersService().Symbol("ETHUSDT").Do(ctx)
 	if err != nil {
@@ -236,6 +285,88 @@ func main() {
 		fmt.Printf("  Reset ERROR: %v\n", err)
 	} else {
 		fmt.Println("  Reset OK — re-applied DualSide(true)")
+	}
+
+	fmt.Println("\n--- variant M: ALGO STOP_MARKET + closePosition=true (force close LONG) ---")
+	// Trigger price above current → fires immediately on next tick.
+	// Uses /fapi/v1/algo/futures/newOrder which has different validation logic.
+	if _, err := client.NewCreateAlgoOrderService().
+		AlgoType(binance.OrderAlgoTypeConditional).
+		Symbol("ETHUSDT").Side(binance.SideTypeSell).Type(binance.AlgoOrderTypeStopMarket).
+		PositionSide(binance.PositionSideTypeLong).ClosePosition(true).
+		TriggerPrice("2010").
+		WorkingType(binance.WorkingTypeMarkPrice).
+		Do(ctx); err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Println("  OK — STOP_MARKET algo close placed")
+	}
+
+	fmt.Println("\n--- Algo order HISTORY (recent) ---")
+	allAlgo, err := client.NewListAllAlgoOrdersService().Symbol("ETHUSDT").Do(ctx)
+	if err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Printf("  %d algo orders in history\n", len(allAlgo))
+		for _, o := range allAlgo {
+			fmt.Printf("    id=%v type=%v side=%v posSide=%v trig=%v status=%v actualOrderId=%v\n",
+				o.AlgoId, o.OrderType, o.Side, o.PositionSide, o.TriggerPrice, o.AlgoStatus, o.ActualOrderId)
+		}
+	}
+
+	fmt.Println("\n--- variant P: cancel any stale algo orders first ---")
+	algoOpen, _ := client.NewListOpenAlgoOrdersService().Do(ctx)
+	for _, o := range algoOpen {
+		fmt.Printf("  Cancelling algo id=%d\n", o.AlgoId)
+		_, err := client.NewCancelAlgoOrderService().AlgoID(o.AlgoId).Do(ctx)
+		if err != nil {
+			fmt.Printf("    cancel ERROR: %v\n", err)
+		}
+	}
+
+	fmt.Println("\n--- variant Q: STOP_MARKET trigger ABOVE current mark — fires immediately for SELL ---")
+	// For SELL STOP_MARKET, Binance fires when mark price <= triggerPrice on a
+	// fall. But if triggerPrice > current mark already (e.g. trigger=$2050,
+	// mark=$1979), the condition "mark touched/crossed trigger from above" is
+	// already satisfied per most exchanges. Test it.
+	if r, err := client.NewCreateAlgoOrderService().
+		AlgoType(binance.OrderAlgoTypeConditional).
+		Symbol("ETHUSDT").Side(binance.SideTypeSell).Type(binance.AlgoOrderTypeStopMarket).
+		PositionSide(binance.PositionSideTypeLong).ClosePosition(true).
+		TriggerPrice("2050").
+		WorkingType(binance.WorkingTypeMarkPrice).
+		Do(ctx); err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Printf("  OK: id=%v\n", r.AlgoId)
+	}
+
+	fmt.Println("\n--- variant O: ALGO TAKE_PROFIT_MARKET — trigger above current, fires now ---")
+	// SELL TAKE_PROFIT_MARKET fires when price >= stopPrice. With stopPrice
+	// slightly above current (e.g. $2021 vs current ~$2020), any upward tick
+	// triggers immediate market close.
+	if r, err := client.NewCreateAlgoOrderService().
+		AlgoType(binance.OrderAlgoTypeConditional).
+		Symbol("ETHUSDT").Side(binance.SideTypeSell).Type(binance.AlgoOrderTypeTakeProfitMarket).
+		PositionSide(binance.PositionSideTypeLong).ClosePosition(true).
+		TriggerPrice("2021").
+		WorkingType(binance.WorkingTypeMarkPrice).
+		Do(ctx); err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Printf("  OK — order placed: %v\n", r)
+	}
+
+	fmt.Println("\n--- variant N: ALGO STOP_MARKET + closePosition=true (no posSide) ---")
+	if _, err := client.NewCreateAlgoOrderService().
+		AlgoType(binance.OrderAlgoTypeConditional).
+		Symbol("ETHUSDT").Side(binance.SideTypeSell).Type(binance.AlgoOrderTypeStopMarket).
+		ClosePosition(true).TriggerPrice("2010").
+		WorkingType(binance.WorkingTypeMarkPrice).
+		Do(ctx); err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Println("  OK — algo close placed (one-way style)")
 	}
 
 	fmt.Println("\n--- variant L: ChangePositionMode(false) — set to one-way ---")
