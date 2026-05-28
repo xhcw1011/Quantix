@@ -96,6 +96,14 @@ func main() {
 	}
 	fmt.Printf("After: dualSidePosition = %v\n", res2.DualSidePosition)
 
+	// 3b. Multi-Assets Margin mode
+	mam, err := client.NewGetMultiAssetModeService().Do(ctx)
+	if err != nil {
+		fmt.Printf("Multi-Assets Mode: ERROR %v\n", err)
+	} else {
+		fmt.Printf("Multi-Assets Mode (MAM): %v\n", mam.MultiAssetsMargin)
+	}
+
 	// 4. List actual positions on this endpoint
 	fmt.Println("\n--- Positions on this endpoint ---")
 	risk, err := client.NewGetPositionRiskService().Do(ctx)
@@ -155,6 +163,47 @@ func main() {
 		fmt.Println("  OK — closing tiny qty succeeded")
 	}
 
+	fmt.Println("\n--- Open orders on ETHUSDT ---")
+	openOrders, err := client.NewListOpenOrdersService().Symbol("ETHUSDT").Do(ctx)
+	if err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Printf("  %d open orders\n", len(openOrders))
+		for _, o := range openOrders {
+			fmt.Printf("    id=%d side=%s posSide=%s type=%s qty=%s price=%s reduceOnly=%v\n",
+				o.OrderID, o.Side, o.PositionSide, o.Type, o.OrigQuantity, o.Price, o.ReduceOnly)
+		}
+	}
+
+	fmt.Println("\n--- Account info ---")
+	acct, err := client.NewGetAccountService().Do(ctx)
+	if err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Printf("  canTrade=%v canDeposit=%v canWithdraw=%v feeTier=%v\n",
+			acct.CanTrade, acct.CanDeposit, acct.CanWithdraw, acct.FeeTier)
+		fmt.Printf("  totalWalletBalance=%v availableBalance=%v\n",
+			acct.TotalWalletBalance, acct.AvailableBalance)
+	}
+
+	fmt.Println("\n--- variant H: BUY posSide=SHORT qty=0.001 (close SHORT side) ---")
+	if _, err := client.NewCreateOrderService().
+		Symbol("ETHUSDT").Side(binance.SideTypeBuy).Type(binance.OrderTypeMarket).
+		PositionSide(binance.PositionSideTypeShort).Quantity("0.001").Do(ctx); err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Println("  OK")
+	}
+
+	fmt.Println("\n--- variant I: BUY posSide=LONG qty=0.012 (add to LONG) ---")
+	if _, err := client.NewCreateOrderService().
+		Symbol("ETHUSDT").Side(binance.SideTypeBuy).Type(binance.OrderTypeMarket).
+		PositionSide(binance.PositionSideTypeLong).Quantity("0.012").Do(ctx); err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Println("  OK")
+	}
+
 	fmt.Println("\n--- variant G: SELL no posSide qty=0.012 (above $20 notional) ---")
 	if _, err := client.NewCreateOrderService().
 		Symbol("ETHUSDT").Side(binance.SideTypeSell).Type(binance.OrderTypeMarket).
@@ -171,6 +220,37 @@ func main() {
 		fmt.Printf("  ERROR: %v\n", err)
 	} else {
 		fmt.Println("  OK — close worked without posSide")
+	}
+
+	fmt.Println("\n--- variant K: BUY no posSide qty=0.012 (one-way entry test) ---")
+	if r, err := client.NewCreateOrderService().
+		Symbol("ETHUSDT").Side(binance.SideTypeBuy).Type(binance.OrderTypeMarket).
+		Quantity("0.012").Do(ctx); err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Printf("  OK — orderID=%d. Cancelling not possible for market — already filled.\n", r.OrderID)
+	}
+
+	fmt.Println("\n--- variant J: Re-set hedge mode (toggle reset) ---")
+	if err := client.NewChangePositionModeService().DualSide(true).Do(ctx); err != nil {
+		fmt.Printf("  Reset ERROR: %v\n", err)
+	} else {
+		fmt.Println("  Reset OK — re-applied DualSide(true)")
+	}
+
+	fmt.Println("\n--- variant L: ChangePositionMode(false) — set to one-way ---")
+	if err := client.NewChangePositionModeService().DualSide(false).Do(ctx); err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Println("  OK — succeeded setting to one-way (means current was already one-way)")
+	}
+	fmt.Println("--- variant J2: retry SELL posSide=LONG qty=0.012 after reset ---")
+	if _, err := client.NewCreateOrderService().
+		Symbol("ETHUSDT").Side(binance.SideTypeSell).Type(binance.OrderTypeMarket).
+		PositionSide(binance.PositionSideTypeLong).Quantity("0.012").Do(ctx); err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+	} else {
+		fmt.Println("  OK")
 	}
 }
 
