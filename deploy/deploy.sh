@@ -4,10 +4,13 @@
 # rsyncs everything to remote, and runs bootstrap-server.sh over SSH.
 #
 # Usage:
-#   ./deploy/deploy.sh                    # full first-time deploy
+#   ./deploy/deploy.sh                    # safe re-deploy (preserves server data)
 #   ./deploy/deploy.sh --dry-run          # show what would happen, do nothing
-#   ./deploy/deploy.sh --skip-pg-redis    # only update binary + restart (PG/Redis already installed)
+#   ./deploy/deploy.sh --skip-pg-redis    # update binary/configs, skip PG/Redis install
 #   ./deploy/deploy.sh --binary-only      # just push binary, restart systemd; no DB ops
+#   ./deploy/deploy.sh --restore-data     # FORCE restore users/sessions from local dump
+#                                          (DESTRUCTIVE: overwrites server state — only use
+#                                          for fresh provisioning, never on a live server)
 #
 # Required env (with sensible defaults):
 #   SSH_HOST, SSH_USER, SSH_KEY, SSH_PORT
@@ -35,11 +38,13 @@ QUANTIX_TG_BOT_TOKEN="${QUANTIX_TG_BOT_TOKEN:-8641417837:AAF_x2ZxndpqPY4y9XHFF4J
 DRY_RUN=false
 SKIP_PG_REDIS=false
 BINARY_ONLY=false
+RESTORE_DATA=false
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
     --skip-pg-redis) SKIP_PG_REDIS=true ;;
     --binary-only) BINARY_ONLY=true ;;
+    --restore-data) RESTORE_DATA=true ;;
     *) echo "Unknown flag: $arg" ; exit 1 ;;
   esac
 done
@@ -235,12 +240,13 @@ fi
 
 # ─── 8. Run bootstrap on remote ──────────────────────────────────────────────
 step "Run bootstrap-server.sh on remote"
-SKIP_FLAG=""
-$SKIP_PG_REDIS && SKIP_FLAG="--skip-pg-redis"
+FLAGS=""
+$SKIP_PG_REDIS && FLAGS="$FLAGS --skip-pg-redis"
+$RESTORE_DATA && FLAGS="$FLAGS --restore-data"
 ssh_run "chmod +x $REMOTE_DIR/bootstrap-server.sh && \
          sudo QUANTIX_DB_PASSWORD='$QUANTIX_DB_PASSWORD' \
               QUANTIX_TG_BOT_TOKEN='$QUANTIX_TG_BOT_TOKEN' \
-              $REMOTE_DIR/bootstrap-server.sh $SKIP_FLAG"
+              $REMOTE_DIR/bootstrap-server.sh $FLAGS"
 
 # ─── 9. Final health check ───────────────────────────────────────────────────
 step "Wait for service and verify"

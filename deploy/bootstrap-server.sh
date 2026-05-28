@@ -11,9 +11,11 @@ REMOTE_DIR="/tmp/quantix-deploy"
 INSTALL_DIR="/opt/quantix"
 SERVICE_USER="${SUDO_USER:-ubuntu}"
 SKIP_PG_REDIS=false
+RESTORE_DATA=false   # only restore on first bootstrap or with explicit --restore-data
 
 for arg in "$@"; do
   [ "$arg" = "--skip-pg-redis" ] && SKIP_PG_REDIS=true
+  [ "$arg" = "--restore-data" ] && RESTORE_DATA=true
 done
 
 step() { printf "\n\033[1;36m── %s ──\033[0m\n" "$*"; }
@@ -132,20 +134,32 @@ GRANT USAGE, CREATE ON SCHEMA public TO quantix;
 SQL
 ok "Reassigned table/sequence ownership to quantix"
 
-# ─── 6. Restore data dump (option c) ─────────────────────────────────────────
+# ─── 6. Restore data dump (first bootstrap only, or with --restore-data) ────
 step "Restore users + credentials + sessions"
-if [ -s "$REMOTE_DIR/data-export.sql" ]; then
-  # Truncate-then-restore so re-runs are idempotent
-  sudo -u postgres psql -d quantix <<SQL >/dev/null
+# Auto-detect first bootstrap: empty users table → safe to restore from local dump.
+# Production deploys must NOT truncate-and-replace the server's live state
+# (sessions written on-server include APIKey injection etc that local dump lacks).
+EXISTING_USERS=$(sudo -u postgres psql -d quantix -tAc "SELECT count(*) FROM users" 2>/dev/null || echo 0)
+if [ "$EXISTING_USERS" -eq 0 ]; then
+  RESTORE_DATA=true
+  warn "users table empty — first install, will restore from dump"
+fi
+
+if $RESTORE_DATA; then
+  if [ -s "$REMOTE_DIR/data-export.sql" ]; then
+    sudo -u postgres psql -d quantix <<SQL >/dev/null
 TRUNCATE engine_sessions, exchange_credentials, users RESTART IDENTITY CASCADE;
 SQL
-  sudo -u postgres psql -d quantix < "$REMOTE_DIR/data-export.sql" >/dev/null
-  uc=$(sudo -u postgres psql -d quantix -tAc "SELECT count(*) FROM users")
-  cc=$(sudo -u postgres psql -d quantix -tAc "SELECT count(*) FROM exchange_credentials")
-  sc=$(sudo -u postgres psql -d quantix -tAc "SELECT count(*) FROM engine_sessions")
-  ok "Restored: $uc users, $cc credentials, $sc sessions"
+    sudo -u postgres psql -d quantix < "$REMOTE_DIR/data-export.sql" >/dev/null
+    uc=$(sudo -u postgres psql -d quantix -tAc "SELECT count(*) FROM users")
+    cc=$(sudo -u postgres psql -d quantix -tAc "SELECT count(*) FROM exchange_credentials")
+    sc=$(sudo -u postgres psql -d quantix -tAc "SELECT count(*) FROM engine_sessions")
+    ok "Restored: $uc users, $cc credentials, $sc sessions"
+  else
+    warn "No data-export.sql found — fresh DB, no users restored"
+  fi
 else
-  warn "No data-export.sql found — fresh DB, no users restored"
+  ok "Skipped restore — preserving server's live data ($EXISTING_USERS users present). Use --restore-data to override."
 fi
 
 # Also re-write the TG token if provided (in case local DB didn't have it yet)
