@@ -323,6 +323,15 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 	// Recover LONG — only if bot opened it (has strategy state in Redis: R > 0 or Mode set).
 	// Manual positions (opened via exchange UI) have no strategy state → skip them.
 	if lp := s.syncer.GetLong(); lp != nil && lp.Qty > 0 {
+		// Skip dust positions (< $50 notional). These are residue from manual
+		// edits / cleanup attempts, not real strategy state. Adopting them
+		// would lock the LONG slot and prevent new entries.
+		if lp.EntryPrice > 0 && lp.Qty*lp.EntryPrice < 50 {
+			s.log.Info("AI: skipping LONG recovery — dust position below $50 notional",
+				zap.Float64("entry", lp.EntryPrice), zap.Float64("qty", lp.Qty),
+				zap.Float64("notional", lp.Qty*lp.EntryPrice))
+			goto recoverShort
+		}
 		if lp.R == 0 && lp.Mode == "" {
 			s.log.Info("AI: skipping LONG recovery — manual position (no strategy state)",
 				zap.Float64("entry", lp.EntryPrice), zap.Float64("qty", lp.Qty))
@@ -384,6 +393,12 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 recoverShort:
 	// Recover SHORT — only if bot opened it.
 	if sp := s.syncer.GetShort(); sp != nil && sp.Qty > 0 {
+		if sp.EntryPrice > 0 && sp.Qty*sp.EntryPrice < 50 {
+			s.log.Info("AI: skipping SHORT recovery — dust position below $50 notional",
+				zap.Float64("entry", sp.EntryPrice), zap.Float64("qty", sp.Qty),
+				zap.Float64("notional", sp.Qty*sp.EntryPrice))
+			return
+		}
 		if sp.R == 0 && sp.Mode == "" {
 			s.log.Info("AI: skipping SHORT recovery — manual position (no strategy state)",
 				zap.Float64("entry", sp.EntryPrice), zap.Float64("qty", sp.Qty))
