@@ -20,7 +20,11 @@ import (
 
 const (
 	restBase = "https://www.okx.com"
-	wsBase   = "wss://ws.okx.com:8443/ws/v5/public"
+	// wsPublicBase: tickers, books, mark-price, funding-rate (public market data)
+	wsPublicBase = "wss://ws.okx.com:8443/ws/v5/public"
+	// wsBusinessBase: candle (kline) channels were moved to /business in 2025.
+	// Subscribing candle on /public now returns code 60018 "channel doesn't exist".
+	wsBusinessBase = "wss://ws.okx.com:8443/ws/v5/business"
 )
 
 // intervalMap converts Quantix interval strings to OKX bar strings.
@@ -254,7 +258,7 @@ func (w *WSClient) SubscribeTickers(ctx context.Context, symbols []string, handl
 }
 
 func (w *WSClient) runKlineWS(ctx context.Context, symbols, intervals []string, handler exchange.KlineHandler) error {
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsBase, nil)
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsBusinessBase, nil)
 	if err != nil {
 		return err
 	}
@@ -340,7 +344,7 @@ func (w *WSClient) runKlineWS(ctx context.Context, symbols, intervals []string, 
 }
 
 func (w *WSClient) runTickerWS(ctx context.Context, symbols []string, handler exchange.TickerHandler) error {
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsBase, nil)
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsPublicBase, nil)
 	if err != nil {
 		return err
 	}
