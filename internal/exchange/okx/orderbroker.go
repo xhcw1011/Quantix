@@ -610,6 +610,12 @@ func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side e
 		return "", fmt.Errorf("OKX limit order: %w", err)
 	}
 	if resp.Code != "0" {
+		// Same envelope-vs-per-order issue as market order: real reason
+		// is in data[0].sMsg with a specific sCode.
+		if len(resp.Data) > 0 {
+			return "", fmt.Errorf("OKX limit order rejected: code=%s sCode=%s sMsg=%s (top: %s)",
+				resp.Code, resp.Data[0].SCode, resp.Data[0].SMsg, resp.Msg)
+		}
 		return "", fmt.Errorf("OKX limit order API error %s: %s", resp.Code, resp.Msg)
 	}
 	if len(resp.Data) == 0 || resp.Data[0].SCode != "0" {
