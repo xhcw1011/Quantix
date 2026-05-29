@@ -159,6 +159,14 @@ func (b *OrderBroker) PlaceMarketOrder(ctx context.Context, symbol string, side 
 		return exchange.OrderFill{}, fmt.Errorf("OKX place order: %w", err)
 	}
 	if placeResp.Code != "0" {
+		// OKX returns top-level error "1: All operations failed" when per-order
+		// rejections exist. The real reject reason is in data[0].sMsg with
+		// a more specific sCode (e.g., 51008 insufficient margin, 51000 missing
+		// param). Surface it so the operator can diagnose without guessing.
+		if len(placeResp.Data) > 0 {
+			return exchange.OrderFill{}, fmt.Errorf("OKX place order rejected: code=%s sCode=%s sMsg=%s (top: %s)",
+				placeResp.Code, placeResp.Data[0].SCode, placeResp.Data[0].SMsg, placeResp.Msg)
+		}
 		return exchange.OrderFill{}, fmt.Errorf("OKX place order API error %s: %s", placeResp.Code, placeResp.Msg)
 	}
 	if len(placeResp.Data) == 0 {
