@@ -402,7 +402,32 @@ func (w *WSClient) readLoop(ctx context.Context, conn *websocket.Conn, handle fu
 	var (
 		mu      sync.Mutex
 		readErr error
+		writeMu sync.Mutex // serialize writes between ping + close
 	)
+
+	// OKX kills the connection with "close 4004: No data received in 30s" if
+	// the client doesn't send anything in 30s. Their public spec says to send
+	// a text frame "ping" and the server replies "pong". Do that every 20s.
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				writeMu.Lock()
+				err := conn.WriteMessage(websocket.TextMessage, []byte("ping"))
+				writeMu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
 	go func() {
 		defer close(done)
 		for {
@@ -413,12 +438,18 @@ func (w *WSClient) readLoop(ctx context.Context, conn *websocket.Conn, handle fu
 				mu.Unlock()
 				return
 			}
+			// Server replies "pong" to our heartbeat — drop it, don't dispatch.
+			if len(data) == 4 && string(data) == "pong" {
+				continue
+			}
 			handle(data)
 		}
 	}()
 	select {
 	case <-ctx.Done():
+		writeMu.Lock()
 		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		writeMu.Unlock()
 		return nil
 	case <-done:
 		mu.Lock()
