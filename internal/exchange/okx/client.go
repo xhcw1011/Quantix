@@ -34,6 +34,39 @@ var intervalMap = map[string]string{
 	"1d": "1D", "1w": "1W",
 }
 
+// intervalDuration converts a Quantix interval string to its time.Duration.
+// Used to derive a kline's CloseTime from its OpenTime — OKX delivers the
+// bar's start timestamp only.
+func intervalDuration(interval string) time.Duration {
+	switch interval {
+	case "1m":
+		return time.Minute
+	case "3m":
+		return 3 * time.Minute
+	case "5m":
+		return 5 * time.Minute
+	case "15m":
+		return 15 * time.Minute
+	case "30m":
+		return 30 * time.Minute
+	case "1h":
+		return time.Hour
+	case "2h":
+		return 2 * time.Hour
+	case "4h":
+		return 4 * time.Hour
+	case "6h":
+		return 6 * time.Hour
+	case "12h":
+		return 12 * time.Hour
+	case "1d":
+		return 24 * time.Hour
+	case "1w":
+		return 7 * 24 * time.Hour
+	}
+	return 0
+}
+
 // toOKXSymbol converts Binance-style symbol (BTCUSDT) to OKX format (BTC-USDT).
 func toOKXSymbol(symbol string) string {
 	if strings.HasSuffix(symbol, "USDT") {
@@ -180,7 +213,7 @@ func (c *RESTClient) fetchCandles(ctx context.Context, url, symbol, interval str
 			Symbol:      symbol,
 			Interval:    interval,
 			OpenTime:    openTime,
-			CloseTime:   openTime,
+			CloseTime:   openTime.Add(intervalDuration(interval)),
 			Open:        open,
 			High:        high,
 			Low:         low,
@@ -326,11 +359,12 @@ func (w *WSClient) runKlineWS(ctx context.Context, symbols, intervals []string, 
 			if len(row) >= 8 {
 				qvol, _ = strconv.ParseFloat(row[7], 64)
 			}
+			openTime := time.UnixMilli(ts)
 			handler(exchange.Kline{
 				Symbol:      origSym,
 				Interval:    origItv,
-				OpenTime:    time.UnixMilli(ts),
-				CloseTime:   time.UnixMilli(ts),
+				OpenTime:    openTime,
+				CloseTime:   openTime.Add(intervalDuration(origItv)),
 				Open:        open,
 				High:        high,
 				Low:         low,
