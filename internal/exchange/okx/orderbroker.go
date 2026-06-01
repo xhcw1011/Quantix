@@ -37,6 +37,14 @@ type OrderBroker struct {
 	marketType string // "swap" or "spot"
 	ctValCache sync.Map // instId → float64 (lazy-loaded contract size)
 	log        *zap.Logger
+
+	// Account position mode resolved from /api/v5/account/config at startup.
+	// Values seen in the wild: "long_short_mode" or "net_mode". Drives whether
+	// SWAP orders include posSide=long/short or posSide=net. Demo accounts have
+	// occasionally returned long_short_mode but rejected long/short orders with
+	// sCode 51000 "Parameter posSide error" — when that happens at runtime, the
+	// broker falls back to "net" for the next attempts.
+	accountPosMode string
 }
 
 // NewOrderBroker creates an OKX OrderBroker.
@@ -81,8 +89,56 @@ func NewOrderBroker(apiKey, apiSecret, passphrase string, demo bool, marketType 
 		return nil, fmt.Errorf("OKX API connectivity check failed: %w", err)
 	}
 
+	// Resolve account position mode so SWAP orders use the right posSide.
+	// Non-fatal: a failure here just defaults to passing through whatever the
+	// caller supplies (legacy behavior).
+	if marketType == "swap" {
+		if pm, err := b.fetchAccountPosMode(ctx); err != nil {
+			log.Warn("OKX broker: posMode fetch failed, will pass posSide through",
+				zap.Error(err))
+		} else {
+			b.accountPosMode = pm
+			log.Info("OKX broker: account position mode resolved",
+				zap.String("posMode", pm))
+		}
+	}
+
 	log.Info("OKX order broker ready")
 	return b, nil
+}
+
+// fetchAccountPosMode queries /api/v5/account/config and returns the posMode
+// field ("long_short_mode" / "net_mode").
+func (b *OrderBroker) fetchAccountPosMode(ctx context.Context) (string, error) {
+	var resp struct {
+		Code string `json:"code"`
+		Msg  string `json:"msg"`
+		Data []struct {
+			PosMode string `json:"posMode"`
+		} `json:"data"`
+	}
+	if err := b.get(ctx, "/api/v5/account/config", &resp); err != nil {
+		return "", err
+	}
+	if resp.Code != "0" || len(resp.Data) == 0 {
+		return "", fmt.Errorf("OKX account/config: code=%s msg=%s", resp.Code, resp.Msg)
+	}
+	return resp.Data[0].PosMode, nil
+}
+
+// resolvePosSide picks the actual posSide field value to send. When the account
+// is in net mode, OKX requires posSide="net" (or omitted); long/short are
+// rejected with 51000. When in long_short_mode, OKX requires long/short.
+// If we have not resolved the mode yet, fall through to the caller's value.
+func (b *OrderBroker) resolvePosSide(callerSide string) string {
+	switch b.accountPosMode {
+	case "net_mode":
+		return "" // OKX accepts omitted or explicit "net"; omitting is safest
+	case "long_short_mode":
+		return strings.ToLower(callerSide)
+	default:
+		return strings.ToLower(callerSide)
+	}
 }
 
 // PlaceMarketOrder submits a market order. For SWAP, qty is in base-asset units (BTC);
@@ -141,8 +197,8 @@ func (b *OrderBroker) PlaceMarketOrder(ctx context.Context, symbol string, side 
 		Sz:      sz,
 		ClOrdId: clientOrderID,
 	}
-	if positionSide != "" {
-		reqBody.PosSide = strings.ToLower(positionSide)
+	if ps := b.resolvePosSide(positionSide); ps != "" {
+		reqBody.PosSide = ps
 	}
 
 	var placeResp struct {
@@ -592,8 +648,8 @@ func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side e
 		Px:      fmt.Sprintf("%.8f", price),
 		ClOrdId: clientOrderID,
 	}
-	if positionSide != "" {
-		req.PosSide = strings.ToLower(positionSide)
+	if ps := b.resolvePosSide(positionSide); ps != "" {
+		req.PosSide = ps
 	}
 
 	var resp struct {
@@ -687,8 +743,8 @@ func (b *OrderBroker) PlaceReduceOnlyLimitOrder(ctx context.Context, symbol stri
 		ClOrdId:    clientOrderID,
 		ReduceOnly: "true",
 	}
-	if positionSide != "" {
-		req.PosSide = strings.ToLower(positionSide)
+	if ps := b.resolvePosSide(positionSide); ps != "" {
+		req.PosSide = ps
 	}
 
 	var resp struct {
@@ -780,8 +836,8 @@ func (b *OrderBroker) PlaceStopMarketOrder(ctx context.Context, symbol string, s
 		SlTriggerPxType: "last",
 		AlgoClOrdId:     clientOrderID,
 	}
-	if positionSide != "" {
-		req.PosSide = strings.ToLower(positionSide)
+	if ps := b.resolvePosSide(positionSide); ps != "" {
+		req.PosSide = ps
 	}
 
 	var resp struct {
@@ -871,8 +927,8 @@ func (b *OrderBroker) PlaceTakeProfitMarketOrder(ctx context.Context, symbol str
 		TpTriggerPxType: "last",
 		AlgoClOrdId:     clientOrderID,
 	}
-	if positionSide != "" {
-		req.PosSide = strings.ToLower(positionSide)
+	if ps := b.resolvePosSide(positionSide); ps != "" {
+		req.PosSide = ps
 	}
 
 	var resp struct {
