@@ -412,6 +412,7 @@ func DefaultConfig() Config {
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
 		GridMaxLayers: 4, GridSpacingPct: 0.01, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0,
+		GridStaleBars: 576, GridStalePnlR: -1.5, // 48h @ 5m bars × pnlR < -1.5R → 强制释放槽位
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────
