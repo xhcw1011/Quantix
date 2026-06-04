@@ -1029,6 +1029,13 @@ func (b *OrderBroker) CancelAlgoOrder(ctx context.Context, symbol, algoID string
 // GetMarginRatios implements exchange.MarginQuerier.
 // Queries GET /api/v5/account/positions and returns maintenance margin ratios
 // for all open positions. Positions with zero size are skipped.
+//
+// For SWAP instruments, OKX returns `pos` in contracts; we convert to
+// base-asset units (ETH/BTC) using ctVal so the rest of the engine — which
+// thinks in base units everywhere — gets a consistent qty. Without this,
+// downstream PositionSyncer / PositionManager seed sizes that are 1/ctVal
+// (10× for ETH-USDT-SWAP), and any subsequent close fill leaves a phantom
+// 9/10 of the position behind, generating fake unrealized PnL.
 func (b *OrderBroker) GetMarginRatios(ctx context.Context) ([]exchange.PositionMarginInfo, error) {
 	var resp struct {
 		Code string `json:"code"`
@@ -1066,6 +1073,17 @@ func (b *OrderBroker) GetMarginRatios(ctx context.Context) ([]exchange.PositionM
 			continue
 		}
 
+		size := math.Abs(pos)
+		if b.marketType == "swap" {
+			ctVal, ctErr := b.fetchCtVal(ctx, d.InstID)
+			if ctErr != nil {
+				b.log.Warn("GetMarginRatios: fetch ctVal failed, skipping position to avoid wrong-unit qty leaking downstream",
+					zap.String("inst_id", d.InstID), zap.Error(ctErr))
+				continue
+			}
+			size *= ctVal
+		}
+
 		posSide := strings.ToUpper(d.PosSide) // "LONG", "SHORT", "NET"
 		if posSide == "NET" {
 			posSide = ""
@@ -1079,7 +1097,7 @@ func (b *OrderBroker) GetMarginRatios(ctx context.Context) ([]exchange.PositionM
 			Symbol:       symbol,
 			PositionSide: posSide,
 			MarginRatio:  ratio,
-			Size:         math.Abs(pos),
+			Size:         size,
 		})
 	}
 	return result, nil
