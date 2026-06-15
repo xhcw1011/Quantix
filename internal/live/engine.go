@@ -359,6 +359,53 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 		}
 	}()
 
+	// Periodic real-equity poll — feeds the circuit breaker exchange truth even
+	// for exchanges with NO push account stream (e.g. OKX). Also a REST backstop
+	// for Binance if its WS account stream stalls. Without this, cachedEq stays 0
+	// for OKX and equity falls back to reconstructed cash, which drifts and
+	// mis-fires the circuit breaker (the real-money risk #1).
+	if e.equityQuerier != nil {
+		pollEquity := func() {
+			qCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			eq, err := e.equityQuerier.GetEquity(qCtx, "USDT")
+			cancel()
+			if err != nil {
+				e.log.Warn("equity poll failed (keeping last cached value)", zap.Error(err))
+				return
+			}
+			if eq <= 0 {
+				return
+			}
+			// Sanity guard: never feed the circuit breaker an implausible equity.
+			// walletBalance is reconstructed but roughly real; a value >5x it is
+			// garbage (e.g. an exchange field summing all currencies) and would
+			// blow up the breaker. Reject and keep the last good cached value.
+			if wb := e.broker.WalletBalance(); wb > 0 && eq > wb*5 {
+				e.log.Warn("equity poll: implausible value, ignoring",
+					zap.Float64("polled_equity", eq), zap.Float64("wallet_balance", wb))
+				return
+			}
+			e.cachedEquityBits.Store(math.Float64bits(eq))
+			e.lastEquityQuery = time.Now()
+		}
+		// Synchronous first poll so cachedEq holds REAL exchange equity before the
+		// main bar/status loop runs — otherwise the first ticks fall back to
+		// cash+local-uPnL (the broken path) and momentarily feed the breaker garbage.
+		pollEquity()
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					pollEquity()
+				}
+			}
+		}()
+	}
+
 	// Start User Data Stream for real-time fill + account + position updates.
 	if uds, ok := e.broker.orderClient.(exchange.UserDataSubscriber); ok {
 		e.log.Info("user data stream: starting subscription")

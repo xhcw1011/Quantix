@@ -446,6 +446,48 @@ func (b *OrderBroker) GetBalance(ctx context.Context, asset string) (float64, er
 	return 0, fmt.Errorf("asset %s not found in OKX account", asset)
 }
 
+// Compile-time guarantee that OKX satisfies EquityQuerier, so the live engine
+// wires its periodic equity poll (feeding the circuit breaker REAL equity).
+var _ exchange.EquityQuerier = (*OrderBroker)(nil)
+
+// GetEquity returns the equity of the margin asset (e.g. USDT) in USD, incl
+// unrealized PnL, from /account/balance details[ccy].eq. Implements
+// exchange.EquityQuerier so the engine's circuit breaker is fed real equity
+// instead of reconstructed cash.
+//
+// NOTE: use the per-currency details[].eq, NOT the account-wide totalEq —
+// totalEq sums the USD value of ALL currencies, and demo accounts are seeded
+// with large balances of other coins, which would massively inflate it (we
+// once read totalEq=453k for a ~$7k USDT trading account).
+func (b *OrderBroker) GetEquity(ctx context.Context, asset string) (float64, error) {
+	var resp struct {
+		Code string `json:"code"`
+		Msg  string `json:"msg"`
+		Data []struct {
+			Details []struct {
+				Ccy string `json:"ccy"`
+				Eq  string `json:"eq"`
+			} `json:"details"`
+		} `json:"data"`
+	}
+	if err := b.get(ctx, "/api/v5/account/balance", &resp); err != nil {
+		return 0, fmt.Errorf("OKX get equity: %w", err)
+	}
+	if resp.Code != "0" || len(resp.Data) == 0 {
+		return 0, fmt.Errorf("OKX equity API error %s: %s", resp.Code, resp.Msg)
+	}
+	for _, d := range resp.Data[0].Details {
+		if d.Ccy == asset {
+			eq, err := strconv.ParseFloat(d.Eq, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parse %s eq %q: %w", asset, d.Eq, err)
+			}
+			return eq, nil
+		}
+	}
+	return 0, fmt.Errorf("OKX equity: asset %s not found in account details", asset)
+}
+
 // fetchCtVal lazily fetches and caches the contract value (ctVal) for a SWAP instrument.
 // ctVal is the number of base-asset units per contract (e.g. 0.01 BTC for BTC-USDT-SWAP).
 func (b *OrderBroker) fetchCtVal(ctx context.Context, instID string) (float64, error) {
