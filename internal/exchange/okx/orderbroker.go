@@ -616,7 +616,11 @@ func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side e
 		}
 		contracts := math.Floor(qty / ctVal)
 		if contracts < 1 {
-			return "", fmt.Errorf("qty %.8f too small for 1 contract (ctVal=%.8f)", qty, ctVal)
+			if qty > 0 {
+				contracts = 1 // bump sub-minimum order up to exchange min (1 contract) instead of rejecting
+			} else {
+				return "", fmt.Errorf("qty %.8f too small for 1 contract (ctVal=%.8f)", qty, ctVal)
+			}
 		}
 		sz = strconv.FormatInt(int64(contracts), 10)
 	} else {
@@ -709,7 +713,11 @@ func (b *OrderBroker) PlaceReduceOnlyLimitOrder(ctx context.Context, symbol stri
 		}
 		contracts := math.Floor(qty / ctVal)
 		if contracts < 1 {
-			return "", fmt.Errorf("qty %.8f too small for 1 contract (ctVal=%.8f)", qty, ctVal)
+			if qty > 0 {
+				contracts = 1 // bump sub-minimum order up to exchange min (1 contract) instead of rejecting
+			} else {
+				return "", fmt.Errorf("qty %.8f too small for 1 contract (ctVal=%.8f)", qty, ctVal)
+			}
 		}
 		sz = strconv.FormatInt(int64(contracts), 10)
 	} else {

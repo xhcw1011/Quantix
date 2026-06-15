@@ -38,6 +38,7 @@ func init() {
 		if v, ok := params["GridMaxLayers"]; ok { cfg.GridMaxLayers = toInt(v) }
 		if v, ok := params["GridStaleBars"]; ok { cfg.GridStaleBars = toInt(v) }
 		if v, ok := params["GridStalePnlR"]; ok { cfg.GridStalePnlR = toFloat(v) }
+		if v, ok := params["CatastrophicStopR"]; ok { cfg.CatastrophicStopR = toFloat(v) }
 		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
@@ -155,8 +156,8 @@ func init() {
 	// config without filling 30+ knobs. Selecting a preset just sets `params`
 	// — they're free to tweak before clicking Start.
 	registry.RegisterPreset("ai", registry.Preset{
-		Name:        "Default (hedge both)",
-		Description: "1671323-era stable config. HedgeMode + HedgeOnDrawdown both on. Recommended for ETHUSDT live.",
+		Name:        "Default (de-risked)",
+		Description: "Bounded-loss mean-reversion: hard -3R catastrophic stop on ALL positions, grid adds pyramid-only (winning side, no martingale), no drawdown-hedge. Recommended for ETHUSDT live.",
 		Params:      map[string]any{}, // empty = use DefaultConfig() as-is
 	})
 	registry.RegisterPreset("ai", registry.Preset{
@@ -243,6 +244,12 @@ type Config struct {
 	GridMaxTPDist  float64 // max TP distance in $ — caps TP when BB is wide (default 8.0)
 	GridStaleBars  int     // staleness exit: force-close if barsHeld > this (default 0 = disabled)
 	GridStalePnlR  float64 // staleness exit: only fire when pnlR < this (default 0 = disabled)
+	// CatastrophicStopR is a HARD stop that applies to ALL modes including
+	// range/grid/hedge (which otherwise have no SL and "ride the range"). When a
+	// position's pnlR drops to this level the position is market-closed, capping
+	// any single loss instead of riding to -15~20R until the staleness timer.
+	// Negative to enable (e.g. -3.0); 0 = disabled.
+	CatastrophicStopR float64
 
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
@@ -411,13 +418,14 @@ func DefaultConfig() Config {
 		RangeBEPct: 0.003, RangeLockPct: 0.006, RangeLockOffset: 0.003,
 		RangeTrailPct: 0.004, RangeTrailDist: 0.003,
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
-		GridMaxLayers: 4, GridSpacingPct: 0.01, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0,
+		GridMaxLayers: 3, GridSpacingPct: 0.01, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0, // layers add PYRAMID-only (winning side, see manageGrid) — never average into losers
 		GridStaleBars: 576, GridStalePnlR: -1.5, // 48h @ 5m bars × pnlR < -1.5R → 强制释放槽位
+		CatastrophicStopR: -3.0, // hard stop for ALL modes — cap any single position loss at ~3R
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────
 		MaxDailyLossPct: 0.10, MaxConsecLoss: 3,
-		HedgeMode: true, HedgeOnDrawdown: true, HedgeDrawdownPct: 0.005,
+		HedgeMode: true, HedgeOnDrawdown: false, HedgeDrawdownPct: 0.005, // HedgeOnDrawdown off: cut losers, don't hedge-martingale them
 		HedgeCooldown: 15 * time.Minute, HedgeQtyRatio: 0.3, HedgeTPRatio: 0.5,
 	}
 }

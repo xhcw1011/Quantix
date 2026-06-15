@@ -39,6 +39,34 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price }
 	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price }
 
+	// ── Catastrophic stop (ALL modes incl range/grid/hedge) ──
+	// Range/grid/hedge positions have no normal SL (they ride the range), but must
+	// still be cut when price blows far past the range into a sustained trend.
+	// Caps any single position's loss near CatastrophicStopR instead of riding to
+	// -15~20R until the staleness timer dumps it. Negative cfg value enables it.
+	if p.filled && p.R > 0 && s.cfg.CatastrophicStopR < 0 {
+		catPnlR := 0.0
+		if p.side == "LONG" {
+			catPnlR = (price - p.entryPrice) / p.R
+		} else {
+			catPnlR = (p.entryPrice - price) / p.R
+		}
+		if catPnlR <= s.cfg.CatastrophicStopR {
+			s.log.Warn("CATASTROPHIC STOP — cutting position to cap loss",
+				zap.String("side", p.side), zap.Int("mode", int(p.mode)),
+				zap.Float64("price", price), zap.Float64("entry", p.entryPrice),
+				zap.Float64("pnl_r", catPnlR), zap.Float64("limit_r", s.cfg.CatastrophicStopR))
+			closedSide := p.side
+			s.closePos(ctx, p, pptr, "catastrophic_stop")
+			s.consecLoss++
+			s.stopBar = s.barCount
+			s.postSLReeval = true
+			s.postSLSide = closedSide
+			s.postSLPrice = price
+			return
+		}
+	}
+
 	// ── Stop-loss (trend only — grid positions have no SL, ride the range) ──
 	if p.mode != modeRange {
 		if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
@@ -188,14 +216,17 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	shouldAdd := false
 	var gridEntry, gridTP float64
 
-	if p.side == "LONG" && price <= refPrice-spacing {
+	// Pyramid (add only on the WINNING side) — never average into a loser.
+	// LONG: add when price has risen a step ABOVE the last entry (thesis confirming).
+	// SHORT: add when price has fallen a step BELOW the last entry.
+	if p.side == "LONG" && price >= refPrice+spacing {
 		gridEntry = math.Round(price*100) / 100
 		// Grid layer TP: base position's TP (BB middle), not fixed percentage
 		gridTP = p.takeProfit
 		if gridTP <= gridEntry { gridTP = math.Round((gridEntry+spacing)*100) / 100 }
 		shouldAdd = true
 	}
-	if p.side == "SHORT" && price >= refPrice+spacing {
+	if p.side == "SHORT" && price <= refPrice-spacing {
 		gridEntry = math.Round(price*100) / 100
 		gridTP = p.takeProfit
 		if gridTP >= gridEntry { gridTP = math.Round((gridEntry-spacing)*100) / 100 }

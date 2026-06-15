@@ -216,6 +216,10 @@ func (e *Engine) SyncBalance(ctx context.Context, baseCurrency string) error {
 func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	e.startTime = time.Now()
 	e.lastBarTime = time.Now()
+	// Self-cancelable context so the watchdog can stop THIS engine only, instead
+	// of os.Exit(1) killing the whole process (and every other healthy engine).
+	ctx, selfCancel := context.WithCancel(ctx)
+	defer selfCancel()
 	// Capture starting equity as baseline for the first daily summary's % return.
 	e.fillMu.Lock()
 	e.dailyBaselineEquity = e.broker.Equity()
@@ -339,9 +343,17 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			case <-ticker.C:
 				elapsed := time.Since(e.lastBarTime)
 				if elapsed > 10*time.Minute {
-					e.log.Error("WATCHDOG: engine loop appears frozen — no bar activity for 10+ min, forcing exit",
+					e.log.Error("WATCHDOG: no bar activity for 10+ min — stopping THIS engine only (feed likely dead); process + other engines keep running",
+						zap.String("engine_id", e.cfg.StrategyID),
+						zap.Int("user_id", e.cfg.UserID),
 						zap.Duration("since_last_bar", elapsed))
-					os.Exit(1) // hard exit — systemd/auto-restart will bring it back
+					if e.notifier != nil {
+						e.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
+							"engine %s (user %d) stopped: no market data for %s — restart it once the feed is healthy",
+							e.cfg.StrategyID, e.cfg.UserID, elapsed.Truncate(time.Second)))
+					}
+					selfCancel() // stop only this engine, not the whole process
+					return
 				}
 			}
 		}
