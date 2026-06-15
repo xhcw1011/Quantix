@@ -665,6 +665,7 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
 
 	if price > bbLower*1.005 { return 0, 0 }
+	if price >= bbMiddle { return 0, 0 } // lower-half only — kills the long-bias tie vs the sell signal in a BB squeeze
 
 	// Base confidence: 0.76 ensures entry when price touches BB band (RangeEntryConf=0.75).
 	// Bonuses from RSI and BB penetration push conf higher for stronger signals.
@@ -703,6 +704,7 @@ func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
 
 	if price < bbUpper*0.995 { return 0, 0 }
+	if price <= bbMiddle { return 0, 0 } // upper-half only — kills the long-bias tie vs the buy signal in a BB squeeze
 
 	conf = 0.76
 	if price > bbUpper { conf += 0.05 }

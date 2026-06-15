@@ -341,7 +341,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		// ─── 基础 ──────────────────────────────────────────────────────
-		Symbol: "ETHUSDT", Model: "gpt-5.4-mini",
+		Symbol: "ETHUSDT", Model: "tech-rev+brk", // GPT was removed (signal.go:273); name no longer claims an LLM
 		Leverage: 10, EnableShort: true, ForceTrend: false,
 
 		// ─── 核心风险参数（最常调整）─────────────────────────────────
