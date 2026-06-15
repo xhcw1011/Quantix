@@ -54,7 +54,21 @@ type Broker struct {
 	// so that stop-loss and take-profit orders can be cancelled when the position is closed.
 	protMu           sync.Mutex
 	protectiveOrders map[string]protectiveIDs
+
+	// Hard gross-exposure guard. The live order path has NO risk.Check (that is
+	// paper-only), so without this an opening order can run exposure away when the
+	// strategy's internal position view desyncs from the exchange (the 31-ETH-on-
+	// $3.6k case). grossQtyFn returns the EXCHANGE-truth gross qty (long+short)
+	// from the position syncer; an opening order is blocked when projected gross
+	// notional would exceed equity × maxLeverage × maxGrossFrac. nil = guard off.
+	grossQtyFn   func() float64
+	maxLeverage  int
+	maxGrossFrac float64
 }
+
+// defaultMaxGrossExposureFrac caps real gross notional at 80% of full-leverage
+// notional (equity × leverage), leaving 20% margin headroom.
+const defaultMaxGrossExposureFrac = 0.8
 
 // brokerPosKey returns the map key for protective orders.
 func brokerPosKey(symbol, positionSide string) string {
@@ -90,6 +104,38 @@ func (b *Broker) SetEngineCtx(ctx context.Context) { b.engineCtx = ctx }
 
 // SetLastPrice records the most recent market price.
 func (b *Broker) SetLastPrice(price float64) { b.lastPrice.Store(price) }
+
+// SetExposureGuard wires the hard gross-exposure cap. grossQty returns the REAL
+// exchange gross position qty (long+short, from the position syncer); leverage
+// and frac define the cap (gross notional ≤ equity × leverage × frac).
+func (b *Broker) SetExposureGuard(grossQty func() float64, leverage int, frac float64) {
+	b.grossQtyFn = grossQty
+	b.maxLeverage = leverage
+	b.maxGrossFrac = frac
+}
+
+// isOpeningOrder reports whether req increases exposure (opens/adds) vs reduces.
+// Hedge mode: Buy+LONG / Sell+SHORT (and net Buy) open; Sell+LONG / Buy+SHORT close.
+func isOpeningOrder(req strategy.OrderRequest) bool {
+	if req.PositionSide == strategy.PositionSideShort {
+		return req.Side == strategy.SideSell
+	}
+	return req.Side == strategy.SideBuy
+}
+
+// exceedsGrossExposure reports whether adding newQty on top of grossQty pushes
+// gross notional past equity × leverage × frac. Pure, for testability.
+// Returns false (don't block) when inputs are insufficient to judge.
+func exceedsGrossExposure(equity, leverage, frac, grossQty, newQty, price float64) bool {
+	if equity <= 0 || price <= 0 || frac <= 0 {
+		return false
+	}
+	if leverage < 1 {
+		leverage = 1
+	}
+	capNotional := equity * leverage * frac
+	return (grossQty+newQty)*price > capNotional
+}
 
 // SyncBalance fetches the current balance for the given asset and seeds the cash field.
 func (b *Broker) SyncBalance(ctx context.Context, asset string) error {
@@ -132,6 +178,30 @@ func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
 				zap.String("existing_id", existing.ID),
 				zap.String("existing_status", string(existing.Status)),
 			)
+			return ""
+		}
+	}
+
+	// Hard gross-exposure guard — the live path has no risk.Check (paper-only).
+	// Block an OPENING order whose projected gross notional would exceed
+	// equity × leverage × frac, using the syncer's exchange-truth position so a
+	// desync can't run exposure away (the 31-ETH-on-$3.6k case).
+	if b.grossQtyFn != nil && isOpeningOrder(req) {
+		price := safeLoadFloat64(&b.lastPrice)
+		if price <= 0 {
+			price = req.Price
+		}
+		gross := b.grossQtyFn()
+		if exceedsGrossExposure(b.Equity(), float64(b.maxLeverage), b.maxGrossFrac, gross, req.Qty, price) {
+			b.log.Warn("EXPOSURE GUARD: opening order blocked — projected gross notional exceeds equity×leverage×frac cap",
+				zap.String("symbol", req.Symbol), zap.String("side", string(req.Side)),
+				zap.String("pos_side", string(req.PositionSide)), zap.Float64("new_qty", req.Qty),
+				zap.Float64("exchange_gross_qty", gross), zap.Float64("equity", b.Equity()),
+				zap.Int("leverage", b.maxLeverage), zap.Float64("frac", b.maxGrossFrac),
+				zap.Float64("price", price))
+			if b.notifier != nil {
+				b.notifier.SystemAlert("WARN", "exposure guard blocked an opening order — real position would exceed the gross-exposure cap (possible desync); check positions")
+			}
 			return ""
 		}
 	}

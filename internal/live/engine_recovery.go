@@ -248,6 +248,19 @@ func (e *Engine) SetPositionSyncer(s *position.Syncer) {
 	if e.stratCtx != nil {
 		e.stratCtx.Extra["position_syncer"] = s
 	}
+	// Wire the hard gross-exposure guard onto the broker, fed by the syncer's
+	// EXCHANGE-truth position. The live order path otherwise has no position-size
+	// check (risk.Check is paper-only), which is how the 31-ETH runaway happened.
+	e.broker.SetExposureGuard(func() float64 {
+		var g float64
+		if lp := s.GetLong(); lp != nil {
+			g += lp.Qty
+		}
+		if sp := s.GetShort(); sp != nil {
+			g += sp.Qty
+		}
+		return g
+	}, e.cfg.Leverage, defaultMaxGrossExposureFrac)
 }
 
 // SetCachedEquity seeds the exchange equity cache (called at startup).
