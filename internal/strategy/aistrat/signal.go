@@ -349,17 +349,20 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	// ── 1h EMA direction filter ──
 	// Trend mode: only trade with the hourly trend (counter-1h trades historically lost money).
-	// Range/reversion mode: SKIP this filter — reversion signals ARE counter-trend by design.
-	// Only RANGE uses reversion/grid mode. SLOW_TREND uses breakout/trend (it has direction).
+	// 1h-trend filter: never enter AGAINST a confirmed 1h EMA trend. Always on for
+	// trend mode; with RangeTrendFilter (Phase 2) it ALSO applies to RANGE/reversion.
+	// A true range has lastHourlyDir==0 (price oscillating around the 1h EMA) so both
+	// sides still fade; only a sustained 1h trend (±1) suppresses the counter-trend
+	// reversion entry — fixing "fade a trend the regime classifier mislabeled RANGE".
 	isReversion := regime == RegimeRange
-	if !isReversion {
+	if !isReversion || s.cfg.RangeTrendFilter {
 		if s.lastHourlyDir == -1 && longConf > 0 {
-			s.log.Info("AI: BUY blocked — 1h EMA bearish", zap.Float64("conf", longConf))
+			s.log.Info("AI: BUY blocked — 1h EMA bearish", zap.Float64("conf", longConf), zap.Bool("reversion", isReversion))
 			longConf = 0
 			s.accumLong = 0
 		}
 		if s.lastHourlyDir == 1 && shortConf > 0 {
-			s.log.Info("AI: SELL blocked — 1h EMA bullish", zap.Float64("conf", shortConf))
+			s.log.Info("AI: SELL blocked — 1h EMA bullish", zap.Float64("conf", shortConf), zap.Bool("reversion", isReversion))
 			shortConf = 0
 			s.accumShort = 0
 		}
