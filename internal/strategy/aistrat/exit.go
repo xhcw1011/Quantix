@@ -112,6 +112,29 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 
 func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posState, reason string) {
 	qty := math.Floor(p.remainQty*1000) / 1000
+	// Reconcile the close qty to EXCHANGE truth (the position syncer). The
+	// strategy-internal remainQty drifts from the real position (missed/async
+	// fills, desync), so closing it can leave an orphan on the exchange (the
+	// 31-ETH case: strategy thought 3.1, exchange had 9.6). Close what the
+	// exchange actually holds on this side so the position is fully flattened.
+	if s.syncer != nil {
+		var exQty float64
+		if p.side == "LONG" {
+			if lp := s.syncer.GetLong(); lp != nil {
+				exQty = math.Floor(lp.Qty*1000) / 1000
+			}
+		} else {
+			if sp := s.syncer.GetShort(); sp != nil {
+				exQty = math.Floor(sp.Qty*1000) / 1000
+			}
+		}
+		if exQty > 0 && math.Abs(exQty-qty) > 0.001 {
+			s.log.Warn("AI: closePos reconciling to exchange-truth qty (desync)",
+				zap.String("side", p.side), zap.Float64("strategy_qty", qty),
+				zap.Float64("exchange_qty", exQty), zap.String("reason", reason))
+			qty = exQty
+		}
+	}
 	if qty <= 0 { *pptr = nil; return }
 
 	// Check if the exchange already closed the position (algo SL/TP triggered via UDS).

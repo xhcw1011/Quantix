@@ -408,15 +408,23 @@ func toFuturesPositionSide(positionSide string) goBinance.PositionSideType {
 // Returns an error if critical fields (ExecutedQuantity, AvgPrice) cannot be parsed,
 // preventing silent zero-fill events that would cause phantom untracked positions.
 func (b *OrderBroker) parseFill(r *goBinance.CreateOrderResponse) (exchange.OrderFill, error) {
-	qty, err := strconv.ParseFloat(r.ExecutedQuantity, 64)
-	if err != nil {
-		return exchange.OrderFill{}, fmt.Errorf("parse ExecutedQuantity %q: %w", r.ExecutedQuantity, err)
+	// A successful CreateOrder response (svc.Do returned no error) means the order
+	// was ACCEPTED by the exchange — it must NOT be reported as a failure. MARKET
+	// orders frequently return empty ExecutedQuantity/AvgPrice here because the fill
+	// is reported asynchronously via the user-data stream; the old code errored on
+	// the empty AvgPrice, so a successful close looked "failed" → retries → the
+	// engine kept thinking the position was open while the exchange had closed it
+	// (orphans / desync). Parse leniently: empty/unparseable → 0; the real fill
+	// price & qty arrive via the user-data stream (engine.onUserDataFill).
+	qty, _ := strconv.ParseFloat(r.ExecutedQuantity, 64)
+	avgPrice, _ := strconv.ParseFloat(r.AvgPrice, 64)
+	// Best-effort avg price from cumulative quote when the immediate response only
+	// has executedQty (avoids a 0 price on an order that did fill synchronously).
+	if avgPrice == 0 && qty > 0 {
+		if cq, err := strconv.ParseFloat(r.CumQuote, 64); err == nil && cq > 0 {
+			avgPrice = cq / qty
+		}
 	}
-	avgPrice, err := strconv.ParseFloat(r.AvgPrice, 64)
-	if err != nil {
-		return exchange.OrderFill{}, fmt.Errorf("parse AvgPrice %q: %w", r.AvgPrice, err)
-	}
-
 	return exchange.OrderFill{
 		ExchangeID: strconv.FormatInt(r.OrderID, 10),
 		FilledQty:  qty,
