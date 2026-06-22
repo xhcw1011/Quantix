@@ -72,7 +72,12 @@ func (s *AIStrategy) hourlyTrendDir() int {
 	ema80 := indicator.EMA(closes, 80)
 	if len(ema80) < 2 { return 0 }
 
-	// Check last 2 EMA values: both must agree on direction.
+	// Check last 2 EMA values: both must agree on direction AND the EMA must slope
+	// with MEANINGFUL momentum. A bare slopeAt>0 also fires in a flat range where
+	// the slow ~20h EMA barely drifts (it lags a prior trend) — that wrongly read
+	// "trend" and blocked all counter-trend reversion fades in a flat market.
+	// Require |slope| ≥ ema×HourlyTrendMinSlope so a flat/lagging EMA reads neutral
+	// (0) and both sides fade in a genuine range; only a real trend suppresses.
 	n := len(ema80)
 	allBull, allBear := true, true
 	for i := 0; i < 2; i++ {
@@ -80,9 +85,10 @@ func (s *AIStrategy) hourlyTrendDir() int {
 		priceAt := closes[len(closes)-1-i]
 		emaAt := ema80[idx]
 		slopeAt := ema80[idx] - ema80[idx-1]
+		thr := emaAt * s.cfg.HourlyTrendMinSlope
 
-		if !(priceAt > emaAt && slopeAt > 0) { allBull = false }
-		if !(priceAt < emaAt && slopeAt < 0) { allBear = false }
+		if !(priceAt > emaAt && slopeAt > thr) { allBull = false }
+		if !(priceAt < emaAt && slopeAt < -thr) { allBear = false }
 	}
 
 	if allBull { return 1 }

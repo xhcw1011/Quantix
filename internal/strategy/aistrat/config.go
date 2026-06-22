@@ -40,6 +40,7 @@ func init() {
 		if v, ok := params["GridStalePnlR"]; ok { cfg.GridStalePnlR = toFloat(v) }
 		if v, ok := params["CatastrophicStopR"]; ok { cfg.CatastrophicStopR = toFloat(v) }
 		if v, ok := params["RangeTrendFilter"].(bool); ok { cfg.RangeTrendFilter = v }
+		if v, ok := params["HourlyTrendMinSlope"]; ok { cfg.HourlyTrendMinSlope = toFloat(v) }
 		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
@@ -256,6 +257,12 @@ type Config struct {
 	// regime is classified RANGE. A true range has hourlyTrendDir==0 so both sides
 	// still fade; only a sustained 1h trend suppresses the counter-trend side.
 	RangeTrendFilter bool
+	// HourlyTrendMinSlope is the minimum per-bar 1h-EMA slope (fraction of the EMA,
+	// e.g. 0.0002 = 0.02%) for hourlyTrendDir to call a trend. Below it the slow
+	// ~20h EMA is treated as flat (neutral), so the 1h-trend filter does NOT
+	// over-suppress reversion fades in a flat range where the EMA merely lags a
+	// prior trend (the "55 SELL-blocked in a 1744–1750 chop" case).
+	HourlyTrendMinSlope float64
 
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
@@ -427,7 +434,8 @@ func DefaultConfig() Config {
 		GridMaxLayers: 3, GridSpacingPct: 0.01, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0, // layers add PYRAMID-only (winning side, see manageGrid) — never average into losers
 		GridStaleBars: 576, GridStalePnlR: -1.5, // 48h @ 5m bars × pnlR < -1.5R → 强制释放槽位
 		CatastrophicStopR: -3.0, // hard stop for ALL modes — cap any single position loss at ~3R
-		RangeTrendFilter:  true, // Phase 2: don't fade a confirmed 1h trend even in RANGE mode
+		RangeTrendFilter:    true,   // Phase 2: don't fade a confirmed 1h trend even in RANGE mode
+		HourlyTrendMinSlope: 0.0002, // 0.02%/bar — a flat/lagging EMA reads neutral (don't over-suppress)
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────
