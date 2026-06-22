@@ -376,13 +376,16 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			if eq <= 0 {
 				return
 			}
-			// Sanity guard: never feed the circuit breaker an implausible equity.
-			// walletBalance is reconstructed but roughly real; a value >5x it is
-			// garbage (e.g. an exchange field summing all currencies) and would
-			// blow up the breaker. Reject and keep the last good cached value.
-			if wb := e.broker.WalletBalance(); wb > 0 && eq > wb*5 {
-				e.log.Warn("equity poll: implausible value, ignoring",
-					zap.Float64("polled_equity", eq), zap.Float64("wallet_balance", wb))
+			// Sanity guard: reject only an absurd UPWARD spike vs the last good
+			// equity (e.g. an exchange field that sums ALL currencies → 453k on an
+			// $8k account). Compare against the last cached equity, NOT walletBalance
+			// — walletBalance is reconstructed and drifts for exchanges with no real
+			// wallet poll (OKX drifted to 682 vs real 7700), which wrongly rejected
+			// the real equity. NEVER guard the downside: a real drawdown MUST reach
+			// the circuit breaker.
+			if last := math.Float64frombits(e.cachedEquityBits.Load()); last > 0 && eq > last*5 {
+				e.log.Warn("equity poll: implausible upward jump vs last, ignoring",
+					zap.Float64("polled_equity", eq), zap.Float64("last_equity", last))
 				return
 			}
 			e.cachedEquityBits.Store(math.Float64bits(eq))
