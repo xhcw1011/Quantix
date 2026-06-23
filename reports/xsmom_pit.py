@@ -53,8 +53,8 @@ while i + R < len(dates):
     if len(cands) < need:
         i += R; continue
     scored = sorted(((s, ret(si, s)) for s in cands), key=lambda x: x[1], reverse=True)
-    longs = [s for s, _ in scored[:K]]
-    shorts = [s for s, _ in scored[-K:]] if mode == "ls" else []
+    longs = [s for s, _ in scored[:K]] if mode != "so" else []
+    shorts = [s for s, _ in scored[-K:]] if mode in ("ls", "so") else []
     w = defaultdict(float)
     for s in longs:  w[s] += 1.0/K
     for s in shorts: w[s] -= 1.0/K

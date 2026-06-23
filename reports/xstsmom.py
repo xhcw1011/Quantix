@@ -52,8 +52,8 @@ while i + R < len(dates):
     w = defaultdict(float)
     for s in cands:
         m = ret(si, s)
-        if m > 0:   w[s] = 1.0/N            # long, weight scaled by breadth
-        elif mode == "ls" and m < 0: w[s] = -1.0/N
+        if mode in ("lo", "ls") and m > 0:   w[s] = 1.0/N   # long, breadth-scaled
+        elif mode in ("ls", "so") and m < 0: w[s] = -1.0/N  # short the down-trenders
     expo.append(sum(w.values()))            # net long exposure (0..1 for lo)
     pr = 0.0
     for s in w:
