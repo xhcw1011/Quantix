@@ -20,6 +20,13 @@ import (
 func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Symbol != s.cfg.Symbol { return }
 
+	// ── Sim clock: drive day-boundary / held-duration logic off bar time in
+	// backtest (live leaves s.backtest=false → s.now() stays wall-clock). ──
+	if !s.backtest {
+		if v, ok := ctx.Extra["backtest"].(bool); ok { s.backtest = v }
+	}
+	s.simClock = bar.CloseTime
+
 	// ── Buffer bar by interval ──
 	iv := bar.Interval
 	if iv == "" { iv = s.cfg.PrimaryInterval }
@@ -50,7 +57,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if !s.warmedUp {
 		if len(primaryBars) >= s.cfg.LookbackBars {
 			s.warmedUp = true
-			s.dayStart = time.Now()
+			s.dayStart = s.now()
 			if pf := ctx.Portfolio; pf != nil {
 				s.dayStartEquity = pf.Equity(map[string]float64{s.cfg.Symbol: bar.Close})
 			}
@@ -102,7 +109,9 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Skip GPT calls on stale backfill bars; wait for first real-time bar.
 	// Exception: backtest replay mode uses cached signals.
 	if !s.liveReady {
-		if time.Since(bar.CloseTime) < 2*time.Minute {
+		if s.backtest {
+			s.liveReady = true // historical replay: every bar is actionable
+		} else if time.Since(bar.CloseTime) < 2*time.Minute {
 			s.liveReady = true
 			s.log.Info("AI: live ready — first real-time bar")
 		} else if len(s.replaySignals) > 0 {

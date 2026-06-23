@@ -254,7 +254,7 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 // ─── Daily Risk ──────────────────────────────────────────────────────────────
 
 func (s *AIStrategy) checkDayReset(ctx *strategy.Context, price float64) {
-	now := time.Now()
+	now := s.now()
 	if now.YearDay() != s.dayStart.YearDay() || now.Year() != s.dayStart.Year() {
 		s.dayStart = now
 		if pf := ctx.Portfolio; pf != nil {

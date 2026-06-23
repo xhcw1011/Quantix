@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,6 +61,7 @@ func run() error {
 	paramsJSON := flag.String("params", "", `strategy params JSON e.g. '{"FastPeriod":10}'`)
 	outJSON := flag.String("out-json", "", "write full report to JSON file (optional)")
 	outCSV := flag.String("out-csv", "", "write trades CSV prefix (optional, e.g. ./reports/bt)")
+	ctxIntervals := flag.String("context-intervals", "", "extra kline intervals fed for multi-TF context, comma-sep (e.g. '15m'); not traded")
 	flag.Parse()
 
 	// ── Bootstrap ─────────────────────────────────────────────────────────────
@@ -117,6 +119,13 @@ func run() error {
 		InitialCapital: *capital,
 		FeeRate:        *feeRate,
 		Slippage:       *slippage,
+	}
+	if *ctxIntervals != "" {
+		for _, iv := range strings.Split(*ctxIntervals, ",") {
+			if iv = strings.TrimSpace(iv); iv != "" {
+				btCfg.ContextIntervals = append(btCfg.ContextIntervals, iv)
+			}
+		}
 	}
 	if *startStr != "" {
 		t, err := time.Parse("2006-01-02", *startStr)

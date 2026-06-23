@@ -4,6 +4,7 @@ package backtest
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"go.uber.org/zap"
@@ -20,6 +21,12 @@ type Config struct {
 	InitialCapital float64
 	FeeRate        float64 // e.g. 0.001 = 0.1% (Binance taker)
 	Slippage       float64 // e.g. 0.0005 = 0.05%
+	// ContextIntervals are extra kline series (e.g. ["15m"]) fed to the strategy
+	// for multi-timeframe context (trend filter / regime) but which do NOT drive
+	// the broker or equity curve — only primary-interval bars do that. They are
+	// interleaved with the primary stream by close time so the strategy sees the
+	// same multi-TF history a live engine would aggregate.
+	ContextIntervals []string
 	// StartTime / EndTime filter klines loaded from DB.
 	// Zero value = load all available.
 	StartTime time.Time
@@ -85,26 +92,68 @@ func (e *Engine) Run(ctx context.Context) (Report, error) {
 	startTime := klines[0].OpenTime
 	endTime := klines[len(klines)-1].CloseTime
 
+	// ── Build the event stream ─────────────────────────────────────────────────
+	// Primary bars drive the broker + equity curve. Context bars (e.g. 15m) are
+	// fed to the strategy for multi-TF context only. Interleave by close time so
+	// the trend filter sees the correct 15m history when each 5m bar runs; on a
+	// tie, feed the context bar first (the 15m candle that closes with a 5m candle
+	// is already available when that 5m bar's logic runs).
+	type event struct {
+		bar     exchange.Kline
+		primary bool
+	}
+	events := make([]event, 0, len(klines))
+	for _, b := range klines {
+		events = append(events, event{bar: b, primary: true})
+	}
+	for _, iv := range e.cfg.ContextIntervals {
+		if iv == "" || iv == e.cfg.Interval {
+			continue
+		}
+		ctxBars, err := e.loadContextKlines(ctx, iv, startTime, endTime)
+		if err != nil {
+			return Report{}, fmt.Errorf("load context %s: %w", iv, err)
+		}
+		e.log.Info("loaded context interval", zap.String("interval", iv), zap.Int("bars", len(ctxBars)))
+		for _, b := range ctxBars {
+			events = append(events, event{bar: b, primary: false})
+		}
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		ti, tj := events[i].bar.CloseTime, events[j].bar.CloseTime
+		if ti.Equal(tj) {
+			return !events[i].primary && events[j].primary // context before primary on tie
+		}
+		return ti.Before(tj)
+	})
+
+	// Flag the strategy that this is a historical replay (sim-clock + no live guard).
+	e.stratCtx.Extra["backtest"] = true
+
 	// Record initial equity
 	prices := map[string]float64{e.cfg.Symbol: klines[0].Open}
 	e.portfolio.recordEquity(startTime, prices)
 
 	// ── Event loop ────────────────────────────────────────────────────────────
-	for _, bar := range klines {
-		// 1. Strategy receives the closed bar and optionally queues orders
-		e.strategy.OnBar(e.stratCtx, bar)
+	for _, ev := range events {
+		// 1. Strategy receives the bar. Context (non-primary) bars only update the
+		//    strategy's interval buffer; they never reach the broker.
+		e.strategy.OnBar(e.stratCtx, ev.bar)
+		if !ev.primary {
+			continue
+		}
 
-		// 2. Broker processes queued orders against this bar's close
-		currentPrice := map[string]float64{bar.Symbol: bar.Close}
-		fills := e.broker.Process(bar)
+		// 2. Broker processes queued orders against this primary bar's close
+		currentPrice := map[string]float64{ev.bar.Symbol: ev.bar.Close}
+		fills := e.broker.Process(ev.bar)
 
 		// 3. Notify strategy of fills
 		for _, fill := range fills {
 			e.strategy.OnFill(e.stratCtx, fill)
 		}
 
-		// 4. Record equity snapshot after each bar
-		e.portfolio.recordEquity(bar.CloseTime, currentPrice)
+		// 4. Record equity snapshot after each primary bar
+		e.portfolio.recordEquity(ev.bar.CloseTime, currentPrice)
 	}
 
 	// Force-close any open positions at final bar price
@@ -168,6 +217,15 @@ func (e *Engine) loadKlines(ctx context.Context) ([]exchange.Kline, error) {
 	}
 
 	return klines, nil
+}
+
+// loadContextKlines loads a secondary interval (e.g. 15m) over the same span as
+// the primary series, for multi-TF strategy context. It never drives the broker.
+func (e *Engine) loadContextKlines(ctx context.Context, interval string, start, end time.Time) ([]exchange.Kline, error) {
+	if e.store == nil {
+		return nil, fmt.Errorf("no data store for context interval %s", interval)
+	}
+	return e.store.GetKlinesBetween(ctx, e.cfg.Symbol, interval, start, end)
 }
 
 // closeOpenPositions force-closes any remaining open positions at the last bar's close.

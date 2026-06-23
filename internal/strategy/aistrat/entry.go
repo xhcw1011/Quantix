@@ -52,7 +52,7 @@ func (s *AIStrategy) openHedgeScalp(ctx *strategy.Context, side string, currentP
 	if omsID == "" { return }
 
 	filledAt := time.Time{}
-	if !useLimit { filledAt = time.Now() }
+	if !useLimit { filledAt = s.now() }
 	pos := &posState{
 		side: side, mode: modeRange, entryPrice: entryPrice,
 		initQty: qty, remainQty: qty,
@@ -145,7 +145,7 @@ func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, 
 	if omsID == "" { return }
 
 	filledAt := time.Time{}
-	if !useLimit { filledAt = time.Now() }
+	if !useLimit { filledAt = s.now() }
 	pos := &posState{
 		side: side, mode: modeRange, entryPrice: entryPrice, entryATR: atr,
 		initQty: qty, remainQty: qty,
@@ -242,7 +242,7 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	if omsID == "" { return }
 
 	filledAt := time.Time{}
-	if !useLimit { filledAt = time.Now() }
+	if !useLimit { filledAt = s.now() }
 	pos := &posState{
 		side: side, mode: modeTrend, entryPrice: entryPrice, entryATR: atr,
 		gptTPPrice: gptTP,

@@ -39,6 +39,8 @@ type AIStrategy struct {
 	barsByInterval map[string][]exchange.Kline // key = interval ("1m","5m","15m")
 	warmedUp       bool
 	liveReady      bool // true after first real-time primary bar (skip backfill GPT calls)
+	backtest       bool      // set from ctx.Extra["backtest"]; drives the sim clock + bypasses the real-time bar guard
+	simClock       time.Time // bar.CloseTime of the bar currently being processed (only read when backtest)
 	barCount       int  // primary interval bar count
 	lastCallBar    int
 	totalCall      int
@@ -110,6 +112,18 @@ func New(cfg Config, log *zap.Logger) *AIStrategy {
 
 func (s *AIStrategy) Name() string {
 	return fmt.Sprintf("AI(%s/every%dbars)", s.cfg.Model, s.cfg.CallIntervalBars)
+}
+
+// now returns the current time. In live trading this is the wall clock; in a
+// backtest it is the close time of the bar currently being replayed (set at the
+// top of OnBar), so day boundaries and held-duration exits track simulated time
+// instead of the few wall-clock seconds a backtest takes to run. The live branch
+// is a pure passthrough to time.Now(), so live behaviour is unchanged.
+func (s *AIStrategy) now() time.Time {
+	if s.backtest && !s.simClock.IsZero() {
+		return s.simClock
+	}
+	return time.Now()
 }
 
 // posModeString returns a human-readable name for a posMode.
@@ -206,8 +220,8 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 
 	pos.firstFillSeen = true
 	pos.filled = true
-	pos.filledAt = time.Now()
-	pos.lastPeakAt = time.Now()
+	pos.filledAt = s.now()
+	pos.lastPeakAt = s.now()
 	if fill.Price > 0 {
 		diff := fill.Price - pos.entryPrice
 		pos.entryPrice = fill.Price

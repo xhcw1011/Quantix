@@ -157,7 +157,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 		if !g.filled {
 			if (p.side == "LONG" && price <= g.entryPrice) || (p.side == "SHORT" && price >= g.entryPrice) {
 				g.filled = true
-				g.filledAt = time.Now()
+				g.filledAt = s.now()
 				p.remainQty += g.qty // only count qty after confirmed fill
 				s.log.Info("AI: grid order filled",
 					zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
@@ -276,7 +276,7 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 
 	// Time-based exit: close if held > 3h and NOT in strong trend.
 	// Prevents slow grind losses in weak/range markets.
-	if p.filled && hMode != hourlyTrendStrong && time.Since(p.filledAt) > 3*time.Hour {
+	if p.filled && hMode != hourlyTrendStrong && s.now().Sub(p.filledAt) > 3*time.Hour {
 		s.log.Warn("BAR: time exit — held >3h in weak/exit mode",
 			zap.String("side", p.side), zap.Float64("pnlR", pnlR))
 		s.closePos(ctx, p, pptr, "time_exit")
