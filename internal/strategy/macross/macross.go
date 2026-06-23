@@ -16,6 +16,7 @@ package macross
 
 import (
 	"fmt"
+	"math"
 
 	"go.uber.org/zap"
 
@@ -33,6 +34,13 @@ type Config struct {
 	EnableShort   bool    // true = use hedge mode (LONG/SHORT PositionSide) for futures/swap
 	StopLossPct   float64 // 0 = no stop loss; e.g. 0.02 = 2% from entry
 	TakeProfitPct float64 // 0 = no take profit; e.g. 0.04 = 4% from entry
+	// Trend filter (sit out chop). When TrendFilterMin > 0, a cross only OPENS a
+	// new position if Kaufman's Efficiency Ratio over TrendFilterN bars is >=
+	// TrendFilterMin (≈1 trending, ≈0 choppy). Crosses still CLOSE existing
+	// positions regardless, so chop leaves us flat rather than whipsawing.
+	// TrendFilterMin <= 0 disables the filter (default — unchanged behaviour).
+	TrendFilterN   int
+	TrendFilterMin float64
 }
 
 // MACross is a dual-SMA crossover strategy with optional short-selling support.
@@ -81,12 +89,45 @@ func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 }
 
+// efficiencyRatio returns Kaufman's Efficiency Ratio over the last n closes:
+// |net change| / sum(|bar-to-bar change|). ~1 = clean trend, ~0 = chop. Returns
+// 1 (don't filter) when there isn't enough data yet.
+func (m *MACross) efficiencyRatio(n int) float64 {
+	if n < 2 || len(m.closes) < n+1 {
+		return 1
+	}
+	c := m.closes
+	last := len(c) - 1
+	net := math.Abs(c[last] - c[last-n])
+	var vol float64
+	for i := last - n + 1; i <= last; i++ {
+		vol += math.Abs(c[i] - c[i-1])
+	}
+	if vol == 0 {
+		return 0
+	}
+	return net / vol
+}
+
+// trendOK reports whether the market is trending enough to OPEN a new position.
+// Always true when the filter is disabled (TrendFilterMin <= 0).
+func (m *MACross) trendOK() bool {
+	if m.cfg.TrendFilterMin <= 0 {
+		return true
+	}
+	n := m.cfg.TrendFilterN
+	if n <= 0 {
+		n = m.cfg.SlowPeriod
+	}
+	return m.efficiencyRatio(n) >= m.cfg.TrendFilterMin
+}
+
 // onBarSimple handles the long-only (spot/net) mode.
 func (m *MACross) onBarSimple(ctx *strategy.Context, bar exchange.Kline, fast, slow []float64) {
 	_, _, hasPosition := ctx.Portfolio.Position(bar.Symbol)
 
 	switch {
-	case indicator.CrossOver(fast, slow) && !hasPosition:
+	case indicator.CrossOver(fast, slow) && !hasPosition && m.trendOK():
 		ctx.Log.Info("golden cross — BUY",
 			zap.String("symbol", bar.Symbol),
 			zap.Float64("fast", indicator.Last(fast)),
@@ -137,7 +178,7 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 		if m.hasShort {
 			ctx.PlaceOrder(strategy.CloseShort(bar.Symbol, 0))
 		}
-		if !m.hasLong {
+		if !m.hasLong && m.trendOK() {
 			req := strategy.OpenLong(bar.Symbol, 0)
 			if m.cfg.StopLossPct > 0 {
 				req.StopLoss = bar.Close * (1 - m.cfg.StopLossPct)
@@ -159,7 +200,7 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 		if m.hasLong {
 			ctx.PlaceOrder(strategy.CloseLong(bar.Symbol, 0))
 		}
-		if !m.hasShort {
+		if !m.hasShort && m.trendOK() {
 			req := strategy.OpenShort(bar.Symbol, 0)
 			if m.cfg.StopLossPct > 0 {
 				req.StopLoss = bar.Close * (1 + m.cfg.StopLossPct)
@@ -221,6 +262,12 @@ func init() {
 		}
 		if v, ok := params["TakeProfitPct"]; ok {
 			cfg.TakeProfitPct = toFloat(v)
+		}
+		if v, ok := params["TrendFilterN"]; ok {
+			cfg.TrendFilterN = toInt(v)
+		}
+		if v, ok := params["TrendFilterMin"]; ok {
+			cfg.TrendFilterMin = toFloat(v)
 		}
 		if cfg.FastPeriod == 0 {
 			cfg.FastPeriod = 10
