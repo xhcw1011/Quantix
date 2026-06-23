@@ -41,6 +41,7 @@ func init() {
 		if v, ok := params["CatastrophicStopR"]; ok { cfg.CatastrophicStopR = toFloat(v) }
 		if v, ok := params["RangeTrendFilter"].(bool); ok { cfg.RangeTrendFilter = v }
 		if v, ok := params["HourlyTrendMinSlope"]; ok { cfg.HourlyTrendMinSlope = toFloat(v) }
+		if v, ok := params["HourlyTrendEMA"]; ok { cfg.HourlyTrendEMA = toInt(v) }
 		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
@@ -263,6 +264,11 @@ type Config struct {
 	// over-suppress reversion fades in a flat range where the EMA merely lags a
 	// prior trend (the "55 SELL-blocked in a 1744–1750 chop" case).
 	HourlyTrendMinSlope float64
+	// HourlyTrendEMA is the EMA period (in 15m bars) for the trend-direction filter.
+	// Default 16 = 4h. The old 80 (=20h) lagged badly and kept reading "bullish"
+	// off a prior high while price had turned down → forced longs into a fall.
+	// Lower = tracks turns faster but more whipsaw.
+	HourlyTrendEMA int
 
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
@@ -436,6 +442,7 @@ func DefaultConfig() Config {
 		CatastrophicStopR: -3.0, // hard stop for ALL modes — cap any single position loss at ~3R
 		RangeTrendFilter:    true,   // Phase 2: don't fade a confirmed 1h trend even in RANGE mode
 		HourlyTrendMinSlope: 0.0002, // 0.02%/bar — a flat/lagging EMA reads neutral (don't over-suppress)
+		HourlyTrendEMA:      16,     // 4h trend reference (was period-80 = 20h, too laggy → forced longs into falls)
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────

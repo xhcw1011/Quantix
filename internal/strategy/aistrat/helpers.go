@@ -58,19 +58,22 @@ func (s *AIStrategy) findSwingHigh(n int) float64 {
 
 // ─── 1h Trend Direction ─────────────────────────────────────────────────────
 
-// hourlyTrendDir returns the 1h EMA trend direction: +1 bullish, -1 bearish, 0 neutral.
-// Uses 15m bars with EMA(80) ≈ 1h EMA(20).
-// Requires 2 consecutive 15m bars (30 min) of consistent direction to confirm a trend flip.
-// Filters out 15-minute fake pullbacks without being too slow for real reversals.
+// hourlyTrendDir returns the trend direction off the HourlyTrendEMA-period EMA on
+// 15m bars: +1 bullish, -1 bearish, 0 neutral. Default 16×15m = 4h — the old 20h
+// EMA (period 80) lagged badly: it kept reading "bullish" off a prior high while
+// price had already turned down, forcing the strategy to buy dips into a fall
+// (the -121 long). A ~4h reference tracks the current trend; the slope threshold
+// keeps it neutral in a flat range.
 func (s *AIStrategy) hourlyTrendDir() int {
 	bars15 := s.barsForInterval("15m")
-	if len(bars15) < 82 { return 0 }
+	emaN := s.cfg.HourlyTrendEMA
+	if emaN < 2 || len(bars15) < emaN+2 { return 0 }
 
 	closes := make([]float64, len(bars15))
 	for i, b := range bars15 { closes[i] = b.Close }
 
-	ema80 := indicator.EMA(closes, 80)
-	if len(ema80) < 2 { return 0 }
+	ema := indicator.EMA(closes, emaN)
+	if len(ema) < 2 { return 0 }
 
 	// Check last 2 EMA values: both must agree on direction AND the EMA must slope
 	// with MEANINGFUL momentum. A bare slopeAt>0 also fires in a flat range where
@@ -78,13 +81,13 @@ func (s *AIStrategy) hourlyTrendDir() int {
 	// "trend" and blocked all counter-trend reversion fades in a flat market.
 	// Require |slope| ≥ ema×HourlyTrendMinSlope so a flat/lagging EMA reads neutral
 	// (0) and both sides fade in a genuine range; only a real trend suppresses.
-	n := len(ema80)
+	n := len(ema)
 	allBull, allBear := true, true
 	for i := 0; i < 2; i++ {
 		idx := n - 1 - i
 		priceAt := closes[len(closes)-1-i]
-		emaAt := ema80[idx]
-		slopeAt := ema80[idx] - ema80[idx-1]
+		emaAt := ema[idx]
+		slopeAt := ema[idx] - ema[idx-1]
 		thr := emaAt * s.cfg.HourlyTrendMinSlope
 
 		if !(priceAt > emaAt && slopeAt > thr) { allBull = false }
