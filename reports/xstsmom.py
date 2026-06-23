@@ -12,9 +12,10 @@ from collections import defaultdict
 csv = sys.argv[1]
 L, R = int(sys.argv[2]), int(sys.argv[3])
 mode, cost, topN = sys.argv[4], float(sys.argv[5]), int(sys.argv[6])
-start = sys.argv[7] if len(sys.argv) > 7 else "0000"
-end   = sys.argv[8] if len(sys.argv) > 8 else "9999"
-LAG, VOLWIN = 1, 30
+volscale = int(sys.argv[7]) if len(sys.argv) > 7 else 0   # 1 = inverse-vol weighting
+start = sys.argv[8] if len(sys.argv) > 8 else "0000"
+end   = sys.argv[9] if len(sys.argv) > 9 else "9999"
+LAG, VOLWIN, VOLLOOK = 1, 30, 30
 
 px = defaultdict(dict); qv = defaultdict(dict); syms = set()
 for line in open(csv):
@@ -39,6 +40,16 @@ def trail_vol(i, s):
         if s in qv[dates[j]]: tot += qv[dates[j]][s]; n += 1
     return tot/n if n else 0.0
 
+def ret_vol(i, s):                 # stdev of daily returns over last VOLLOOK days
+    rs = []
+    for j in range(max(1, i-VOLLOOK+1), i+1):
+        a, b = dates[j], dates[j-1]
+        if s in px[a] and s in px[b] and px[b][s] > 0:
+            rs.append(px[a][s]/px[b][s]-1)
+    if len(rs) < 5: return None
+    m = sum(rs)/len(rs)
+    return math.sqrt(sum((x-m)**2 for x in rs)/len(rs)) or None
+
 equity = 1.0; prev_w = defaultdict(float); rets = []; eq = [1.0]; expo = []
 i = L + LAG
 while i + R < len(dates):
@@ -49,11 +60,20 @@ while i + R < len(dates):
         cands = cands[:topN]
     N = len(cands)
     if N == 0: i += R; continue
-    w = defaultdict(float)
+    sig = {}
     for s in cands:
         m = ret(si, s)
-        if mode in ("lo", "ls") and m > 0:   w[s] = 1.0/N   # long, breadth-scaled
-        elif mode in ("ls", "so") and m < 0: w[s] = -1.0/N  # short the down-trenders
+        if mode in ("lo", "ls") and m > 0:   sig[s] = 1
+        elif mode in ("ls", "so") and m < 0: sig[s] = -1
+    w = defaultdict(float)
+    gross = len(sig)/N                       # preserve breadth-scaling (de-risk in bear)
+    if volscale:                             # distribute gross inverse-to-volatility
+        raw = {s: 1.0/ret_vol(si, s) for s in sig if ret_vol(si, s)}
+        denom = sum(raw.values())
+        if denom > 0:
+            for s in raw: w[s] = sig[s]*gross*raw[s]/denom
+    else:                                    # equal weight
+        for s in sig: w[s] = sig[s]*(1.0/N)
     expo.append(sum(w.values()))            # net long exposure (0..1 for lo)
     pr = 0.0
     for s in w:
