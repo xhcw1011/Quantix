@@ -11,6 +11,28 @@ import (
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
+// trendCutTriggered reports whether a range/grid position should be cut early on
+// trend confirmation instead of riding to the -3R catastrophic stop. Two gates:
+// (a) underwater past trendCutR (a negative R threshold; >=0 disables the feature),
+// and (b) the 1h trend (hourlyDir: +1 bull, -1 bear, 0 neutral) confirmed AGAINST
+// the position's side. A dip with no confirmed trend (hourlyDir==0) keeps full -3R
+// room — this cuts only genuinely-wrong-direction trades, not normal reversion dips.
+func trendCutTriggered(side string, pnlR, trendCutR float64, hourlyDir int) bool {
+	if trendCutR >= 0 {
+		return false // disabled
+	}
+	if pnlR > trendCutR {
+		return false // not underwater past the threshold
+	}
+	switch side {
+	case "LONG":
+		return hourlyDir < 0 // downtrend confirmed against the long
+	case "SHORT":
+		return hourlyDir > 0 // uptrend confirmed against the short
+	}
+	return false
+}
+
 // ─── Position Management (every bar) ─────────────────────────────────────────
 
 func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
@@ -58,6 +80,34 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 				zap.Float64("pnl_r", catPnlR), zap.Float64("limit_r", s.cfg.CatastrophicStopR))
 			closedSide := p.side
 			s.closePos(ctx, p, pptr, "catastrophic_stop")
+			s.consecLoss++
+			s.stopBar = s.barCount
+			s.postSLReeval = true
+			s.postSLSide = closedSide
+			s.postSLPrice = price
+			return
+		}
+	}
+
+	// ── Trend-confirmed early cut (range/grid positions only) ──
+	// Range/grid positions have no normal SL — they ride the range waiting for
+	// reversion. If one is underwater past TrendCutR AND the 1h trend is now
+	// confirmed AGAINST it, the reversion thesis is broken: cut now instead of
+	// riding to the -3R catastrophic backstop. The trend gate keeps normal
+	// pre-reversion dips (hourlyTrendDir==0) on full -3R room, so only genuinely
+	// wrong-direction trades are cut. Enabled per-engine via TrendCutR (0 = off).
+	if p.filled && p.R > 0 && p.mode == modeRange && s.cfg.TrendCutR < 0 {
+		pnlR := (price - p.entryPrice) / p.R
+		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
+		dir := s.hourlyTrendDir()
+		if trendCutTriggered(p.side, pnlR, s.cfg.TrendCutR, dir) {
+			s.log.Warn("TREND CUT — reversion thesis broken, cutting on confirmed adverse trend",
+				zap.String("side", p.side), zap.Int("mode", int(p.mode)),
+				zap.Float64("price", price), zap.Float64("entry", p.entryPrice),
+				zap.Float64("pnl_r", pnlR), zap.Float64("cut_r", s.cfg.TrendCutR),
+				zap.Int("hourly_dir", dir))
+			closedSide := p.side
+			s.closePos(ctx, p, pptr, "trend_cut")
 			s.consecLoss++
 			s.stopBar = s.barCount
 			s.postSLReeval = true
