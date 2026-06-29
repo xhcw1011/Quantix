@@ -229,7 +229,10 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	regime := s.detectRegime()
 	s.lastRegime = regime
-	s.lastHourlyDir = s.hourlyTrendDir()
+	// Apply hysteresis so a confirmed 1h trend isn't reset to neutral on every
+	// bounce (which let counter-trend entries slip through). Once per primary bar.
+	s.lastHourlyDir, s.hourlyDirCooldown = stickyHourlyDir(
+		s.hourlyTrendDir(), s.lastHourlyDir, s.hourlyDirCooldown, s.cfg.HourlyTrendStickyBars)
 
 	// Grid positions: NO regime-based exit. Grid trades close via TP only.
 	// Risk is managed by small qty per layer + max 2 layers cap.

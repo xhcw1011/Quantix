@@ -66,7 +66,8 @@ type AIStrategy struct {
 	lastHedgeClose  time.Time // when the last hedge position was closed (for cooldown)
 	lastConf        float64   // confidence of the signal that triggered current entry
 	lastRegime      Regime    // current detected regime (updated every signal check)
-	lastHourlyDir   int       // 1h EMA trend direction: +1 bullish, -1 bearish, 0 neutral
+	lastHourlyDir   int       // 1h EMA trend direction (sticky, used by entry filter): +1 bull, -1 bear, 0 neutral
+	hourlyDirCooldown int     // hysteresis cooldown (primary bars) for lastHourlyDir; see stickyHourlyDir
 	lastBBMiddle    float64   // BB middle band from last reversion signal (for TP)
 	lastBBLower     float64   // BB lower band (for grid SL)
 	lastBBUpper     float64   // BB upper band (for grid SL)

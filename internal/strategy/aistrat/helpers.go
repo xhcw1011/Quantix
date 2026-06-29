@@ -99,6 +99,26 @@ func (s *AIStrategy) hourlyTrendDir() int {
 	return 0
 }
 
+// stickyHourlyDir applies hysteresis to the raw 1h trend direction. Once raw
+// confirms ±1, the sticky value holds that sign for up to stickyBars subsequent
+// neutral (0) readings before decaying to 0; an opposite confirmed reading flips
+// immediately. This stops the entry filter (signal.go) from re-allowing
+// counter-trend entries on every bounce inside a stair-step trend — the gap that
+// let ~half the longs slip through during the 06-23~25 ETH decline. stickyBars<=0
+// disables it (raw passes through). Returns (newSticky, newCooldown).
+func stickyHourlyDir(raw, prevSticky, cooldown, stickyBars int) (int, int) {
+	if stickyBars <= 0 {
+		return raw, 0 // hysteresis off: passthrough
+	}
+	if raw != 0 {
+		return raw, stickyBars // confirmed direction: hold + reset cooldown
+	}
+	if cooldown > 0 {
+		return prevSticky, cooldown - 1 // neutral flicker: hold prior dir, decay
+	}
+	return 0, 0 // cooldown exhausted: decay to neutral
+}
+
 // detectHourlyMode determines the 1h management mode for an open position.
 // TREND_STRONG: 1h EMA aligned with position + slope confirms → let profits run.
 // EXIT_MODE: price crossed 1h EMA against position → prepare to exit.
@@ -149,8 +169,9 @@ func (s *AIStrategy) detectHourlyMode(side string) hourlyMode {
 	if price > emaNow { s.cachedHourlyShort = hourlyExitMode }
 
 	s.hourlyModeBars = nBars
-	// Also sync lastHourlyDir for consistency with signal.go filter
-	s.lastHourlyDir = s.hourlyTrendDir()
+	// NOTE: lastHourlyDir is owned by the per-primary-bar update in generateSignal
+	// (with hysteresis). Do NOT set it here — detectHourlyMode also runs on 1m bars
+	// and would clobber the sticky value with a raw reading between primary bars.
 
 	if side == "LONG" { return s.cachedHourlyLong }
 	return s.cachedHourlyShort

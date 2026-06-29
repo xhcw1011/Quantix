@@ -43,6 +43,7 @@ func init() {
 		if v, ok := params["RangeTrendFilter"].(bool); ok { cfg.RangeTrendFilter = v }
 		if v, ok := params["HourlyTrendMinSlope"]; ok { cfg.HourlyTrendMinSlope = toFloat(v) }
 		if v, ok := params["HourlyTrendEMA"]; ok { cfg.HourlyTrendEMA = toInt(v) }
+		if v, ok := params["HourlyTrendStickyBars"]; ok { cfg.HourlyTrendStickyBars = toInt(v) }
 		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
@@ -277,6 +278,13 @@ type Config struct {
 	// off a prior high while price had turned down → forced longs into a fall.
 	// Lower = tracks turns faster but more whipsaw.
 	HourlyTrendEMA int
+	// HourlyTrendStickyBars adds hysteresis to the 1h trend direction used by the
+	// entry filter: once a ±1 trend is confirmed, hold it for this many primary
+	// (5m) bars of neutral readings before decaying to 0. Stops the filter from
+	// re-allowing counter-trend entries on every bounce inside a stair-step trend
+	// (the gap that let ~half the longs slip through during a decline). 0 = off
+	// (default — enabled per-engine via params for gradual rollout, e.g. 12 ≈ 1h).
+	HourlyTrendStickyBars int
 
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
@@ -452,6 +460,7 @@ func DefaultConfig() Config {
 		RangeTrendFilter:    true,   // Phase 2: don't fade a confirmed 1h trend even in RANGE mode
 		HourlyTrendMinSlope: 0.0002, // 0.02%/bar — a flat/lagging EMA reads neutral (don't over-suppress)
 		HourlyTrendEMA:      16,     // 4h trend reference (was period-80 = 20h, too laggy → forced longs into falls)
+		HourlyTrendStickyBars: 0,    // 1h-dir hysteresis: 0 = off (enable per-engine via params, e.g. 12 ≈ 1h)
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────
