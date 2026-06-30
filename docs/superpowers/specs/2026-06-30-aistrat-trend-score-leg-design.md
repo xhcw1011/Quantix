@@ -2,7 +2,7 @@
 
 **日期**: 2026-06-30
 **分支基线**: `feat/trend-cut-aistrat`（叠在 trend-cut `9ca15d7` + hysteresis `802ca77` 之上）
-**状态**: 设计待评审
+**状态**: 已确认(用户委托自核;默认开、参数保守)→ 转实现计划
 
 ## 1. 背景与动机
 
@@ -54,8 +54,9 @@ htfDir = 高周期方向(复用现成信号,不新造):
 
 - **"同向即可"**(已确认):高周期方向与累积分符号一致就行,不要求更强,避免重新引入滞后。
 - 触发后走现有 `openTrend()`(趋势仓、staged TP、trailing),不新造出场逻辑。
-- `Threshold` = 0 时整个特性关闭(默认)。
-- 入场后设**冷却**(`EntryCooldownBars`):防止分数在阈值附近抖动导致连续重复入场(阶梯趋势的 whipsaw 防护)。
+- **守卫**:只在该方向**无已有仓位**时开(复用 signal.go 现有 `s.longPos==nil`/`s.shortPos==nil` 检查),不重复堆。
+- **冷却**(`EntryCooldownBars`):入场后 N 根 bar 内不再触发趋势入场,防分数在阈值附近抖动导致连续重复入场(阶梯趋势 whipsaw 防护)。
+- 开关:`TrendScoreThreshold = 0` 时**只关趋势入场(进攻)**,不影响 §3.3 的惩罚(防守)——两者独立。
 
 纯函数:`trendEntryDir(trendScore, threshold, htfDir) int`(返回 +1/-1/0)。
 
@@ -72,6 +73,8 @@ htfDir = 高周期方向(复用现成信号,不新造):
 - `|trendScore|` 越大(趋势越坐实)→ 逆势那边压得越狠,到 `FullPenaltyScore` 归零。
 - **永远在线、平滑、不看 regime 标签**——这是堵 06-24 那个洞的核心。
 - 在真震荡里 `trendScore≈0` → penaltyFactor≈1 → 不影响低吸,**range 命脉不动**。
+- 开关:`TrendAlignFullPenaltyScore = 0` 时**关惩罚(防守)**,与 §3.2 的进攻开关独立。
+- 应用位置:signal.go 里 `longConf/shortConf` 算出之后、进入入场阈值判断之前;与现有 regime clamp(signal.go:303)叠加(都往同方向压,不冲突)。
 
 纯函数:`trendAlignPenalty(rawConf, sideSign, trendScore, fullPenaltyScore) float64`。
 
@@ -86,19 +89,23 @@ htfDir = 高周期方向(复用现成信号,不新造):
 
 三层仍是:**入场对齐评分(本设计,防+攻)+ trend_cut(砍漏进来的)+ −3R(兜底)**。
 
-## 5. 配置(全部默认"关")
+## 5. 配置(**默认开,参数保守**)
+
+两个独立闸:`TrendScoreThreshold`(进攻=趋势入场)、`TrendAlignFullPenaltyScore`(防守=逆势惩罚)。任一为 0 即关该侧;两者皆 0 = 整特性 inert。**默认两者都给保守正值(开)。**
 
 | param | 默认 | 含义 |
 |---|---|---|
-| `TrendScoreThreshold` | 0 | 0=整特性关;>0=入场所需累积分 |
+| `TrendScoreThreshold` | **3.5** | 趋势入场所需累积分;0=关进攻。保守偏高,只在趋势坐实才开仓 |
+| `TrendAlignFullPenaltyScore` | **2.5** | 逆势惩罚归零所需分;0=关防守。比 Threshold 略低 → 先保护、后进攻 |
 | `TrendScoreDecay` | 0.9 | 每 bar 衰减 |
 | `TrendScorePerBarCap` | 1.0 | 单 bar delta 截顶(ATR 单位) |
-| `TrendScoreMax` | 5.0 | 累积分上限 |
+| `TrendScoreMax` | 5.0 | 累积分上限(`PerBarCap/(1-Decay)`=10,截到 5) |
 | `TrendScoreConfirmTF` | "15m" | 确认周期 |
-| `TrendAlignFullPenaltyScore` | 3.0 | 逆势惩罚归零所需分 |
-| `TrendEntryCooldownBars` | 12 | 趋势入场冷却 |
+| `TrendEntryCooldownBars` | 12 | 趋势入场冷却(≈1h) |
 
-灰度:默认关 → 单引擎(建议先 user4)设 param 开 → 观察。
+**幅度自查**:典型 5m bar body ≈ 0.3–0.5 ATR;趋势里每 bar 净 +0.35 → 稳态 score≈3.5,正好够阈值;震荡里有正有负相消 → score 在 0 附近,既不触发入场也几乎不惩罚。参数是初值,**靠 demo 灰度调**。
+
+**灰度**:默认开 → 部署后**两个 demo 引擎即跑**(= paper-forward 验证,无真钱)→ 观察。要做对照可在某引擎 `set TrendScoreThreshold=0 + TrendAlignFullPenaltyScore=0` 关掉。
 
 ## 6. 测试(TDD)
 
@@ -114,10 +121,11 @@ htfDir = 高周期方向(复用现成信号,不新造):
 - **历史坑**:老 accum"光累积就下单"准确率仅 20%。本设计靠 **15m/1h 确认门 + 冷却**补;但累积分仍需**灰度实测**,不能只信回测([[feedback_backtest_distrust]])。
 - **阶梯趋势仍难**:分数虽平滑,阶梯行情里可能在阈值附近反复触发 → 冷却 + 高周期确认缓解,但需观察实际 whipsaw。
 - **趋势入场是市价(taker)**:增手续费;可接受(趋势仓不该挂限价等)。
-- **不删旧机制**:本次只"叠加 + 默认关",不动现有 regime/clamp/1h-block,降低 live 风险;验证后再谈精简。
+- **默认开 = 两引擎同时生效、无干净 A/B**(用户决定:这俩是 demo,默认开本身就是 paper-forward 验证)。代价是分不清是本设计还是 trend-cut/hysteresis 起的作用;**保守参数 + 随时可 set 0 关掉**缓解;真要 A/B 就一台开一台关。
+- **不删旧机制**:本次只"叠加",不动现有 regime/clamp/1h-block,降低 live 风险;验证后再谈精简。
 
 ## 8. 交付
 
-- 一个 commit:三个纯函数 + 测试 + 接线 + config,默认关。
+- 一个 commit:三个纯函数 + 测试 + 接线 + config,**默认开(保守参数)**。
 - 在 `feat/trend-cut-aistrat` 上叠加。
-- 部署沿用既有流程(cross-build、备份、scp、install+restart、验证),param 单引擎开。
+- 部署沿用既有流程(cross-build、备份、scp、install+restart、验证);默认开 → 两 demo 引擎即跑,观察。
