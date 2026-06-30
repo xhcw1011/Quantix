@@ -44,6 +44,13 @@ func init() {
 		if v, ok := params["HourlyTrendMinSlope"]; ok { cfg.HourlyTrendMinSlope = toFloat(v) }
 		if v, ok := params["HourlyTrendEMA"]; ok { cfg.HourlyTrendEMA = toInt(v) }
 		if v, ok := params["HourlyTrendStickyBars"]; ok { cfg.HourlyTrendStickyBars = toInt(v) }
+		if v, ok := params["TrendScoreThreshold"]; ok { cfg.TrendScoreThreshold = toFloat(v) }
+		if v, ok := params["TrendAlignFullPenaltyScore"]; ok { cfg.TrendAlignFullPenaltyScore = toFloat(v) }
+		if v, ok := params["TrendScoreDecay"]; ok { cfg.TrendScoreDecay = toFloat(v) }
+		if v, ok := params["TrendScorePerBarCap"]; ok { cfg.TrendScorePerBarCap = toFloat(v) }
+		if v, ok := params["TrendScoreMax"]; ok { cfg.TrendScoreMax = toFloat(v) }
+		if v, ok := params["TrendScoreConfirmTF"].(string); ok { cfg.TrendScoreConfirmTF = v }
+		if v, ok := params["TrendEntryCooldownBars"]; ok { cfg.TrendEntryCooldownBars = toInt(v) }
 		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
 		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
 		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
@@ -286,6 +293,16 @@ type Config struct {
 	// (default — enabled per-engine via params for gradual rollout, e.g. 12 ≈ 1h).
 	HourlyTrendStickyBars int
 
+	// ── Trend-score leg (see docs/superpowers/specs/2026-06-30-aistrat-trend-score-leg-design.md) ──
+	// Continuous 5m trend-accumulation score replacing the binary regime gate.
+	TrendScoreThreshold        float64 // accumulated score to trigger a trend entry; 0 = no trend entry (offense off)
+	TrendAlignFullPenaltyScore float64 // |score| at which counter-trend fade conf → 0; 0 = no penalty (defense off)
+	TrendScoreDecay            float64 // per-bar decay of trendScore (e.g. 0.9)
+	TrendScorePerBarCap        float64 // per-bar delta clamp in ATR units (e.g. 1.0)
+	TrendScoreMax              float64 // |trendScore| cap (e.g. 5.0)
+	TrendScoreConfirmTF        string  // higher-TF confirm source: "15m" (lastTrendDir) or "1h" (lastHourlyDir)
+	TrendEntryCooldownBars     int     // primary bars to wait after a trend entry before another
+
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
 	TPLevels     []float64 // R-multiples for each TP level
@@ -461,6 +478,13 @@ func DefaultConfig() Config {
 		HourlyTrendMinSlope: 0.0002, // 0.02%/bar — a flat/lagging EMA reads neutral (don't over-suppress)
 		HourlyTrendEMA:      16,     // 4h trend reference (was period-80 = 20h, too laggy → forced longs into falls)
 		HourlyTrendStickyBars: 0,    // 1h-dir hysteresis: 0 = off (enable per-engine via params, e.g. 12 ≈ 1h)
+		TrendScoreThreshold:        3.5,
+		TrendAlignFullPenaltyScore: 2.5,
+		TrendScoreDecay:            0.9,
+		TrendScorePerBarCap:        1.0,
+		TrendScoreMax:              5.0,
+		TrendScoreConfirmTF:        "15m",
+		TrendEntryCooldownBars:     12,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────

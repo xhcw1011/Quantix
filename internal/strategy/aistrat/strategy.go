@@ -68,6 +68,8 @@ type AIStrategy struct {
 	lastRegime      Regime    // current detected regime (updated every signal check)
 	lastHourlyDir   int       // 1h EMA trend direction (sticky, used by entry filter): +1 bull, -1 bear, 0 neutral
 	hourlyDirCooldown int     // hysteresis cooldown (primary bars) for lastHourlyDir; see stickyHourlyDir
+	trendScore         float64 // signed 5m trend-accumulation score; see trendscore.go
+	trendEntryCooldown int     // primary bars remaining before another trend-score entry
 	lastBBMiddle    float64   // BB middle band from last reversion signal (for TP)
 	lastBBLower     float64   // BB lower band (for grid SL)
 	lastBBUpper     float64   // BB upper band (for grid SL)
