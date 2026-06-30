@@ -234,6 +234,13 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	s.lastHourlyDir, s.hourlyDirCooldown = stickyHourlyDir(
 		s.hourlyTrendDir(), s.lastHourlyDir, s.hourlyDirCooldown, s.cfg.HourlyTrendStickyBars)
 
+	// ── Trend-score: accumulate on each primary bar (5m), decay cooldown ──
+	s.trendScore = updateTrendScore(s.trendScore, bar.Close-bar.Open, atr,
+		s.cfg.TrendScoreDecay, s.cfg.TrendScorePerBarCap, s.cfg.TrendScoreMax)
+	if s.trendEntryCooldown > 0 {
+		s.trendEntryCooldown--
+	}
+
 	// Grid positions: NO regime-based exit. Grid trades close via TP only.
 	// Risk is managed by small qty per layer + max 2 layers cap.
 	// Regime exit was actively harmful: it triggered on small moves ($5) that are
@@ -288,6 +295,11 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	longConf, longEntry := s.techBuySignal()
 	shortConf, shortEntry := s.techSellSignal()
+
+	// Continuous trend-alignment penalty (replaces dependence on the binary regime
+	// gate; with-trend / flat score leaves conf unchanged). See trendscore.go.
+	longConf = trendAlignPenalty(longConf, 1, s.trendScore, s.cfg.TrendAlignFullPenaltyScore)
+	shortConf = trendAlignPenalty(shortConf, -1, s.trendScore, s.cfg.TrendAlignFullPenaltyScore)
 
 	// Set reason string based on signal type
 	var longReason, shortReason string
@@ -677,6 +689,40 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 					s.lastConf = shortConf
 					s.openTrend(ctx, "SHORT", price, entry, atr, gptTP)
 					if s.shortPos != nil { s.shortPos.entryRegime = regime }
+				}
+			}
+		}
+	}
+
+	// ── Trend-score entry: 5m accumulation + HTF confirm opens a trend position ──
+	// Independent of the technical-confidence entries above; guarded by no-rebuy
+	// (s.longPos/shortPos == nil) and a cooldown so it can't stack on chop wobble.
+	if s.trendEntryCooldown == 0 {
+		htfDir := s.lastTrendDir
+		if s.cfg.TrendScoreConfirmTF == "1h" {
+			htfDir = s.lastHourlyDir
+		}
+		switch trendEntryDir(s.trendScore, s.cfg.TrendScoreThreshold, htfDir) {
+		case 1:
+			if s.longPos == nil {
+				s.lastConf = 1.0
+				s.openTrend(ctx, "LONG", price, math.Round(price*100)/100, atr, 0)
+				if s.longPos != nil {
+					s.longPos.entryRegime = regime
+					s.trendEntryCooldown = s.cfg.TrendEntryCooldownBars
+					s.log.Info("AI: TREND-SCORE entry", zap.String("side", "LONG"),
+						zap.Float64("score", s.trendScore), zap.Int("htf", htfDir))
+				}
+			}
+		case -1:
+			if s.shortPos == nil {
+				s.lastConf = 1.0
+				s.openTrend(ctx, "SHORT", price, math.Round(price*100)/100, atr, 0)
+				if s.shortPos != nil {
+					s.shortPos.entryRegime = regime
+					s.trendEntryCooldown = s.cfg.TrendEntryCooldownBars
+					s.log.Info("AI: TREND-SCORE entry", zap.String("side", "SHORT"),
+						zap.Float64("score", s.trendScore), zap.Int("htf", htfDir))
 				}
 			}
 		}
