@@ -508,6 +508,7 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 
 		liveCfg := live.EngineConfig{
 			StrategyID:              engineID,
+			Symbol:                  req.Symbol,
 			StatusInterval:          time.Minute,
 			BarInterval:             parseBarInterval(req.Interval),
 			Leverage:                req.Leverage,

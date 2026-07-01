@@ -26,6 +26,7 @@ import (
 // EngineConfig holds live engine parameters.
 type EngineConfig struct {
 	StrategyID     string
+	Symbol         string // the single symbol this engine trades; used to ignore other engines' fills on a shared account
 	InitialCapital float64 // used for % return calculations only; real balance synced from exchange
 	StatusInterval time.Duration
 	BarInterval    time.Duration // primary kline interval for stale detection (e.g. 5*time.Minute)
@@ -210,6 +211,16 @@ func (e *Engine) SyncBalance(ctx context.Context, baseCurrency string) error {
 	equity := e.broker.Cash()
 	e.cfg.InitialCapital = equity
 	return e.risk.UpdateEquity(equity)
+}
+
+// fillForOtherSymbol reports whether a user-data-stream fill belongs to a
+// different symbol than this engine trades. The UDS is account-wide, so when two
+// engines share one exchange account each sees the other's fills as "unmatched"
+// and would double-count their cash via applyUnmatchedFillCash. Ignore fills for
+// other symbols. Empty fillSymbol or engineSymbol (unknown) is treated as
+// belonging, so a legit fill is never dropped when the symbol isn't populated.
+func fillForOtherSymbol(fillSymbol, engineSymbol string) bool {
+	return fillSymbol != "" && engineSymbol != "" && fillSymbol != engineSymbol
 }
 
 // watchdogStaleThreshold is how long the engine tolerates no bar activity before
@@ -459,6 +470,12 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			}
 		}
 		go uds.SubscribeUserData(ctx, func(fill exchange.OrderFill, clientOrderID, status string) {
+			// The user-data stream is account-wide. When another engine shares this
+			// exchange account, ignore its fills entirely — otherwise the unmatched-fill
+			// path would double-count their cash into this engine's accounting.
+			if fillForOtherSymbol(fill.Symbol, e.cfg.Symbol) {
+				return
+			}
 			// Sync position state on ANY order event (fill, cancel, new) — not just fills.
 			// This catches manual opens, manual closes, manual cancels, SL/TP triggers.
 			if status != "FILLED" && status != "PARTIALLY_FILLED" {
