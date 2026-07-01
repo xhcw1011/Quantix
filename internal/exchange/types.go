@@ -21,6 +21,10 @@ type Kline struct {
 	NumTrades int64
 	// Whether the candle is closed (vs. in-progress)
 	IsClosed bool
+	// Warmup marks a historical bar replayed at engine startup to prime strategy
+	// indicators. The live engine feeds these through Strategy.OnBar but suppresses
+	// order execution for them, so a strategy doesn't trade on stale signals.
+	Warmup bool
 }
 
 // Ticker represents the best bid/ask and last price for a symbol.

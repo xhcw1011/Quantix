@@ -606,6 +606,7 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 			}
 			for _, k := range klines {
 				k.IsClosed = true
+				k.Warmup = true // prime indicators; engine suppresses orders for these
 				select {
 				case klineCh <- k:
 				default:

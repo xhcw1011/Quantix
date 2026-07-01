@@ -44,6 +44,7 @@ type Broker struct {
 	equity        atomic.Value // float64
 	walletBalance atomic.Value // float64 — true exchange wallet balance, independent of leverage
 	lastPrice     atomic.Value // float64; updated by engine before each OnBar
+	warmup        atomic.Bool  // true while replaying startup backfill bars; PlaceOrder is a no-op
 
 	// engineCtx is set by engine.Run before processing begins.
 	// Poll goroutines for limit/stop orders use this context so they
@@ -157,7 +158,17 @@ func (b *Broker) SyncBalance(ctx context.Context, asset string) error {
 // Routes to the appropriate exchange method based on req.Type.
 // For MARKET orders, submits synchronously and returns the OMS order ID.
 // For LIMIT/STOP orders, submits asynchronously (fill tracking via future WS integration).
+// SetWarmup toggles warmup mode. While true (startup backfill replay), PlaceOrder
+// is a no-op so a strategy priming its indicators on historical bars does not
+// place real orders on stale signals. The engine turns it off on the first live bar.
+func (b *Broker) SetWarmup(v bool) { b.warmup.Store(v) }
+
 func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
+	// Warmup replay: prime indicators without trading on historical bars.
+	if b.warmup.Load() {
+		return ""
+	}
+
 	// Soft idempotency: block duplicate orders for the same symbol+side to
 	// prevent double-position after network retries.
 	if existing := b.omsInst.FindPending(req.Symbol, req.Side); existing != nil {

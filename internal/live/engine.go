@@ -693,6 +693,10 @@ func (e *Engine) onBar(bar exchange.Kline) {
 		e.equityAdjusted.Store(float64(0)) // consumed
 	}
 
+	// Suppress order execution while replaying startup backfill bars, so the
+	// strategy primes its indicators without trading on stale signals.
+	e.broker.SetWarmup(bar.Warmup)
+
 	e.strategy.OnBar(e.stratCtx, bar)
 }
 

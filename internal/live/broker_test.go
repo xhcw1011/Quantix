@@ -230,6 +230,36 @@ func TestLiveBroker_MarketOrderSuccess(t *testing.T) {
 	mock.mu.Unlock()
 }
 
+func TestLiveBroker_WarmupSuppressesOrders(t *testing.T) {
+	mock := &mockOrderClient{
+		marketFill: exchange.OrderFill{ExchangeID: "exch-1", FilledQty: 1, AvgPrice: 50000, Status: "filled"},
+	}
+	b, _ := newTestLiveBroker(mock)
+	b.SetLastPrice(50000)
+	b.cash.Store(100000.0)
+	b.equity.Store(100000.0)
+
+	// Warmup ON: a strategy priming indicators on backfill bars must not trade.
+	b.SetWarmup(true)
+	ordID := b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "BTCUSDT", Side: strategy.SideBuy, Type: strategy.OrderMarket, Qty: 1,
+	})
+	assert.Empty(t, ordID, "warmup order should be suppressed")
+	mock.mu.Lock()
+	assert.Equal(t, 0, mock.marketCalls, "no exchange call during warmup")
+	mock.mu.Unlock()
+
+	// Warmup OFF: live bars trade normally.
+	b.SetWarmup(false)
+	ordID2 := b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "BTCUSDT", Side: strategy.SideBuy, Type: strategy.OrderMarket, Qty: 1,
+	})
+	require.NotEmpty(t, ordID2, "order after warmup should place")
+	mock.mu.Lock()
+	assert.Equal(t, 1, mock.marketCalls, "exchange called once after warmup ends")
+	mock.mu.Unlock()
+}
+
 func TestLiveBroker_MarketOrderExchangeError(t *testing.T) {
 	mock := &mockOrderClient{
 		marketErr: errors.New("insufficient balance"),
