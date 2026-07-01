@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	goBinance "github.com/adshao/go-binance/v2/futures"
@@ -24,6 +25,58 @@ import (
 type OrderBroker struct {
 	client *goBinance.Client
 	log    *zap.Logger
+
+	// Per-symbol LOT_SIZE/PRICE_FILTER precision, loaded lazily from
+	// exchangeInfo on first order. Guards against -1111 "precision over maximum"
+	// rejections for symbols other than the ones the formatting was hardcoded to.
+	mu            sync.RWMutex
+	filters       map[string]symbolFilter
+	filtersLoaded bool
+}
+
+// symbolFilterFor returns the cached precision filter for symbol, loading
+// exchangeInfo once on first use. On load failure it returns a zero filter,
+// whose qtyStr/priceStr fall back to safe default precision.
+func (b *OrderBroker) symbolFilterFor(ctx context.Context, symbol string) symbolFilter {
+	b.mu.RLock()
+	loaded := b.filtersLoaded
+	f := b.filters[symbol]
+	b.mu.RUnlock()
+	if loaded {
+		return f
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.filtersLoaded {
+		b.loadFiltersLocked(ctx)
+	}
+	return b.filters[symbol]
+}
+
+// loadFiltersLocked fetches exchangeInfo and caches every symbol's step/tick
+// precision. Caller must hold b.mu. On error it logs and leaves filtersLoaded
+// false so the next order retries the fetch.
+func (b *OrderBroker) loadFiltersLocked(ctx context.Context) {
+	info, err := b.client.NewExchangeInfoService().Do(ctx)
+	if err != nil {
+		b.log.Warn("exchangeInfo fetch failed — order precision uses fallback formatting", zap.Error(err))
+		return
+	}
+	m := make(map[string]symbolFilter, len(info.Symbols))
+	for _, s := range info.Symbols {
+		var f symbolFilter
+		if lf := s.LotSizeFilter(); lf != nil {
+			f.stepSize, f.qtyDecimals = parseStep(lf.StepSize)
+		}
+		if pf := s.PriceFilter(); pf != nil {
+			f.tickSize, f.priceDecimals = parseStep(pf.TickSize)
+		}
+		m[s.Symbol] = f
+	}
+	b.filters = m
+	b.filtersLoaded = true
+	b.log.Info("loaded Binance futures symbol filters", zap.Int("symbols", len(m)))
 }
 
 // NewOrderBroker creates a Binance Futures OrderBroker.
@@ -79,12 +132,13 @@ func NewOrderBrokerWithConfig(apiKey, apiSecret string, testnet bool, cfg config
 // positionSide: "LONG", "SHORT", or "" (one-way / BOTH mode).
 func (b *OrderBroker) PlaceMarketOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty float64, clientOrderID string) (exchange.OrderFill, error) {
 	binSide := toBinanceSide(side)
+	f := b.symbolFilterFor(ctx, symbol)
 
 	svc := b.client.NewCreateOrderService().
 		Symbol(symbol).
 		Side(binSide).
 		Type(goBinance.OrderTypeMarket).
-		Quantity(fmt.Sprintf("%.8f", qty))
+		Quantity(f.qtyStr(qty))
 
 	if ps := toFuturesPositionSide(positionSide); ps != "" {
 		svc = svc.PositionSide(ps)
@@ -115,8 +169,9 @@ func (b *OrderBroker) PlaceMarketOrder(ctx context.Context, symbol string, side 
 // PlaceLimitOrder submits a limit order with GTC time-in-force.
 // positionSide: "LONG", "SHORT", or "" (BOTH for one-way mode).
 func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error) {
-	qtyStr := fmt.Sprintf("%.3f", qty)   // ETHUSDT: 3 decimal precision
-	priceStr := fmt.Sprintf("%.2f", price) // ETHUSDT: 2 decimal precision
+	f := b.symbolFilterFor(ctx, symbol)
+	qtyStr := f.qtyStr(qty)
+	priceStr := f.priceStr(price)
 
 	svc := b.client.NewCreateOrderService().
 		Symbol(symbol).
@@ -155,13 +210,14 @@ func (b *OrderBroker) PlaceLimitOrder(ctx context.Context, symbol string, side e
 // PlaceReduceOnlyLimitOrder places a GTC limit order with ReduceOnly=true.
 // Used for staged take-profit orders that close an existing position.
 func (b *OrderBroker) PlaceReduceOnlyLimitOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, price float64, clientOrderID string) (string, error) {
+	f := b.symbolFilterFor(ctx, symbol)
 	svc := b.client.NewCreateOrderService().
 		Symbol(symbol).
 		Side(toBinanceSide(side)).
 		Type(goBinance.OrderTypeLimit).
 		TimeInForce(goBinance.TimeInForceTypeGTC).
-		Quantity(fmt.Sprintf("%.8f", qty)).
-		Price(fmt.Sprintf("%.8f", price))
+		Quantity(f.qtyStr(qty)).
+		Price(f.priceStr(price))
 
 	// Hedge mode: positionSide implies the side to reduce; reduceOnly conflicts with it.
 	// One-way mode: no positionSide, use reduceOnly to prevent accidental position opening.
@@ -192,12 +248,13 @@ func (b *OrderBroker) PlaceReduceOnlyLimitOrder(ctx context.Context, symbol stri
 // PlaceStopMarketOrder places a STOP_MARKET algo order that fires when stopPrice is reached.
 // Uses the Algo Order API (/fapi/v1/algoOrder) which Binance requires for conditional orders.
 func (b *OrderBroker) PlaceStopMarketOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, stopPrice float64, clientOrderID string) (string, error) {
+	f := b.symbolFilterFor(ctx, symbol)
 	svc := b.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(toBinanceSide(side)).
 		Type(goBinance.AlgoOrderTypeStopMarket).
-		TriggerPrice(fmt.Sprintf("%.8f", stopPrice)).
-		Quantity(fmt.Sprintf("%.8f", qty))
+		TriggerPrice(f.priceStr(stopPrice)).
+		Quantity(f.qtyStr(qty))
 
 	if ps := toFuturesPositionSide(positionSide); ps != "" {
 		svc = svc.PositionSide(ps)
@@ -225,12 +282,13 @@ func (b *OrderBroker) PlaceStopMarketOrder(ctx context.Context, symbol string, s
 // PlaceTakeProfitMarketOrder places a TAKE_PROFIT_MARKET algo order that fires when triggerPrice is reached.
 // Uses the Algo Order API (/fapi/v1/algoOrder).
 func (b *OrderBroker) PlaceTakeProfitMarketOrder(ctx context.Context, symbol string, side exchange.OrderSide, positionSide string, qty, triggerPrice float64, clientOrderID string) (string, error) {
+	f := b.symbolFilterFor(ctx, symbol)
 	svc := b.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(toBinanceSide(side)).
 		Type(goBinance.AlgoOrderTypeTakeProfitMarket).
-		TriggerPrice(fmt.Sprintf("%.8f", triggerPrice)).
-		Quantity(fmt.Sprintf("%.8f", qty))
+		TriggerPrice(f.priceStr(triggerPrice)).
+		Quantity(f.qtyStr(qty))
 
 	if ps := toFuturesPositionSide(positionSide); ps != "" {
 		svc = svc.PositionSide(ps)
