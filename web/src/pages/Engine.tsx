@@ -3,6 +3,7 @@ import { listCredentials, listEngines, listStrategies, listStrategyPresets, star
 import { useTradeSocket } from '../hooks/useTradeSocket'
 import { COMMON_SYMBOLS, strategiesForMarket, strategyLabel, strategyMeta } from '../constants/strategies'
 import type { MarketKind } from '../constants/strategies'
+import { fieldsForStrategy } from '../constants/strategyFields'
 
 interface Preset {
   name: string
@@ -127,6 +128,7 @@ export default function Engine() {
   const [presets, setPresets] = useState<Preset[]>([])
   const [selectedPresetIdx, setSelectedPresetIdx] = useState<number>(-1)
   const [extraParams, setExtraParams] = useState<string>('')  // JSON textarea
+  const [stratParams, setStratParams] = useState<Record<string, number | string>>({})
 
   // Credentials and strategies filtered by the selected market tab.
   const filteredCreds = creds.filter((c) =>
@@ -172,10 +174,13 @@ export default function Engine() {
     return () => clearInterval(t)
   }, [])
 
-  // Refetch presets whenever strategy_id changes.
+  // Refetch presets and reset dynamic params whenever strategy_id changes.
   useEffect(() => {
     setSelectedPresetIdx(-1)
     setExtraParams('')
+    setStratParams(
+      Object.fromEntries(fieldsForStrategy(form.strategy_id).map((f) => [f.key, f.default]))
+    )
     listStrategyPresets(form.strategy_id)
       .then((r) => setPresets(Array.isArray(r.data) ? r.data : []))
       .catch(() => setPresets([]))
@@ -223,6 +228,13 @@ export default function Engine() {
           return
         }
       }
+      // Dynamic strategy fields — highest priority, override preset + textarea.
+      for (const f of fieldsForStrategy(form.strategy_id)) {
+        let v: any = stratParams[f.key]
+        if (v === '' || v === undefined) continue
+        if (f.type === 'number') { v = Number(v); if (f.pctOf1) v = v / 100 }
+        params[f.key] = v
+      }
       if (form.strategy_id === 'macross') {
         if (showShortToggle && form.enable_short) {
           params.EnableShort = true
@@ -262,6 +274,7 @@ export default function Engine() {
 
   const runningEngines = engines.filter((e) => e.running)
   const stoppedEngines = engines.filter((e) => !e.running)
+  const fields = fieldsForStrategy(form.strategy_id)
 
   return (
     <div className="space-y-6">
@@ -386,7 +399,7 @@ export default function Engine() {
                   </datalist>
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Interval</label>
+                  <label className="block text-xs text-slate-400 mb-1">检查频率(K线)</label>
                   <select
                     value={form.interval}
                     onChange={(e) => setForm({ ...form, interval: e.target.value })}
@@ -397,8 +410,8 @@ export default function Engine() {
                 </div>
               </div>
 
-              {/* Strategy presets + advanced JSON params */}
-              {(presets.length > 0 || form.strategy_id === 'ai' || form.strategy_id === 'composite') && (
+              {/* Strategy presets + advanced JSON params — only for futures strategies without a field schema */}
+              {fields.length === 0 && (presets.length > 0 || form.strategy_id === 'ai' || form.strategy_id === 'composite') && (
                 <div className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-slate-300">Preset</span>
@@ -437,6 +450,51 @@ export default function Engine() {
                     />
                     <p className="text-[10px] text-slate-500 mt-1">Merged on top of preset. Form fields below (short toggle, SL/TP) override both.</p>
                   </details>
+                </div>
+              )}
+
+              {/* Dynamic strategy parameter fields — shown for spot strategies with a schema */}
+              {fields.length > 0 && (
+                <div className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 space-y-3">
+                  <span className="text-xs font-semibold text-slate-300">参数设置</span>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {fields.map((f) => (
+                      <div key={f.key}>
+                        <label className="block text-xs text-slate-400 mb-1">
+                          {f.label}{f.unit ? ` (${f.unit})` : ''}
+                        </label>
+                        {f.type === 'select' ? (
+                          <select
+                            value={String(stratParams[f.key] ?? f.default)}
+                            onChange={(e) => setStratParams((p) => ({ ...p, [f.key]: e.target.value }))}
+                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                          >
+                            {f.options?.map((o) => (
+                              <option key={o.value} value={o.value}>{o.label}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="number"
+                            value={stratParams[f.key] ?? f.default}
+                            step={f.step}
+                            min={f.min}
+                            max={f.max}
+                            onChange={(e) =>
+                              setStratParams((p) => ({
+                                ...p,
+                                [f.key]: e.target.value === '' ? '' : Number(e.target.value),
+                              }))
+                            }
+                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                          />
+                        )}
+                        {f.help && (
+                          <p className="text-[10px] text-slate-500 mt-0.5">{f.help}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
