@@ -30,7 +30,6 @@ export const STRATEGY_FIELDS: Record<string, FieldDef[]> = {
   dca: [
     { key: 'BuyQuoteAmount', label: '每次金额', type: 'number', default: 50, unit: 'USDT', min: 1, help: '每个周期买入多少 U' },
     { key: 'Interval', label: '定投周期', type: 'select', default: 'weekly', options: PERIOD_OPTIONS },
-    { key: 'LimitOffsetPct', label: '挂单偏移', type: 'number', default: -0.2, unit: '%', step: 0.1, pctOf1: true, help: '负=挂低于市价(逢低捡),正=高于市价(必成交)' },
     { key: 'MaxTotalQuote', label: '累计上限', type: 'number', default: 0, unit: 'USDT', min: 0, help: '0 = 不限' },
   ],
   dipdca: [

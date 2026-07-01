@@ -156,11 +156,11 @@ func TestOnBar_BuyOrder(t *testing.T) {
 	if req.Side != strategy.SideBuy {
 		t.Errorf("side: got %s, want BUY", req.Side)
 	}
-	if req.Type != strategy.OrderLimit {
-		t.Errorf("type: got %s, want LIMIT", req.Type)
+	if req.Type != strategy.OrderMarket {
+		t.Errorf("type: got %s, want MARKET", req.Type)
 	}
-	if req.Price <= 0 {
-		t.Errorf("price should be > 0, got %f", req.Price)
+	if req.Price != 0 {
+		t.Errorf("market order must have no price, got %f", req.Price)
 	}
 	if req.Qty <= 0 {
 		t.Errorf("qty should be > 0, got %f", req.Qty)
@@ -195,8 +195,8 @@ func TestOnBar_SellOrder(t *testing.T) {
 	if req.Side != strategy.SideSell {
 		t.Errorf("side: got %s, want SELL", req.Side)
 	}
-	if req.Type != strategy.OrderLimit {
-		t.Errorf("type: got %s, want LIMIT", req.Type)
+	if req.Type != strategy.OrderMarket {
+		t.Errorf("type: got %s, want MARKET", req.Type)
 	}
 	// qty = 10/100 = 0.1; capped at baseQty=0.6 → 0.1
 	wantQty := 10.0 / 100.0

@@ -1,12 +1,11 @@
 // Package dipdca implements a spot "dip-weighted DCA" (逢跌加码定投) strategy:
-// on a calendar cadence (daily/weekly/monthly) it places a single LIMIT buy,
+// on a calendar cadence (daily/weekly/monthly) it places a single MARKET buy,
 // scaling the quote amount UP when price is below its recent SMA — buying more
 // on larger dips ("跌得多买得多"). Buy-only (spot accumulate).
 package dipdca
 
 import (
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -96,7 +95,6 @@ type DipDCA struct {
 	log           *zap.Logger
 	lastKey       string    // last period key that triggered a buy
 	closes        []float64 // rolling close history, length <= RefPeriod
-	pendingOrder  string    // resting limit order id (cancelled on next period)
 	totalInvested float64   // sum of filled buy notional (quote)
 }
 
@@ -110,7 +108,7 @@ func (d *DipDCA) Name() string {
 	return fmt.Sprintf("DipDCA(%s,%s)", d.cfg.Symbol, strings.ToLower(d.cfg.Interval))
 }
 
-// OnBar implements strategy.Strategy. Accumulates close history, fires one LIMIT
+// OnBar implements strategy.Strategy. Accumulates close history, fires one MARKET
 // buy per calendar period, scaled by how far price is below the rolling SMA.
 func (d *DipDCA) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Symbol != d.cfg.Symbol || bar.Close <= 0 {
@@ -138,15 +136,6 @@ func (d *DipDCA) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		return
 	}
 
-	// Cancel any resting limit from the previous period.
-	if d.pendingOrder != "" {
-		if err := ctx.CancelOrder(d.pendingOrder); err != nil {
-			d.log.Warn("DipDCA: cancel stale order failed",
-				zap.String("id", d.pendingOrder), zap.Error(err))
-		}
-		d.pendingOrder = ""
-	}
-
 	// Compute SMA over available history.
 	n := len(d.closes)
 	var sma float64
@@ -160,40 +149,30 @@ func (d *DipDCA) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	price := bar.Close
 	amt := dipBuyAmount(d.cfg.BaseQuoteAmount, price, sma, d.cfg.DipRefPct, d.cfg.DipMultiplier)
-
-	px := math.Round(price*100) / 100
-	if px <= 0 {
-		return
-	}
-	qty := amt / px
+	qty := amt / price
 
 	id := ctx.PlaceOrder(strategy.OrderRequest{
 		Symbol: d.cfg.Symbol,
 		Side:   strategy.SideBuy,
-		Type:   strategy.OrderLimit,
+		Type:   strategy.OrderMarket,
 		Qty:    qty,
-		Price:  px,
 		// PositionSide intentionally empty (spot / net mode)
 	})
-	if id != "" {
-		d.pendingOrder = id
-		d.log.Info("DipDCA: limit buy placed",
-			zap.String("period", key),
-			zap.Float64("sma", sma),
-			zap.Float64("price", price),
-			zap.Float64("amt_quote", amt),
-			zap.Float64("qty", qty),
-			zap.String("id", id))
-	}
+	d.log.Info("DipDCA: market buy placed",
+		zap.String("period", key),
+		zap.Float64("sma", sma),
+		zap.Float64("price", price),
+		zap.Float64("amt_quote", amt),
+		zap.Float64("qty", qty),
+		zap.String("id", id))
 }
 
-// OnFill implements strategy.Strategy — tracks total invested and clears pending order.
+// OnFill implements strategy.Strategy — tracks total invested.
 func (d *DipDCA) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	if fill.Symbol != d.cfg.Symbol || fill.Side != strategy.SideBuy {
 		return
 	}
 	d.totalInvested += fill.Qty * fill.Price
-	d.pendingOrder = ""
 	d.log.Info("DipDCA: buy filled",
 		zap.Float64("qty", fill.Qty),
 		zap.Float64("price", fill.Price),

@@ -1,7 +1,7 @@
 // Package rebalance implements a spot portfolio rebalancing strategy.
 // It maintains a target percentage of equity in the base asset; when the
-// actual allocation drifts beyond a configurable band, it places a LIMIT
-// order to restore the target (sells high, buys low).
+// actual allocation drifts beyond a configurable band, it places a MARKET
+// order to restore the target.
 package rebalance
 
 import (
@@ -83,7 +83,7 @@ func rebalanceTrade(baseQty, cash, price, targetPct, bandPct, minTradeQuote floa
 
 // OnBar implements strategy.Strategy.  On each closed bar it checks whether
 // the base-asset allocation has drifted beyond the band and, if so, places a
-// LIMIT order to restore the target weight.
+// MARKET order to restore the target weight.
 func (r *Rebalance) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Symbol != r.cfg.Symbol || bar.Close <= 0 {
 		return
@@ -104,21 +104,19 @@ func (r *Rebalance) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	currentPct := baseValue / total
 
 	qty := math.Abs(tq) / price
-	limitPx := math.Round(price*100) / 100
 
 	if tq > 0 {
 		// Need more base: BUY.
 		ctx.PlaceOrder(strategy.OrderRequest{
 			Symbol: r.cfg.Symbol,
 			Side:   strategy.SideBuy,
-			Type:   strategy.OrderLimit,
+			Type:   strategy.OrderMarket,
 			Qty:    qty,
-			Price:  limitPx,
 		})
 		r.log.Info("rebalance: BUY",
 			zap.String("symbol", r.cfg.Symbol),
 			zap.Float64("qty", qty),
-			zap.Float64("limitPx", limitPx),
+			zap.Float64("price", price),
 			zap.Float64("currentPct", currentPct),
 			zap.Float64("targetPct", r.cfg.TargetBasePct),
 		)
@@ -128,14 +126,13 @@ func (r *Rebalance) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		ctx.PlaceOrder(strategy.OrderRequest{
 			Symbol: r.cfg.Symbol,
 			Side:   strategy.SideSell,
-			Type:   strategy.OrderLimit,
+			Type:   strategy.OrderMarket,
 			Qty:    sellQty,
-			Price:  limitPx,
 		})
 		r.log.Info("rebalance: SELL",
 			zap.String("symbol", r.cfg.Symbol),
 			zap.Float64("qty", sellQty),
-			zap.Float64("limitPx", limitPx),
+			zap.Float64("price", price),
 			zap.Float64("currentPct", currentPct),
 			zap.Float64("targetPct", r.cfg.TargetBasePct),
 		)

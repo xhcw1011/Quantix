@@ -1,11 +1,10 @@
 // Package dca implements a spot dollar-cost-averaging strategy: on a calendar
-// cadence (daily/weekly/monthly) it places a single LIMIT buy for a fixed quote
-// amount, at a configurable offset from the market price. Buy-only (spot accumulate).
+// cadence (daily/weekly/monthly) it places a single MARKET buy for a fixed quote
+// amount. Buy-only (spot accumulate).
 package dca
 
 import (
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -31,18 +30,11 @@ func dcaPeriodKey(interval string, t time.Time) string {
 	}
 }
 
-// dcaLimitPrice returns the limit price for a DCA buy: marketPrice adjusted by
-// offsetPct (negative = below market / patient maker; positive = above / crosses).
-func dcaLimitPrice(marketPrice, offsetPct float64) float64 {
-	return marketPrice * (1 + offsetPct)
-}
-
 // Config parameters for the DCA strategy.
 type Config struct {
 	Symbol         string  // e.g. "BTCUSDT"
 	BuyQuoteAmount float64 // quote (USDT) spent per buy
 	Interval       string  // "daily" | "weekly" | "monthly"
-	LimitOffsetPct float64 // signed offset from market for the limit price
 	MaxTotalQuote  float64 // cap on total invested; 0 = no cap
 }
 
@@ -51,7 +43,6 @@ type DCA struct {
 	cfg           Config
 	log           *zap.Logger
 	lastKey       string  // last period key that triggered a buy
-	pendingOrder  string  // resting DCA limit order id (cancelled on next period)
 	totalInvested float64 // sum of filled buy notional (quote)
 }
 
@@ -63,8 +54,8 @@ func (d *DCA) Name() string {
 	return fmt.Sprintf("DCA(%s,%s,$%.0f)", d.cfg.Symbol, strings.ToLower(d.cfg.Interval), d.cfg.BuyQuoteAmount)
 }
 
-// OnBar implements strategy.Strategy. On each new calendar period it cancels any
-// unfilled prior DCA limit and places a fresh limit buy.
+// OnBar implements strategy.Strategy. On each new calendar period it places a
+// market buy for a fixed quote amount.
 func (d *DCA) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Symbol != d.cfg.Symbol || bar.Close <= 0 {
 		return
@@ -81,41 +72,24 @@ func (d *DCA) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		return
 	}
 
-	// Cancel a still-resting limit from the previous period (avoid stacking).
-	if d.pendingOrder != "" {
-		if err := ctx.CancelOrder(d.pendingOrder); err != nil {
-			d.log.Warn("DCA: cancel stale order failed", zap.String("id", d.pendingOrder), zap.Error(err))
-		}
-		d.pendingOrder = ""
-	}
-
-	limitPx := math.Round(dcaLimitPrice(bar.Close, d.cfg.LimitOffsetPct)*100) / 100
-	if limitPx <= 0 {
-		return
-	}
-	qty := d.cfg.BuyQuoteAmount / limitPx
+	qty := d.cfg.BuyQuoteAmount / bar.Close
 	id := ctx.PlaceOrder(strategy.OrderRequest{
 		Symbol: d.cfg.Symbol,
 		Side:   strategy.SideBuy,
-		Type:   strategy.OrderLimit,
+		Type:   strategy.OrderMarket,
 		Qty:    qty,
-		Price:  limitPx,
 	})
-	if id != "" {
-		d.pendingOrder = id
-		d.log.Info("DCA: limit buy placed",
-			zap.String("period", key), zap.Float64("price", limitPx),
-			zap.Float64("qty", qty), zap.Float64("quote", d.cfg.BuyQuoteAmount), zap.String("id", id))
-	}
+	d.log.Info("DCA: market buy placed",
+		zap.String("period", key), zap.Float64("price", bar.Close),
+		zap.Float64("qty", qty), zap.Float64("quote", d.cfg.BuyQuoteAmount), zap.String("id", id))
 }
 
-// OnFill implements strategy.Strategy — tracks invested total and clears the pending order.
+// OnFill implements strategy.Strategy — tracks invested total.
 func (d *DCA) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	if fill.Symbol != d.cfg.Symbol || fill.Side != strategy.SideBuy {
 		return
 	}
 	d.totalInvested += fill.Qty * fill.Price
-	d.pendingOrder = ""
 	d.log.Info("DCA: buy filled",
 		zap.Float64("qty", fill.Qty), zap.Float64("price", fill.Price),
 		zap.Float64("total_invested", d.totalInvested))
@@ -132,9 +106,6 @@ func init() {
 		}
 		if v, ok := params["Interval"].(string); ok && v != "" {
 			cfg.Interval = v
-		}
-		if v, ok := params["LimitOffsetPct"]; ok {
-			cfg.LimitOffsetPct = toFloat(v)
 		}
 		if v, ok := params["MaxTotalQuote"]; ok {
 			cfg.MaxTotalQuote = toFloat(v)

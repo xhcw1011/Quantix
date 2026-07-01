@@ -1,7 +1,7 @@
 // Package spotgrid implements a long-only spot "低买高卖" step-grid strategy:
-// it accumulates base asset by placing LIMIT buys on price dips and takes
-// profits on rallies by selling individual tranches at the grid spread above
-// their entry price.
+// it accumulates base asset by placing MARKET buys on price dips and takes
+// profits on rallies by selling individual tranches with MARKET orders once
+// price has risen at least one grid step above their entry price.
 package spotgrid
 
 import (
@@ -97,17 +97,15 @@ func (s *SpotGrid) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	idx := gridTrancheToSell(s.tranches, price, s.cfg.StepPct)
 	if idx >= 0 {
 		tr := s.tranches[idx]
-		sellPx := math.Round(price*100) / 100
 		id := ctx.PlaceOrder(strategy.OrderRequest{
 			Symbol: s.cfg.Symbol,
 			Side:   strategy.SideSell,
-			Type:   strategy.OrderLimit,
+			Type:   strategy.OrderMarket,
 			Qty:    tr.qty,
-			Price:  sellPx,
 		})
-		s.log.Info("spotgrid: LIMIT sell placed",
+		s.log.Info("spotgrid: MARKET sell placed",
 			zap.Float64("entry_price", tr.price),
-			zap.Float64("sell_price", sellPx),
+			zap.Float64("bar_price", price),
 			zap.Float64("qty", tr.qty),
 			zap.String("id", id))
 		// Remove tranche and reduce invested capital.
@@ -123,20 +121,18 @@ func (s *SpotGrid) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				zap.Float64("max", s.cfg.MaxHoldQuote))
 			return
 		}
-		buyPx := math.Round(price*100) / 100
-		qty := s.cfg.QuotePerBuy / buyPx
+		qty := s.cfg.QuotePerBuy / price
 		id := ctx.PlaceOrder(strategy.OrderRequest{
 			Symbol: s.cfg.Symbol,
 			Side:   strategy.SideBuy,
-			Type:   strategy.OrderLimit,
+			Type:   strategy.OrderMarket,
 			Qty:    qty,
-			Price:  buyPx,
 		})
-		s.tranches = append(s.tranches, tranche{price: buyPx, qty: qty})
-		s.lastBuyPrice = buyPx
+		s.tranches = append(s.tranches, tranche{price: price, qty: qty})
+		s.lastBuyPrice = price
 		s.invested += s.cfg.QuotePerBuy
-		s.log.Info("spotgrid: LIMIT buy placed",
-			zap.Float64("price", buyPx),
+		s.log.Info("spotgrid: MARKET buy placed",
+			zap.Float64("price", price),
 			zap.Float64("qty", qty),
 			zap.Float64("quote", s.cfg.QuotePerBuy),
 			zap.Float64("invested", s.invested),
