@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { listCredentials, listEngines, listStrategies, listStrategyPresets, startEngine, stopEngineById } from '../api/trading'
 import { useTradeSocket } from '../hooks/useTradeSocket'
+import { COMMON_SYMBOLS, strategiesForMarket, strategyLabel, strategyMeta } from '../constants/strategies'
+import type { MarketKind } from '../constants/strategies'
 
 interface Preset {
   name: string
@@ -86,12 +88,11 @@ interface EngineInfo {
   error?: string
 }
 
-const symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT']
 const intervals = ['1m', '5m', '15m', '1h', '4h', '1d']
 
 const initialForm = {
   credential_id: 0,
-  strategy_id: 'macross',
+  strategy_id: 'dca',
   symbol: 'BTCUSDT',
   interval: '1h',
   mode: 'live' as 'live' | 'paper',
@@ -111,14 +112,12 @@ const initialForm = {
   },
 }
 
-function isDerivative(cred: Credential | undefined) {
-  return cred?.market_type === 'swap' || cred?.market_type === 'futures'
-}
 
 export default function Engine() {
   const [engines, setEngines] = useState<EngineInfo[]>([])
   const [creds, setCreds] = useState<Credential[]>([])
   const [strategies, setStrategies] = useState<string[]>(['macross', 'grid', 'meanreversion', 'mlstrat'])
+  const [market, setMarket] = useState<MarketKind>('spot')
   const [form, setForm] = useState(initialForm)
   const [showForm, setShowForm] = useState(false)
   const [showRisk, setShowRisk] = useState(false)
@@ -129,9 +128,28 @@ export default function Engine() {
   const [selectedPresetIdx, setSelectedPresetIdx] = useState<number>(-1)
   const [extraParams, setExtraParams] = useState<string>('')  // JSON textarea
 
-  const selectedCred = creds.find((c) => c.id === form.credential_id)
-  const showLeverage = form.mode === 'live' && isDerivative(selectedCred)
-  const showShortToggle = form.strategy_id === 'macross' && isDerivative(selectedCred)
+  // Credentials and strategies filtered by the selected market tab.
+  const filteredCreds = creds.filter((c) =>
+    market === 'spot' ? c.market_type === 'spot' : (c.market_type === 'swap' || c.market_type === 'futures')
+  )
+  const availableStrategies = strategiesForMarket(market).filter((s) => strategies.includes(s.id))
+
+  // Leverage and short toggle are futures-only concepts.
+  const showLeverage = market === 'futures' && form.mode === 'live'
+  const showShortToggle = market === 'futures' && form.strategy_id === 'macross'
+
+  const handleMarketChange = (newMarket: MarketKind) => {
+    setMarket(newMarket)
+    const marketCreds = creds.filter((c) =>
+      newMarket === 'spot' ? c.market_type === 'spot' : (c.market_type === 'swap' || c.market_type === 'futures')
+    )
+    const marketStrategies = strategiesForMarket(newMarket).filter((s) => strategies.includes(s.id))
+    setForm((f) => ({
+      ...f,
+      credential_id: marketCreds[0]?.id ?? 0,
+      strategy_id: marketStrategies[0]?.id ?? f.strategy_id,
+    }))
+  }
 
   const loadEngines = () =>
     listEngines()
@@ -140,9 +158,11 @@ export default function Engine() {
 
   useEffect(() => {
     listCredentials().then((r) => {
-      const c = r.data || []
+      const c: Credential[] = r.data || []
       setCreds(c)
-      if (c.length > 0) setForm((f) => ({ ...f, credential_id: c[0].id }))
+      // Default to first spot credential; fall back to first of any type.
+      const spotFirst = c.find((cr) => cr.market_type === 'spot') ?? c[0]
+      if (spotFirst) setForm((f) => ({ ...f, credential_id: spotFirst.id }))
     })
     listStrategies().then((r) => {
       if (Array.isArray(r.data) && r.data.length > 0) setStrategies(r.data)
@@ -259,10 +279,42 @@ export default function Engine() {
       {showForm && (
         <div className="bg-slate-800 rounded-xl p-5">
           <h2 className="text-sm font-semibold text-slate-300 mb-4">Start New Engine</h2>
+
+          {/* Market tabs: 现货 (default/primary) vs 合约·进阶 (secondary) */}
+          <div className="flex gap-2 mb-5">
+            <button
+              type="button"
+              onClick={() => handleMarketChange('spot')}
+              className={`px-4 py-1.5 rounded text-sm font-semibold border transition-colors ${
+                market === 'spot'
+                  ? 'bg-blue-600 border-blue-600 text-white'
+                  : 'bg-transparent border-slate-600 text-slate-400 hover:border-slate-400'
+              }`}
+            >
+              现货
+            </button>
+            <button
+              type="button"
+              onClick={() => handleMarketChange('futures')}
+              className={`px-4 py-1.5 rounded text-sm font-semibold border transition-colors ${
+                market === 'futures'
+                  ? 'bg-slate-500 border-slate-500 text-white'
+                  : 'bg-transparent border-slate-700 text-slate-500 hover:border-slate-500'
+              }`}
+            >
+              合约 · 进阶
+            </button>
+          </div>
+
           {creds.length === 0 ? (
             <p className="text-slate-400 text-sm">
               No credentials found.{' '}
               <a href="/credentials" className="text-blue-400 hover:underline">Add a credential</a> first.
+            </p>
+          ) : filteredCreds.length === 0 ? (
+            <p className="text-slate-400 text-sm">
+              还没有{market === 'spot' ? '现货' : '合约'}凭证，先去{' '}
+              <a href="/credentials" className="text-blue-400 hover:underline">添加凭证</a>。
             </p>
           ) : (
             <form onSubmit={handleStart} className="space-y-4">
@@ -294,7 +346,7 @@ export default function Engine() {
                     onChange={(e) => setForm({ ...form, credential_id: +e.target.value })}
                     className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
                   >
-                    {creds.map((c) => (
+                    {filteredCreds.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.label} ({c.exchange} {c.market_type}{c.testnet ? ' testnet' : ''}{c.demo ? ' demo' : ''})
                       </option>
@@ -302,24 +354,36 @@ export default function Engine() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Strategy</label>
-                  <select
-                    value={form.strategy_id}
-                    onChange={(e) => setForm({ ...form, strategy_id: e.target.value })}
-                    className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                  >
-                    {strategies.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
+                  <label className="block text-xs text-slate-400 mb-1">策略</label>
+                  {availableStrategies.length === 0 ? (
+                    <p className="text-xs text-slate-500 py-1.5">当前市场无可用策略</p>
+                  ) : (
+                    <select
+                      value={form.strategy_id}
+                      onChange={(e) => setForm({ ...form, strategy_id: e.target.value })}
+                      className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                    >
+                      {availableStrategies.map((s) => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                  )}
+                  {strategyMeta(form.strategy_id) && (
+                    <p className="text-xs text-slate-500 mt-1">{strategyMeta(form.strategy_id)!.desc}</p>
+                  )}
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Symbol</label>
-                  <select
+                  <label className="block text-xs text-slate-400 mb-1">交易对</label>
+                  <input
+                    list="symbol-list"
                     value={form.symbol}
                     onChange={(e) => setForm({ ...form, symbol: e.target.value })}
                     className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                  >
-                    {symbols.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
+                    placeholder="e.g. BTCUSDT"
+                  />
+                  <datalist id="symbol-list">
+                    {COMMON_SYMBOLS.map((s) => <option key={s} value={s} />)}
+                  </datalist>
                 </div>
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Interval</label>
@@ -376,7 +440,7 @@ export default function Engine() {
                 </div>
               )}
 
-              {/* Leverage slider — only for live + swap/futures credentials */}
+              {/* Leverage slider — futures mode only, live only */}
               {showLeverage && (
                 <div className="bg-orange-900/20 border border-orange-700/40 rounded-lg p-3">
                   <div className="flex items-center justify-between mb-1">
@@ -395,7 +459,7 @@ export default function Engine() {
                 </div>
               )}
 
-              {/* Short toggle + Stop/TP — only for macross on derivatives */}
+              {/* Short toggle — futures mode, macross strategy only */}
               {showShortToggle && (
                 <div className="bg-purple-900/20 border border-purple-700/40 rounded-lg p-3 space-y-3">
                   <div className="flex items-center justify-between">
@@ -568,7 +632,7 @@ export default function Engine() {
                   )}
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-xs text-slate-400">
-                  <div><span className="block text-slate-500">Strategy</span>{eng.strategy_id}</div>
+                  <div><span className="block text-slate-500">Strategy</span>{strategyLabel(eng.strategy_id)}</div>
                   <div><span className="block text-slate-500">Symbol</span>{eng.symbol}</div>
                   <div><span className="block text-slate-500">Interval</span>{eng.interval}</div>
                   <div><span className="block text-slate-500">Started</span>{new Date(eng.started_at).toLocaleString()}</div>
