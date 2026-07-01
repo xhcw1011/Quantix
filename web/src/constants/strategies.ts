@@ -15,7 +15,10 @@ export interface StrategyMeta {
 export const STRATEGIES: StrategyMeta[] = [
   // ── 现货(主推:不需要方向 edge,靠纪律 + 波动 + 长期向上)──
   { id: 'dca', name: '定投', desc: '定期定额自动买入,长期囤币', market: 'spot' },
-  // 现货网格 / 再平衡 / 逢跌加码定投 / 长仓趋势 —— 建好后加到这里
+  { id: 'dipdca', name: '逢跌加码定投', desc: '定投升级:价格越低于均线,买得越多', market: 'spot' },
+  { id: 'spotgrid', name: '现货网格', desc: '震荡里低买高卖,吃波动(长仓)', market: 'spot' },
+  { id: 'rebalance', name: '再平衡', desc: '固定比例持仓,定期机械高抛低吸', market: 'spot' },
+  { id: 'spottrend', name: '长仓趋势', desc: '均线金叉买入、死叉离场(不做空)', market: 'spot' },
 
   // ── 合约(降级 · 进阶用户)──
   { id: 'ai', name: '智能网格', desc: '震荡里低买高卖 + 趋势腿(合约)', market: 'futures', advanced: true },

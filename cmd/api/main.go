@@ -46,10 +46,14 @@ import (
 	_ "github.com/Quantix/quantix/internal/strategy/aistrat_v4"
 	_ "github.com/Quantix/quantix/internal/strategy/composite"
 	_ "github.com/Quantix/quantix/internal/strategy/dca"
+	_ "github.com/Quantix/quantix/internal/strategy/dipdca"
 	_ "github.com/Quantix/quantix/internal/strategy/grid"
 	_ "github.com/Quantix/quantix/internal/strategy/macross"
 	_ "github.com/Quantix/quantix/internal/strategy/meanreversion"
 	_ "github.com/Quantix/quantix/internal/strategy/mlstrat"
+	_ "github.com/Quantix/quantix/internal/strategy/rebalance"
+	_ "github.com/Quantix/quantix/internal/strategy/spotgrid"
+	_ "github.com/Quantix/quantix/internal/strategy/spottrend"
 )
 
 func main() {
