@@ -212,6 +212,18 @@ func (e *Engine) SyncBalance(ctx context.Context, baseCurrency string) error {
 	return e.risk.UpdateEquity(equity)
 }
 
+// watchdogStaleThreshold is how long the engine tolerates no bar activity before
+// the watchdog stops it. It scales with the traded interval (3× — i.e. three
+// missed bars) so a slow feed like 15m isn't killed between healthy bars, with a
+// 10-minute floor for fast/unknown intervals.
+func watchdogStaleThreshold(barInterval time.Duration) time.Duration {
+	const floor = 10 * time.Minute
+	if t := 3 * barInterval; t > floor {
+		return t
+	}
+	return floor
+}
+
 // Run starts the live trading loop. Reads closed klines from klineCh.
 func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	e.startTime = time.Now()
@@ -333,6 +345,9 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 
 	// Independent watchdog: detects engine loop freeze and forces process exit.
 	// Runs in a separate goroutine so it works even when the main select loop is blocked.
+	// Threshold scales with the traded interval so a slow (e.g. 15m) feed isn't
+	// killed between healthy bars; the status warning (2× interval) fires first.
+	staleKill := watchdogStaleThreshold(e.cfg.BarInterval)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -342,11 +357,12 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				return
 			case <-ticker.C:
 				elapsed := time.Since(e.lastBarTime)
-				if elapsed > 10*time.Minute {
-					e.log.Error("WATCHDOG: no bar activity for 10+ min — stopping THIS engine only (feed likely dead); process + other engines keep running",
+				if elapsed > staleKill {
+					e.log.Error("WATCHDOG: no bar activity past stale threshold — stopping THIS engine only (feed likely dead); process + other engines keep running",
 						zap.String("engine_id", e.cfg.StrategyID),
 						zap.Int("user_id", e.cfg.UserID),
-						zap.Duration("since_last_bar", elapsed))
+						zap.Duration("since_last_bar", elapsed),
+						zap.Duration("threshold", staleKill))
 					if e.notifier != nil {
 						e.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
 							"engine %s (user %d) stopped: no market data for %s — restart it once the feed is healthy",
