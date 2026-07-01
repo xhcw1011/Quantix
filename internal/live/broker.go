@@ -4,6 +4,7 @@ package live
 import (
 	"context"
 	"fmt"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -444,6 +445,26 @@ func (b *Broker) placeStopOrderAsync(ctx context.Context, ordID string, req stra
 }
 
 // resolveQty computes the order quantity based on position side and available balance/position.
+// defaultQtyStep is the LOT_SIZE step applied to auto-sized (Qty:0) order
+// quantities so they satisfy the exchange's quantity precision. Binance
+// BTCUSDT/ETHUSDT futures both use 0.001. Stopgap until per-symbol stepSize is
+// sourced from exchangeInfo; strategies that pass an explicit Qty>0 (e.g.
+// aistrat) return early below and are unaffected.
+const defaultQtyStep = 0.001
+
+// roundQtyToStep floors qty down to the nearest multiple of step so an
+// auto-sized quantity passes the exchange LOT_SIZE filter (a raw float like
+// 0.05120565 is rejected with -1111). Floor (not round) so the order never
+// exceeds available margin. The +1e-9 nudge keeps values that are exact
+// multiples but land just below due to float error (2.116/0.001 =
+// 2115.9999999998) from flooring one step short. step<=0 or qty<=0 → unchanged.
+func roundQtyToStep(qty, step float64) float64 {
+	if step <= 0 || qty <= 0 {
+		return qty
+	}
+	return math.Floor(qty/step+1e-9) * step
+}
+
 func (b *Broker) resolveQty(req strategy.OrderRequest, posSide string) (float64, error) {
 	if req.Qty > 0 {
 		return req.Qty, nil
@@ -459,7 +480,7 @@ func (b *Broker) resolveQty(req strategy.OrderRequest, posSide string) (float64,
 			return 0, fmt.Errorf("all-in buy: no last price available")
 		}
 		cash := safeLoadFloat64(&b.cash)
-		return cash * 0.99 / lp, nil
+		return roundQtyToStep(cash*0.99/lp, defaultQtyStep), nil
 
 	// Opening short: use cash as margin (1x equiv)
 	case posSide == string(strategy.PositionSideShort) && req.Side == strategy.SideSell:
@@ -467,7 +488,7 @@ func (b *Broker) resolveQty(req strategy.OrderRequest, posSide string) (float64,
 			return 0, fmt.Errorf("all-in short: no last price available")
 		}
 		cash := safeLoadFloat64(&b.cash)
-		return cash * 0.99 / lp, nil
+		return roundQtyToStep(cash*0.99/lp, defaultQtyStep), nil
 
 	// Closing long or net sell
 	case (posSide == "" && req.Side == strategy.SideSell) ||
