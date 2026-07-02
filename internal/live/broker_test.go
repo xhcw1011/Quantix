@@ -260,6 +260,32 @@ func TestLiveBroker_WarmupSuppressesOrders(t *testing.T) {
 	mock.mu.Unlock()
 }
 
+func TestLiveBroker_AutoSizeMarketFills(t *testing.T) {
+	// cash 10000 @ 50000 → resolved qty = 10000*0.99/50000 = 0.198 (0.001-aligned).
+	mock := &mockOrderClient{
+		marketFill: exchange.OrderFill{ExchangeID: "e1", FilledQty: 0.198, AvgPrice: 50000, Fee: 1, Status: "filled"},
+	}
+	b, o := newTestLiveBroker(mock)
+	b.SetLastPrice(50000)
+	b.cash.Store(10000.0)
+	b.equity.Store(10000.0)
+
+	// Qty:0 = auto-size. Before the fix the OMS order kept Qty=0 and the real
+	// fill was rejected as an over-fill, leaving the order stuck OPEN.
+	ordID := b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "BTCUSDT", Side: strategy.SideBuy, Type: strategy.OrderMarket, Qty: 0,
+	})
+	require.NotEmpty(t, ordID)
+
+	ord := o.Get(ordID)
+	require.NotNil(t, ord)
+	assert.InDelta(t, 0.198, ord.Qty, 1e-9, "auto-sized order must carry the resolved qty, not 0")
+
+	fe := drainFill(t, o)
+	assert.InDelta(t, 0.198, fe.Fill.Qty, 1e-9)
+	assert.Equal(t, oms.StatusFilled, o.Get(ordID).Status, "fill must reconcile → FILLED, not stuck OPEN")
+}
+
 func TestLiveBroker_MarketOrderExchangeError(t *testing.T) {
 	mock := &mockOrderClient{
 		marketErr: errors.New("insufficient balance"),

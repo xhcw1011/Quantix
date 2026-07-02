@@ -194,6 +194,23 @@ func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
 		}
 	}
 
+	// Resolve auto-sized (Qty==0) market orders up-front so the exposure guard,
+	// the OMS order record, and fill reconciliation all use the real quantity.
+	// Otherwise the OMS order keeps Qty=0 and OMS.Fill rejects every real fill as
+	// an over-fill (fill.Qty > 0 = order.Qty), leaving the order stuck OPEN and the
+	// strategy's hedge state (macross hasLong/hasShort) never updating. Explicit
+	// Qty>0 orders (e.g. aistrat) skip this.
+	if req.Qty == 0 && (req.Type == strategy.OrderMarket || req.Type == strategy.OrderType("")) {
+		resolved, err := b.resolveQty(req, string(req.PositionSide))
+		if err != nil {
+			b.log.Warn("auto-size: cannot resolve order qty — dropping order",
+				zap.String("symbol", req.Symbol), zap.String("side", string(req.Side)),
+				zap.String("position_side", string(req.PositionSide)), zap.Error(err))
+			return ""
+		}
+		req.Qty = resolved
+	}
+
 	// Hard gross-exposure guard — the live path has no risk.Check (paper-only).
 	// Block an OPENING order whose projected gross notional would exceed
 	// equity × leverage × frac, using the syncer's exchange-truth position so a
