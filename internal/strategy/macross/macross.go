@@ -52,6 +52,12 @@ type MACross struct {
 	// Updated via OnFill so we don't rely on PortfolioView for hedge positions.
 	hasLong  bool
 	hasShort bool
+
+	// Warmup priming: sawWarmup records that a backfill replay happened; primed
+	// records that we've established the initial position from trend state on the
+	// first live bar afterwards (see primeDirection).
+	sawWarmup bool
+	primed    bool
 }
 
 // New creates a new MACross strategy with the given configuration.
@@ -72,6 +78,9 @@ func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Symbol != m.cfg.Symbol {
 		return
 	}
+	if bar.Warmup {
+		m.sawWarmup = true
+	}
 
 	m.closes = append(m.closes, bar.Close)
 
@@ -81,6 +90,26 @@ func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	fast := indicator.SMA(m.closes, m.cfg.FastPeriod)
 	slow := indicator.SMA(m.closes, m.cfg.SlowPeriod)
+
+	// Establish the position implied by the trend on the first live bar after a
+	// warmup replay (hedge mode only — simple mode already re-checks Portfolio).
+	if m.cfg.EnableShort {
+		flat := !m.hasLong && !m.hasShort
+		if dir := primeDirection(m.sawWarmup, bar.Warmup, m.primed, flat, indicator.Last(fast), indicator.Last(slow)); dir != 0 {
+			m.primed = true
+			ctx.Log.Info("macross: priming position from trend state after warmup",
+				zap.String("symbol", bar.Symbol), zap.Int("dir", dir),
+				zap.Float64("fast", indicator.Last(fast)), zap.Float64("slow", indicator.Last(slow)))
+			if m.trendOK() {
+				if dir > 0 {
+					m.openLong(ctx, bar)
+				} else {
+					m.openShort(ctx, bar)
+				}
+			}
+			return
+		}
+	}
 
 	if m.cfg.EnableShort {
 		m.onBarHedge(ctx, bar, fast, slow)
@@ -179,14 +208,7 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 			ctx.PlaceOrder(strategy.CloseShort(bar.Symbol, 0))
 		}
 		if !m.hasLong && m.trendOK() {
-			req := strategy.OpenLong(bar.Symbol, 0)
-			if m.cfg.StopLossPct > 0 {
-				req.StopLoss = bar.Close * (1 - m.cfg.StopLossPct)
-			}
-			if m.cfg.TakeProfitPct > 0 {
-				req.TakeProfit = bar.Close * (1 + m.cfg.TakeProfitPct)
-			}
-			ctx.PlaceOrder(req)
+			m.openLong(ctx, bar)
 		}
 
 	case indicator.CrossUnder(fast, slow):
@@ -201,16 +223,33 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 			ctx.PlaceOrder(strategy.CloseLong(bar.Symbol, 0))
 		}
 		if !m.hasShort && m.trendOK() {
-			req := strategy.OpenShort(bar.Symbol, 0)
-			if m.cfg.StopLossPct > 0 {
-				req.StopLoss = bar.Close * (1 + m.cfg.StopLossPct)
-			}
-			if m.cfg.TakeProfitPct > 0 {
-				req.TakeProfit = bar.Close * (1 - m.cfg.TakeProfitPct)
-			}
-			ctx.PlaceOrder(req)
+			m.openShort(ctx, bar)
 		}
 	}
+}
+
+// openLong places a hedge-mode long entry with optional stop-loss / take-profit.
+func (m *MACross) openLong(ctx *strategy.Context, bar exchange.Kline) {
+	req := strategy.OpenLong(bar.Symbol, 0)
+	if m.cfg.StopLossPct > 0 {
+		req.StopLoss = bar.Close * (1 - m.cfg.StopLossPct)
+	}
+	if m.cfg.TakeProfitPct > 0 {
+		req.TakeProfit = bar.Close * (1 + m.cfg.TakeProfitPct)
+	}
+	ctx.PlaceOrder(req)
+}
+
+// openShort places a hedge-mode short entry with optional stop-loss / take-profit.
+func (m *MACross) openShort(ctx *strategy.Context, bar exchange.Kline) {
+	req := strategy.OpenShort(bar.Symbol, 0)
+	if m.cfg.StopLossPct > 0 {
+		req.StopLoss = bar.Close * (1 + m.cfg.StopLossPct)
+	}
+	if m.cfg.TakeProfitPct > 0 {
+		req.TakeProfit = bar.Close * (1 - m.cfg.TakeProfitPct)
+	}
+	ctx.PlaceOrder(req)
 }
 
 // OnFill implements strategy.Strategy.
