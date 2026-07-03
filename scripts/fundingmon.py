@@ -15,12 +15,30 @@
 """
 import argparse
 import json
+import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
 FAPI = "https://fapi.binance.com"
+
+# Telegram 通知(可选):设了这两个环境变量就自动往你 TG 发告警,人在哪都收得到。
+#   export QUANTIX_TG_BOT_TOKEN=...   export QUANTIX_TG_CHAT_ID=...
+TG_TOKEN = os.environ.get("QUANTIX_TG_BOT_TOKEN", "")
+TG_CHAT = os.environ.get("QUANTIX_TG_CHAT_ID", "")
+
+
+def tg_send(msg: str) -> None:
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    try:
+        data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": msg}).encode()
+        urllib.request.urlopen(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=data, timeout=10)
+    except Exception as e:
+        print(f"  (TG 发送失败: {e})")
 
 
 def now() -> str:
@@ -87,7 +105,12 @@ def main() -> None:
           f"收敛阈值 {args.exit_rate:.3f}%/期(≈{exit_ann:.0f}%/yr, ≈{args.exit_rate * 24 / ih:.2f}%/天)")
     print(f"# 退出信号 ① 费率翻转到对你不利  ② 有利每期费率均值跌破 {args.exit_rate:.3f}%"
           + (f"  ③ 价格{'跌破' if args.side == 'long' else '涨破'} {args.price_stop}" if args.price_stop else ""))
+    print(f"# TG 通知: {'开(会推到你 Telegram)' if TG_TOKEN and TG_CHAT else '关(未设 QUANTIX_TG_BOT_TOKEN/CHAT_ID,仅终端响铃)'}")
     print("-" * 90)
+    if not args.once:
+        tg_send(f"✅ fundingmon 已启动,盯 {args.symbol}({args.side}):费率翻转/收敛<{args.exit_rate}%"
+                + (f"/价格{'跌破' if args.side == 'long' else '涨破'}{args.price_stop}" if args.price_stop else "")
+                + " 会推你。")
 
     alerted_flip = False
     alerted_conv = False
@@ -113,7 +136,7 @@ def main() -> None:
         # ① 翻转告警(只在首次翻转时响)
         if favor_now < 0:
             if not alerted_flip:
-                bell_alert(f"🔴🔴 费率已翻转到对你不利({s['last'] * 100:+.4f}%/期)—— 你在倒贴,立即撤!")
+                bell_alert(args.symbol, f"🔴🔴 费率已翻转到对你不利({s['last'] * 100:+.4f}%/期)—— 你在倒贴,立即撤!")
                 alerted_flip = True
         else:
             alerted_flip = False
@@ -121,7 +144,7 @@ def main() -> None:
         # ② 收敛告警(有利每期费率均值跌破阈值,只在首次跌破时响)
         if favor_now > 0 and favor_avg_pct < args.exit_rate:
             if not alerted_conv:
-                bell_alert(f"🟠 费率收敛:有利每期均值降到 {favor_avg_pct:+.4f}% < 阈值 {args.exit_rate:.3f}% "
+                bell_alert(args.symbol, f"🟠 费率收敛:有利每期均值降到 {favor_avg_pct:+.4f}% < 阈值 {args.exit_rate:.3f}% "
                            f"(年化 {favor_avg_ann * 100:+.0f}%)—— 错位在消失、顺风变弱,按纪律考虑撤出。")
                 alerted_conv = True
         elif favor_avg_pct >= args.exit_rate:
@@ -132,7 +155,7 @@ def main() -> None:
             breached = (s["mark"] <= args.price_stop) if args.side == "long" else (s["mark"] >= args.price_stop)
             if breached:
                 if not alerted_price:
-                    bell_alert(f"🔴🔴 价格{'跌破' if args.side == 'long' else '涨破'}止损位 "
+                    bell_alert(args.symbol, f"🔴🔴 价格{'跌破' if args.side == 'long' else '涨破'}止损位 "
                                f"{args.price_stop}(当前 {s['mark']:.4f})—— 平仓!")
                     alerted_price = True
             else:
@@ -143,12 +166,13 @@ def main() -> None:
         time.sleep(args.interval)
 
 
-def bell_alert(msg: str) -> None:
+def bell_alert(symbol: str, msg: str) -> None:
     sys.stdout.write("\a")  # 终端响铃
     print("=" * 90)
     print(msg)
     print("=" * 90)
     sys.stdout.flush()
+    tg_send(f"[fundingmon {symbol}]\n{msg}")
 
 
 if __name__ == "__main__":
