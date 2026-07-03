@@ -71,6 +71,9 @@ def main() -> None:
                     help="有利费率(近均值,每期%%)跌破此值就告警收敛/撤出。"
                          "注意:是'每期'——1h 合约 0.3%%=7.2%%/天,8h 合约 0.3%%=0.9%%/天")
     ap.add_argument("--lookback", type=int, default=8, help="用最近几期算均值")
+    ap.add_argument("--price-stop", type=float, default=0.0,
+                    help="价格止损位:long 时 mark 跌破它、short 时 mark 涨破它就告警(0=关)。"
+                         "仅告警,不下单——真止损请在交易所挂原生 STOP 单")
     ap.add_argument("--interval", type=int, default=300, help="轮询间隔(秒)")
     ap.add_argument("--once", action="store_true", help="只查一次后退出")
     args = ap.parse_args()
@@ -82,11 +85,13 @@ def main() -> None:
     print(f"# 监控 {args.symbol}  结算 {ih}h  方向 {args.side}"
           f"(收{'负' if args.side == 'long' else '正'}费率)  "
           f"收敛阈值 {args.exit_rate:.3f}%/期(≈{exit_ann:.0f}%/yr, ≈{args.exit_rate * 24 / ih:.2f}%/天)")
-    print(f"# 退出信号 ① 费率翻转到对你不利  ② 有利每期费率均值跌破 {args.exit_rate:.3f}%")
+    print(f"# 退出信号 ① 费率翻转到对你不利  ② 有利每期费率均值跌破 {args.exit_rate:.3f}%"
+          + (f"  ③ 价格{'跌破' if args.side == 'long' else '涨破'} {args.price_stop}" if args.price_stop else ""))
     print("-" * 90)
 
     alerted_flip = False
     alerted_conv = False
+    alerted_price = False
     while True:
         try:
             s = snapshot(args.symbol, ih, args.lookback)
@@ -121,6 +126,17 @@ def main() -> None:
                 alerted_conv = True
         elif favor_avg_pct >= args.exit_rate:
             alerted_conv = False
+
+        # ③ 价格止损告警(long 跌破 / short 涨破;只在首次破线时响)
+        if args.price_stop > 0:
+            breached = (s["mark"] <= args.price_stop) if args.side == "long" else (s["mark"] >= args.price_stop)
+            if breached:
+                if not alerted_price:
+                    bell_alert(f"🔴🔴 价格{'跌破' if args.side == 'long' else '涨破'}止损位 "
+                               f"{args.price_stop}(当前 {s['mark']:.4f})—— 平仓!")
+                    alerted_price = True
+            else:
+                alerted_price = False
 
         if args.once:
             return
