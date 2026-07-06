@@ -22,19 +22,25 @@ A **Pool** is the minimal unit of **capital + risk**:
 
 ```
 Pool {
-  Name         string          // Growth | Yield | Cash
-  Members      []StrategyID    // engines assigned to this pool
-  NotionalCap  float64         // capital allotted (virtual for now)
-  MaxDrawdown  float64         // pool-level DD limit → halt
-  MaxLongExp   float64         // directional exposure caps (fraction of pool equity)
-  MaxShortExp  float64
-  Status       ACTIVE | HALTED
+  Name            string       // Growth | Yield | Cash
+  Members         []StrategyID // engines assigned to this pool
+  NotionalCap     float64      // capital allotted (virtual for now)
+  MaxDrawdown     float64      // pool-level DD limit → halt
+  RecoverDrawdown float64      // DD must fall back below this to un-halt (< MaxDrawdown)
+  RecoverBars     int          // durable-recovery persistence before un-halt
+  MaxLongExp      float64      // directional exposure caps (fraction of pool equity)
+  MaxShortExp     float64
+  Status          ACTIVE | HALTED
 }
 ```
 
-**Risk is read at the pool, never the strategy.** Strategy-level risk is already
-overfit and conflicting (baseline: uniformly weak PF, wildly different behavior), so
-it must rise to the pool.
+**The pool is the *logical* layer for capital/portfolio risk** — it does not replace
+order-safety (ORG, Layer 1) or a strategy's own internal stops (Layer 2). It adds the
+missing layer *above* them: capital-structure risk (drawdown, directional exposure)
+is reasoned and enforced at the pool because strategy-level risk is overfit and
+conflicting (baseline: uniformly weak PF, wildly different behavior). "Risk at the
+pool" is a statement about the logical layer of *this* concern, not a claim that all
+risk collapses to the pool.
 
 **Virtual-first, upgradeable.** A pool's capital source is an interface. Today it is
 a *notional slice of the one shared exchange account* (accounting construct). The
@@ -71,11 +77,18 @@ strategy's pool. Engines already track their own realized/unrealized PnL and
 positions, so this is **aggregation above the engines** — engine internals unchanged.
 
 ```
-pool_equity   = C_pool + Σ(member realized + unrealized PnL)
-pool_DD       = (peak(pool_equity) − pool_equity) / peak(pool_equity)
-pool_long_exp  = Σ(member LONG  notional) / pool_equity
-pool_short_exp = Σ(member SHORT notional) / pool_equity
+pool_realized   = Σ(member realized PnL)     // locked — does not recover
+pool_unrealized = Σ(member unrealized PnL)    // marks — can recover
+pool_equity     = C_pool + pool_realized + pool_unrealized
+pool_DD         = (peak(pool_equity) − pool_equity) / peak(pool_equity)
+pool_long_exp   = Σ(member LONG  notional) / pool_equity
+pool_short_exp  = Σ(member SHORT notional) / pool_equity
 ```
+
+**Realized vs unrealized are tracked separately, not collapsed.** They mean
+different things: a pool down purely on `unrealized` may mean-revert back; a pool
+down on `realized` has *locked* the loss. The halt/recovery logic (§4) reasons over
+this distinction — recovery is trusted only when it is real, not a mark bounce.
 
 **Directional, never net.** Long and short exposure are tracked and capped
 *separately*. Netting is forbidden: grid-long + trend-short can net to "balanced"
@@ -93,6 +106,13 @@ always be exited).
 - **MaxDrawdown → HALT the pool.** When `pool_DD ≥ MaxDrawdown`, the pool goes
   `HALTED`: its members stop *opening* new positions; other pools are unaffected.
   Purpose: stop a tail regime from spreading. This is genuine risk control.
+- **Recovery (un-halt) — hysteresis, not a single line.** A HALTED pool returns to
+  `ACTIVE` only when `pool_DD` falls back **below `RecoverDrawdown`** (a dead band,
+  `RecoverDrawdown < MaxDrawdown`) — the same hysteresis pattern as the TED gate, so
+  a pool does not flap on/off around the halt line. Because recovery must be *real*,
+  it is trusted only when driven by `pool_realized` improvement or a durable
+  `pool_unrealized` recovery held for `RecoverBars` bars — a one-bar mark bounce does
+  not un-halt. A manual operator override to `ACTIVE`/`HALTED` is always available.
 - **MaxExposure → reject over-cap opens** (per direction). An opening order that
   would push `pool_long_exp` (or `pool_short_exp`) past its cap is denied. Purpose:
   a liquidity / leverage throttle (not "risk" in the tail sense).
@@ -158,7 +178,11 @@ Strategy → PoolManager (decision) → ORG (enforcement) → Execution
 ## 8. Testing
 
 - `PoolManager` aggregation + DD/exposure math: pure unit tests (feed member
-  equity/positions, assert pool_equity / pool_DD / directional exposure and status).
+  realized/unrealized + positions, assert pool_equity / pool_DD / directional
+  exposure and status).
+- Halt/recovery hysteresis: DD ≥ MaxDrawdown halts; DD between Recover and Max keeps
+  it halted (dead band); DD < RecoverDrawdown held RecoverBars un-halts; a one-bar
+  mark bounce does not.
 - Direction-aware exposure: assert long and short cap independently; a long + an
   offsetting short both count against their own caps (no netting).
 - `PoolGateRule`: HALTED pool denies opens / allows closes; over-cap directional open
