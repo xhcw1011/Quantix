@@ -14,12 +14,13 @@ import (
 type mockPortfolio struct {
 	cash   float64
 	qty    float64
+	avg    float64
 	hasPos bool
 }
 
 func (m *mockPortfolio) Cash() float64 { return m.cash }
 func (m *mockPortfolio) Position(sym string) (float64, float64, bool) {
-	return m.qty, 0, m.hasPos
+	return m.qty, m.avg, m.hasPos
 }
 func (m *mockPortfolio) Equity(prices map[string]float64) float64 { return m.cash }
 

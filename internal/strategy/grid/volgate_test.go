@@ -46,6 +46,53 @@ func TestGrid_VolGateFlattensAndPausesOnSpike(t *testing.T) {
 	}
 }
 
+// The catastrophic price stop catches low-volume grind-downs the volume gate is
+// blind to: when the held inventory's unrealized loss vs avg entry exceeds
+// StopLossPct, flatten and re-center.
+func TestGrid_CatastrophicStopFlattensOnGrind(t *testing.T) {
+	g := New(Config{Symbol: "BTCUSDT", GridLevels: 3, GridSpacing: 0.01, BaseQty: 0.01, StopLossPct: 0.10})
+	log, _ := zap.NewDevelopment()
+	broker := &mockBroker{}
+	port := &mockPortfolio{cash: 10000}
+	ctx := strategy.NewContext(port, broker, log)
+
+	g.OnBar(ctx, barVol("BTCUSDT", 50000, 100)) // init grid, base=50000
+
+	// now holding a long at avg 50000; price grinds down 12% (> 10% stop), no vol spike
+	port.qty, port.avg, port.hasPos = 0.03, 50000, true
+	n0 := len(broker.orders)
+	g.OnBar(ctx, barVol("BTCUSDT", 44000, 100)) // -12% vs avg → catastrophic stop
+
+	if len(broker.orders) <= n0 {
+		t.Fatal("expected a flatten order when inventory loss exceeds StopLossPct")
+	}
+	last := broker.orders[len(broker.orders)-1]
+	if last.Side != strategy.SideSell || last.Qty != 0.03 {
+		t.Errorf("stop should SELL held qty 0.03, got side=%v qty=%v", last.Side, last.Qty)
+	}
+	if g.basePrice != 0 {
+		t.Errorf("grid should re-center (basePrice=0) after stop, got %f", g.basePrice)
+	}
+}
+
+// A small drawdown within StopLossPct must NOT trigger the stop.
+func TestGrid_CatastrophicStopHoldsWithinThreshold(t *testing.T) {
+	g := New(Config{Symbol: "BTCUSDT", GridLevels: 3, GridSpacing: 0.01, BaseQty: 0.01, StopLossPct: 0.10})
+	log, _ := zap.NewDevelopment()
+	broker := &mockBroker{}
+	port := &mockPortfolio{cash: 10000}
+	ctx := strategy.NewContext(port, broker, log)
+	g.OnBar(ctx, barVol("BTCUSDT", 50000, 100)) // init
+
+	port.qty, port.avg, port.hasPos = 0.03, 50000, true
+	base := g.basePrice
+	g.OnBar(ctx, barVol("BTCUSDT", 48000, 100)) // -4% vs avg, within 10% → no stop
+
+	if g.basePrice != base {
+		t.Errorf("no stop within threshold → grid should NOT re-center (base %f -> %f)", base, g.basePrice)
+	}
+}
+
 func TestPctile(t *testing.T) {
 	cases := []struct {
 		val    float64

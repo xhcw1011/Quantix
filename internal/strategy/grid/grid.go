@@ -22,6 +22,12 @@ type Config struct {
 	GridSpacing float64 // fractional spacing between levels, default 0.01 (1%)
 	BaseQty     float64 // fixed quantity per grid level (0 = use equal cash split)
 
+	// StopLossPct is a catastrophic price stop (opt-in; 0 = disabled): when the
+	// held inventory's unrealized loss vs average entry exceeds this fraction,
+	// flatten and re-center. Catches low-volume grind-downs the volume gate is
+	// blind to — the two protections are complementary (flush vs grind).
+	StopLossPct float64
+
 	// Volatility gate (opt-in; enabled when VolGateWindow > 0). Flattens the grid
 	// and pauses when recent volume signals an incoming large move, re-centering
 	// when calm returns. See volgate.go for the signal + 3-mechanism state machine.
@@ -95,6 +101,23 @@ func (g *Grid) Name() string {
 	return fmt.Sprintf("Grid(levels=%d,spacing=%.2f%%)", g.cfg.GridLevels, g.cfg.GridSpacing*100)
 }
 
+// flattenAndRecenter closes the held long inventory and resets the grid so it
+// re-centers at the current price on the next eligible bar. Shared by the
+// volatility gate and the catastrophic stop.
+func (g *Grid) flattenAndRecenter(ctx *strategy.Context, bar exchange.Kline, reason string) {
+	if q, _, ok := ctx.Portfolio.Position(bar.Symbol); ok && q > 0 {
+		ctx.Log.Info("grid "+reason+": flatten & re-center",
+			zap.String("symbol", bar.Symbol), zap.Float64("qty", q), zap.Float64("close", bar.Close))
+		ctx.PlaceOrder(strategy.OrderRequest{
+			Symbol: bar.Symbol, Side: strategy.SideSell, Type: strategy.OrderMarket, Qty: q,
+		})
+	}
+	for i := range g.gridBuys {
+		g.gridBuys[i] = false
+	}
+	g.basePrice = 0
+}
+
 // OnBar implements strategy.Strategy.
 func (g *Grid) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Symbol != g.cfg.Symbol {
@@ -105,20 +128,20 @@ func (g *Grid) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 	// Volatility gate: feed every bar's volume (kept up to date even during
 	// warmup/init). When it signals "volatile", flatten the inventory and pause;
-	// the grid re-centers on the next calm bar.
+	// the grid re-centers on the next calm bar. Catches band-driven volume flushes.
 	if g.gate != nil && !g.gate.update(bar.Volume) {
-		if q, _, ok := ctx.Portfolio.Position(bar.Symbol); ok && q > 0 {
-			ctx.Log.Info("grid volatility-gate: flatten & pause",
-				zap.String("symbol", bar.Symbol), zap.Float64("qty", q), zap.Float64("close", price))
-			ctx.PlaceOrder(strategy.OrderRequest{
-				Symbol: bar.Symbol, Side: strategy.SideSell, Type: strategy.OrderMarket, Qty: q,
-			})
-		}
-		for i := range g.gridBuys {
-			g.gridBuys[i] = false
-		}
-		g.basePrice = 0 // re-center the grid when calm returns
+		g.flattenAndRecenter(ctx, bar, "volatility-gate")
 		return
+	}
+
+	// Catastrophic price stop: catches low-volume grind-downs the volume gate
+	// misses. Fires when the held long's unrealized loss vs avg entry >= StopLossPct.
+	if g.cfg.StopLossPct > 0 && g.basePrice != 0 {
+		if q, avg, ok := ctx.Portfolio.Position(bar.Symbol); ok && q > 0 && avg > 0 &&
+			(avg-price)/avg >= g.cfg.StopLossPct {
+			g.flattenAndRecenter(ctx, bar, "catastrophic-stop")
+			return
+		}
 	}
 
 	// Initialise grid on first bar
@@ -224,6 +247,9 @@ func init() {
 		}
 		if v, ok := params["BaseQty"]; ok {
 			cfg.BaseQty = toFloat(v)
+		}
+		if v, ok := params["StopLossPct"]; ok {
+			cfg.StopLossPct = toFloat(v)
 		}
 		if v, ok := params["VolGateWindow"]; ok {
 			cfg.VolGateWindow = toInt(v)
