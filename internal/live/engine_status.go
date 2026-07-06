@@ -28,9 +28,15 @@ func (e *Engine) printStatus() {
 	// Count positions: OMS-tracked + syncer-recovered (syncer positions may not be in OMS)
 	openPos := len(positions)
 	if e.posSyncer != nil {
-		if e.posSyncer.HasPosition("LONG") { openPos = max(openPos, 1) }
-		if e.posSyncer.HasPosition("SHORT") { openPos = max(openPos, 1) }
-		if e.posSyncer.HasPosition("LONG") && e.posSyncer.HasPosition("SHORT") { openPos = max(openPos, 2) }
+		if e.posSyncer.HasPosition("LONG") {
+			openPos = max(openPos, 1)
+		}
+		if e.posSyncer.HasPosition("SHORT") {
+			openPos = max(openPos, 1)
+		}
+		if e.posSyncer.HasPosition("LONG") && e.posSyncer.HasPosition("SHORT") {
+			openPos = max(openPos, 2)
+		}
 	}
 
 	e.log.Info("──── Live Trading Status ────",
@@ -43,6 +49,14 @@ func (e *Engine) printStatus() {
 		zap.Int("open_positions", openPos),
 		zap.Bool("risk_halted", e.risk.Halted()),
 	)
+
+	// Order Risk Gateway (ORG) decision tally — the shadow-mode audit surface.
+	if e.org != nil {
+		e.log.Info("──── ORG (Order Risk Gateway) ────",
+			zap.String("mode", e.org.Mode().String()),
+			zap.Any("decisions", e.org.Stats()),
+		)
+	}
 
 	// Push to WS dashboard via OnStatus callback (set by EngineManager when wsHub
 	// is wired). Includes engine-level metrics + any strategy-reported state.
@@ -57,6 +71,10 @@ func (e *Engine) printStatus() {
 			"realized_pnl":     rpnl,
 			"open_positions":   openPos,
 			"risk_halted":      e.risk.Halted(),
+		}
+		if e.org != nil {
+			payload["org_mode"] = e.org.Mode().String()
+			payload["org_decisions"] = e.org.Stats()
 		}
 		if sr, ok := e.strategy.(strategy.StatusReporter); ok {
 			for k, v := range sr.Status() {
@@ -105,9 +123,15 @@ func (e *Engine) publishStatus() {
 	e.fillMu.Unlock()
 	openPos := len(e.positions.All())
 	if e.posSyncer != nil {
-		if e.posSyncer.HasPosition("LONG") { openPos = max(openPos, 1) }
-		if e.posSyncer.HasPosition("SHORT") { openPos = max(openPos, 1) }
-		if e.posSyncer.HasPosition("LONG") && e.posSyncer.HasPosition("SHORT") { openPos = max(openPos, 2) }
+		if e.posSyncer.HasPosition("LONG") {
+			openPos = max(openPos, 1)
+		}
+		if e.posSyncer.HasPosition("SHORT") {
+			openPos = max(openPos, 1)
+		}
+		if e.posSyncer.HasPosition("LONG") && e.posSyncer.HasPosition("SHORT") {
+			openPos = max(openPos, 2)
+		}
 	}
 	e.bus.PublishStatus(bus.StatusMsg{ //nolint:errcheck
 		StrategyID:     e.cfg.StrategyID,

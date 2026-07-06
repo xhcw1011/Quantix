@@ -111,6 +111,9 @@ func (g *Gateway) CancelOrder(orderID string) error {
 	return g.inner.CancelOrder(orderID)
 }
 
+// Mode returns the gateway's current mode (shadow/enforce).
+func (g *Gateway) Mode() Mode { return g.mode }
+
 // evaluate runs rules in order; the first DENY wins.
 func (g *Gateway) evaluate(req strategy.OrderRequest) Decision {
 	st := g.state.Snapshot(req)

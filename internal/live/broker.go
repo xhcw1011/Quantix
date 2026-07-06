@@ -25,10 +25,10 @@ const filledEps = 1e-9
 // protectiveIDs holds exchange order IDs for stop-loss and take-profit orders
 // that were auto-placed after an entry fill.
 type protectiveIDs struct {
-	stopID    string
-	tpID      string
-	tpIDs     []string // staged TP: exchange order IDs
-	tpOmsIDs  []string // staged TP: OMS order IDs (parallel to tpIDs)
+	stopID   string
+	tpID     string
+	tpIDs    []string // staged TP: exchange order IDs
+	tpOmsIDs []string // staged TP: OMS order IDs (parallel to tpIDs)
 }
 
 // Broker submits real orders via an exchange.OrderClient and tracks fills via the OMS.
@@ -49,7 +49,7 @@ type Broker struct {
 	// engineCtx is set by engine.Run before processing begins.
 	// Poll goroutines for limit/stop orders use this context so they
 	// are automatically cancelled when the engine stops.
-	engineCtx context.Context
+	engineCtx    context.Context
 	pollInterval time.Duration
 
 	// protectiveOrders maps posKey(symbol, positionSide) → protectiveIDs
@@ -106,6 +106,22 @@ func (b *Broker) SetEngineCtx(ctx context.Context) { b.engineCtx = ctx }
 
 // SetLastPrice records the most recent market price.
 func (b *Broker) SetLastPrice(price float64) { b.lastPrice.Store(price) }
+
+// LastPrice returns the most recent market price (0 if unset).
+func (b *Broker) LastPrice() float64 { return safeLoadFloat64(&b.lastPrice) }
+
+// GrossQty returns the exchange-truth gross position qty (long+short) via the
+// exposure guard's source, or 0 when the guard is not wired.
+func (b *Broker) GrossQty() float64 {
+	if b.grossQtyFn != nil {
+		return b.grossQtyFn()
+	}
+	return 0
+}
+
+// MaxLeverage returns the account max leverage as set by the exposure guard
+// (0 until SetExposureGuard runs).
+func (b *Broker) MaxLeverage() int { return b.maxLeverage }
 
 // SetExposureGuard wires the hard gross-exposure cap. grossQty returns the REAL
 // exchange gross position qty (long+short, from the position syncer); leverage

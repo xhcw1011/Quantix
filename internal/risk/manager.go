@@ -38,6 +38,10 @@ func New(cfg Config, initialEquity float64, log *zap.Logger) *Manager {
 	}
 }
 
+// Cfg returns the risk configuration (thresholds), so other layers such as the
+// Order Risk Gateway can build rules from the same numbers.
+func (m *Manager) Cfg() Config { return m.cfg }
+
 // Halted returns true if the circuit breaker has fired.
 func (m *Manager) Halted() bool {
 	m.mu.Lock()

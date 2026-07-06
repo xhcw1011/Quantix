@@ -15,10 +15,11 @@ import (
 	"github.com/Quantix/quantix/internal/bus"
 	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/exchange"
-	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/monitor"
 	"github.com/Quantix/quantix/internal/notify"
 	"github.com/Quantix/quantix/internal/oms"
+	"github.com/Quantix/quantix/internal/orgateway"
+	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/risk"
 	"github.com/Quantix/quantix/internal/strategy"
 )
@@ -26,7 +27,7 @@ import (
 // EngineConfig holds live engine parameters.
 type EngineConfig struct {
 	StrategyID     string
-	Symbol         string // the single symbol this engine trades; used to ignore other engines' fills on a shared account
+	Symbol         string  // the single symbol this engine trades; used to ignore other engines' fills on a shared account
 	InitialCapital float64 // used for % return calculations only; real balance synced from exchange
 	StatusInterval time.Duration
 	BarInterval    time.Duration // primary kline interval for stale detection (e.g. 5*time.Minute)
@@ -44,9 +45,9 @@ type EngineConfig struct {
 	CredentialID int         // stored on each OrderRecord for audit trail
 
 	// Optional real-time push callbacks (set by API engine manager to wire WS hub).
-	OnFill   func(userID int, fill *data.Fill)            // called after each DB-persisted fill
-	OnEquity func(userID int, equity float64)             // called after each equity snapshot
-	OnStatus func(userID int, status map[string]any)      // called after each periodic status print
+	OnFill   func(userID int, fill *data.Fill)       // called after each DB-persisted fill
+	OnEquity func(userID int, equity float64)        // called after each equity snapshot
+	OnStatus func(userID int, status map[string]any) // called after each periodic status print
 
 	// SkipCleanSlate skips cancelling all exchange orders on startup.
 	// Set to true when user has manual positions/orders that should not be touched.
@@ -56,19 +57,20 @@ type EngineConfig struct {
 // Engine drives live trading:
 // closed klines → strategy.OnBar → LiveBroker → Binance order → OMS fill → portfolio update.
 type Engine struct {
-	cfg        EngineConfig
-	broker     *Broker
-	positions  *oms.PositionManager
-	omsInst    *oms.OMS
-	risk       *risk.Manager
-	strategy   strategy.Strategy
-	stratCtx   *strategy.Context
-	bus        *bus.Bus               // may be nil
-	metrics    *monitor.TradingMetrics // may be nil
-	notifier   *notify.Notifier        // may be nil
-	marginMon  *MarginMonitor          // may be nil; active only for futures/swap exchanges
-	tickCh     chan float64            // real-time price from ticker WS
-	log        *zap.Logger
+	cfg       EngineConfig
+	broker    *Broker
+	positions *oms.PositionManager
+	omsInst   *oms.OMS
+	risk      *risk.Manager
+	org       *orgateway.Gateway // Order Risk Gateway (Layer-1 validation); shadow in V1
+	strategy  strategy.Strategy
+	stratCtx  *strategy.Context
+	bus       *bus.Bus                // may be nil
+	metrics   *monitor.TradingMetrics // may be nil
+	notifier  *notify.Notifier        // may be nil
+	marginMon *MarginMonitor          // may be nil; active only for futures/swap exchanges
+	tickCh    chan float64            // real-time price from ticker WS
+	log       *zap.Logger
 
 	fillMu      sync.Mutex // protects realizedPnL, wins, total, dailyBaselineEquity, dailyBaselineWins, dailyBaselineTotal
 	realizedPnL float64
@@ -80,14 +82,14 @@ type Engine struct {
 	dailyBaselineWins        int
 	dailyBaselineTotal       int
 	dailyBaselineRealizedPnL float64
-	startTime           time.Time
-	dbWg        sync.WaitGroup // tracks in-flight DB write goroutines for clean shutdown
-	stratFillCh chan strategy.Fill // routes OnFill to the main goroutine (eliminates data race)
+	startTime                time.Time
+	dbWg                     sync.WaitGroup     // tracks in-flight DB write goroutines for clean shutdown
+	stratFillCh              chan strategy.Fill // routes OnFill to the main goroutine (eliminates data race)
 
 	// Exchange interfaces (for futures — margin query and equity cache)
-	marginQuerier   exchange.MarginQuerier
-	equityQuerier   exchange.EquityQuerier
-	lastEquityQuery time.Time
+	marginQuerier    exchange.MarginQuerier
+	equityQuerier    exchange.EquityQuerier
+	lastEquityQuery  time.Time
 	cachedEquityBits atomic.Uint64 // float64 stored as bits for lock-free access
 
 	// Non-trade balance adjustment (transfer/deposit/funding fee)
@@ -121,9 +123,26 @@ func NewEngine(
 
 	broker := New(orderClient, o, pm, notif, log)
 
+	// Order Risk Gateway (ORG): every strategy order passes through it before the
+	// broker. V1 runs in Shadow mode — it evaluates, logs, and counts decisions but
+	// never blocks; the broker's own gross-exposure guard stays the live gate until
+	// ORG is validated and promoted to Enforce. Thresholds reuse the risk config;
+	// gross-leverage uses the same 0.8 cap as the broker guard.
+	org := orgateway.New(
+		broker,
+		[]orgateway.Rule{
+			orgateway.MaxPositionPctRule{Max: rm.Cfg().MaxPositionPct},
+			orgateway.MaxSingleTradePctRule{Max: rm.Cfg().MaxSingleLossPct},
+			orgateway.MaxGrossLeverageRule{Frac: defaultMaxGrossExposureFrac},
+		},
+		&orgLiveState{broker: broker, positions: pm},
+		orgateway.Shadow,
+		log,
+	)
+
 	stratCtx := strategy.NewContext(
 		&livePortfolioView{broker: broker, positions: pm},
-		broker,
+		org,
 		log,
 	)
 
@@ -166,6 +185,7 @@ func NewEngine(
 		marginMon:     mm,
 		marginQuerier: mq,
 		equityQuerier: eq,
+		org:           org,
 		tickCh:        make(chan float64, 512),
 		stratFillCh:   make(chan strategy.Fill, 16),
 		log:           log,
@@ -256,7 +276,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	if adapter, ok := e.stratCtx.Extra["staged_exit"].(*stagedExitAdapter); ok {
 		adapter.ctx = ctx
 	}
-	e.omsInst.SetContext(ctx)  // enable backpressure on fills/orders channels
+	e.omsInst.SetContext(ctx) // enable backpressure on fills/orders channels
 
 	// Extract symbol from strategy ID (format: SYMBOL-INTERVAL-STRATEGY or SYMBOL-...)
 	symbol := ""
@@ -925,7 +945,9 @@ func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
 
 	// Estimate realized PnL from position manager.
 	sym := fill.Symbol
-	if sym == "" { sym = "ETHUSDT" } // fallback
+	if sym == "" {
+		sym = "ETHUSDT"
+	} // fallback
 	realized := e.positions.ApplyFill(strategy.Fill{
 		Symbol:       sym,
 		Side:         strategy.Side(fill.Side),
@@ -1072,4 +1094,29 @@ func (pv *livePortfolioView) Equity(prices map[string]float64) float64 {
 	}
 	unrealized := pv.positions.TotalUnrealizedPnL(prices)
 	return pv.broker.WalletBalance() + unrealized
+}
+
+// ─── orgLiveState (Order Risk Gateway state provider) ───────────────────────────
+
+// orgLiveState feeds the ORG the live account/market snapshot for each order.
+// It reads dynamically at decision time: leverage/gross come from the broker's
+// exposure guard, which is wired in before any order flows.
+type orgLiveState struct {
+	broker    *Broker
+	positions *oms.PositionManager
+}
+
+func (s *orgLiveState) Snapshot(req strategy.OrderRequest) orgateway.OrderState {
+	price := s.broker.LastPrice()
+	var posVal float64
+	if pos, ok := s.positions.Position(req.Symbol); ok {
+		posVal = math.Abs(pos.Qty) * price
+	}
+	return orgateway.OrderState{
+		Equity:        s.broker.Equity(),
+		PositionValue: posVal,
+		GrossNotional: s.broker.GrossQty() * price,
+		Price:         price,
+		Leverage:      float64(s.broker.MaxLeverage()),
+	}
 }
