@@ -26,6 +26,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	// Capture starting equity as baseline for the first daily summary's % return.
 	e.fillMu.Lock()
 	e.dailyBaselineEquity = e.broker.Equity()
+	e.broker.SetDayStartEquity(e.dailyBaselineEquity) // feed ORG daily-loss rule
 	e.dailyBaselineWins = 0
 	e.dailyBaselineTotal = 0
 	e.dailyBaselineRealizedPnL = 0

@@ -58,6 +58,10 @@ type OrderState struct {
 	GrossNotional float64 // total gross notional across all open positions (abs)
 	Price         float64 // current price for the order's symbol
 	Leverage      float64 // account max leverage (for the gross-leverage rule)
+
+	// Account-level state (Layer 3 rules).
+	PeakEquity     float64 // running peak equity (for account drawdown)
+	DayStartEquity float64 // equity at the start of the trading day (for daily loss)
 }
 
 // StateProvider supplies the account/market state at decision time. Each engine

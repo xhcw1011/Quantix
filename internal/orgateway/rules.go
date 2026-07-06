@@ -12,6 +12,8 @@ const (
 	ReasonMaxPositionPct    = "MAX_POSITION_PCT"
 	ReasonMaxSingleTradePct = "MAX_SINGLE_TRADE_PCT"
 	ReasonMaxGrossLeverage  = "MAX_GROSS_LEVERAGE"
+	ReasonDailyLoss         = "DAILY_LOSS_LIMIT"
+	ReasonAccountDrawdown   = "ACCOUNT_DRAWDOWN"
 )
 
 // MaxPositionPctRule caps a single symbol's position notional at Max fraction of
@@ -69,6 +71,49 @@ func (r MaxGrossLeverageRule) Eval(req strategy.OrderRequest, st OrderState) Dec
 		return Decision{Reason: ReasonMaxGrossLeverage, Detail: fmt.Sprintf(
 			"gross %.2f > limit %.2f (equity %.2f × lev %.1f × %.0f%%)",
 			newGross, limit, st.Equity, st.Leverage, r.Frac*100)}
+	}
+	return allow
+}
+
+// ─── Layer 3: account-risk rules ────────────────────────────────────────────────
+// These block new risk during a bad day / drawdown. They never block closes, so a
+// position can always be exited. This turns the risk manager's soft circuit breaker
+// (live-side it only logs) into a real order gate.
+
+// DailyLossRule denies opening orders once the day's loss vs the day-start equity
+// reaches Max (e.g. 0.03 = down 3% on the day → stop taking new risk).
+type DailyLossRule struct{ Max float64 }
+
+func (r DailyLossRule) Name() string { return ReasonDailyLoss }
+
+func (r DailyLossRule) Eval(req strategy.OrderRequest, st OrderState) Decision {
+	if !opensOrIncreases(req) || st.DayStartEquity <= 0 || r.Max <= 0 {
+		return allow
+	}
+	loss := (st.DayStartEquity - st.Equity) / st.DayStartEquity
+	if loss >= r.Max {
+		return Decision{Reason: ReasonDailyLoss, Detail: fmt.Sprintf(
+			"day loss %.1f%% (equity %.2f vs day-start %.2f) >= limit %.0f%%",
+			loss*100, st.Equity, st.DayStartEquity, r.Max*100)}
+	}
+	return allow
+}
+
+// AccountDrawdownRule denies opening orders once peak-to-current drawdown reaches
+// Max (e.g. 0.10 = 10% off the equity high → stop taking new risk).
+type AccountDrawdownRule struct{ Max float64 }
+
+func (r AccountDrawdownRule) Name() string { return ReasonAccountDrawdown }
+
+func (r AccountDrawdownRule) Eval(req strategy.OrderRequest, st OrderState) Decision {
+	if !opensOrIncreases(req) || st.PeakEquity <= 0 || r.Max <= 0 {
+		return allow
+	}
+	dd := (st.PeakEquity - st.Equity) / st.PeakEquity
+	if dd >= r.Max {
+		return Decision{Reason: ReasonAccountDrawdown, Detail: fmt.Sprintf(
+			"drawdown %.1f%% (equity %.2f vs peak %.2f) >= limit %.0f%%",
+			dd*100, st.Equity, st.PeakEquity, r.Max*100)}
 	}
 	return allow
 }

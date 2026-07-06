@@ -139,6 +139,7 @@ func (e *Engine) sendDailySummary() {
 	intervalWins := e.wins - e.dailyBaselineWins
 	intervalTotal := e.total - e.dailyBaselineTotal
 	e.dailyBaselineEquity = equity
+	e.broker.SetDayStartEquity(equity) // roll ORG daily-loss baseline
 	e.dailyBaselineWins = e.wins
 	e.dailyBaselineTotal = e.total
 	e.dailyBaselineRealizedPnL = e.realizedPnL

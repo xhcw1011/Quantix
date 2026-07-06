@@ -59,6 +59,37 @@ func TestMaxGrossLeverageRule(t *testing.T) {
 	}
 }
 
+func TestDailyLossRule(t *testing.T) {
+	r := DailyLossRule{Max: 0.03}
+	// day started at 10000; now 9600 = -4% > 3% limit
+	breached := OrderState{Equity: 9600, DayStartEquity: 10000, Price: 100}
+	if d := r.Eval(openLong(1), breached); d.Allow || d.Reason != ReasonDailyLoss {
+		t.Fatalf("over daily-loss should DENY opening, got %+v", d)
+	}
+	if d := r.Eval(closeLong(1), breached); !d.Allow { // can still exit during a bad day
+		t.Fatalf("closing must ALLOW even past daily-loss, got %+v", d)
+	}
+	within := OrderState{Equity: 9800, DayStartEquity: 10000, Price: 100} // -2% <= 3%
+	if d := r.Eval(openLong(1), within); !d.Allow {
+		t.Fatalf("within daily-loss should ALLOW, got %+v", d)
+	}
+}
+
+func TestAccountDrawdownRule(t *testing.T) {
+	r := AccountDrawdownRule{Max: 0.10}
+	breached := OrderState{Equity: 8800, PeakEquity: 10000, Price: 100} // -12% > 10%
+	if d := r.Eval(openLong(1), breached); d.Allow || d.Reason != ReasonAccountDrawdown {
+		t.Fatalf("over account-DD should DENY opening, got %+v", d)
+	}
+	if d := r.Eval(closeLong(1), breached); !d.Allow {
+		t.Fatalf("closing must ALLOW even past account-DD, got %+v", d)
+	}
+	within := OrderState{Equity: 9200, PeakEquity: 10000, Price: 100} // -8% <= 10%
+	if d := r.Eval(openLong(1), within); !d.Allow {
+		t.Fatalf("within account-DD should ALLOW, got %+v", d)
+	}
+}
+
 // Qty==0 is the strategy "all-in" signal (live broker resolves it to ~all cash);
 // ORG must treat it as a full-size order, not a free pass.
 func TestQtyZeroTreatedAsAllIn(t *testing.T) {

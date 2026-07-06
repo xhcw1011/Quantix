@@ -42,6 +42,13 @@ func New(cfg Config, initialEquity float64, log *zap.Logger) *Manager {
 // Order Risk Gateway can build rules from the same numbers.
 func (m *Manager) Cfg() Config { return m.cfg }
 
+// PeakEquity returns the running peak equity used for drawdown tracking.
+func (m *Manager) PeakEquity() float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.peakEquity
+}
+
 // Halted returns true if the circuit breaker has fired.
 func (m *Manager) Halted() bool {
 	m.mu.Lock()

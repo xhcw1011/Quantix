@@ -101,6 +101,11 @@ type Engine struct {
 	posSyncer *position.Syncer // nil if not configured
 }
 
+// orgDailyLossLimit is the ORG daily-loss threshold: once the account is down this
+// fraction on the day, ORG denies opening orders (closes still pass). Starting value
+// to tune from shadow-mode data; there is no risk.Config field for it yet.
+const orgDailyLossLimit = 0.05
+
 // NewEngine creates a live trading engine.
 // bus, metrics, notifier are optional — pass nil to disable.
 // orderClient is the exchange-specific order execution backend
@@ -124,16 +129,21 @@ func NewEngine(
 	// Order Risk Gateway (ORG): every strategy order passes through it before the
 	// broker. V1 runs in Shadow mode — it evaluates, logs, and counts decisions but
 	// never blocks; the broker's own gross-exposure guard stays the live gate until
-	// ORG is validated and promoted to Enforce. Thresholds reuse the risk config;
-	// gross-leverage uses the same 0.8 cap as the broker guard.
+	// ORG is validated and promoted to Enforce. Layer-1 (order validation) reuses the
+	// risk config; Layer-3 (account risk) turns the risk manager's soft circuit
+	// breaker into a real order gate — account drawdown uses the same MaxDrawdownPct.
 	org := orgateway.New(
 		broker,
 		[]orgateway.Rule{
+			// Layer 1 — order validation
 			orgateway.MaxPositionPctRule{Max: rm.Cfg().MaxPositionPct},
 			orgateway.MaxSingleTradePctRule{Max: rm.Cfg().MaxSingleLossPct},
 			orgateway.MaxGrossLeverageRule{Frac: defaultMaxGrossExposureFrac},
+			// Layer 3 — account risk (stop taking new risk on a bad day / in drawdown)
+			orgateway.DailyLossRule{Max: orgDailyLossLimit},
+			orgateway.AccountDrawdownRule{Max: rm.Cfg().MaxDrawdownPct},
 		},
-		&orgLiveState{broker: broker, positions: pm},
+		&orgLiveState{broker: broker, positions: pm, risk: rm},
 		orgateway.Shadow,
 		log,
 	)
@@ -336,6 +346,7 @@ func (pv *livePortfolioView) Equity(prices map[string]float64) float64 {
 type orgLiveState struct {
 	broker    *Broker
 	positions *oms.PositionManager
+	risk      *risk.Manager // for account peak equity (Layer 3 drawdown rule)
 }
 
 func (s *orgLiveState) Snapshot(req strategy.OrderRequest) orgateway.OrderState {
@@ -345,10 +356,12 @@ func (s *orgLiveState) Snapshot(req strategy.OrderRequest) orgateway.OrderState 
 		posVal = math.Abs(pos.Qty) * price
 	}
 	return orgateway.OrderState{
-		Equity:        s.broker.Equity(),
-		PositionValue: posVal,
-		GrossNotional: s.broker.GrossQty() * price,
-		Price:         price,
-		Leverage:      float64(s.broker.MaxLeverage()),
+		Equity:         s.broker.Equity(),
+		PositionValue:  posVal,
+		GrossNotional:  s.broker.GrossQty() * price,
+		Price:          price,
+		Leverage:       float64(s.broker.MaxLeverage()),
+		PeakEquity:     s.risk.PeakEquity(),
+		DayStartEquity: s.broker.DayStartEquity(),
 	}
 }

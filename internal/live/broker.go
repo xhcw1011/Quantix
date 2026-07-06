@@ -40,11 +40,12 @@ type Broker struct {
 	notifier    *notify.Notifier // may be nil; used for critical alerts (e.g. unhedged position)
 	log         *zap.Logger
 
-	cash          atomic.Value // float64 — internal accounting (affected by leverage/margin)
-	equity        atomic.Value // float64
-	walletBalance atomic.Value // float64 — true exchange wallet balance, independent of leverage
-	lastPrice     atomic.Value // float64; updated by engine before each OnBar
-	warmup        atomic.Bool  // true while replaying startup backfill bars; PlaceOrder is a no-op
+	cash           atomic.Value // float64 — internal accounting (affected by leverage/margin)
+	equity         atomic.Value // float64
+	walletBalance  atomic.Value // float64 — true exchange wallet balance, independent of leverage
+	lastPrice      atomic.Value // float64; updated by engine before each OnBar
+	dayStartEquity atomic.Value // float64; equity at day start (for ORG daily-loss rule)
+	warmup         atomic.Bool  // true while replaying startup backfill bars; PlaceOrder is a no-op
 
 	// engineCtx is set by engine.Run before processing begins.
 	// Poll goroutines for limit/stop orders use this context so they
@@ -96,6 +97,7 @@ func New(orderClient exchange.OrderClient, o *oms.OMS, pm *oms.PositionManager, 
 	b.equity.Store(0.0)
 	b.walletBalance.Store(0.0)
 	b.lastPrice.Store(0.0)
+	b.dayStartEquity.Store(0.0)
 	return b
 }
 
@@ -109,6 +111,13 @@ func (b *Broker) SetLastPrice(price float64) { b.lastPrice.Store(price) }
 
 // LastPrice returns the most recent market price (0 if unset).
 func (b *Broker) LastPrice() float64 { return safeLoadFloat64(&b.lastPrice) }
+
+// SetDayStartEquity records the equity baseline for the current trading day
+// (used by the ORG daily-loss rule).
+func (b *Broker) SetDayStartEquity(v float64) { b.dayStartEquity.Store(v) }
+
+// DayStartEquity returns the current day's equity baseline (0 if unset).
+func (b *Broker) DayStartEquity() float64 { return safeLoadFloat64(&b.dayStartEquity) }
 
 // GrossQty returns the exchange-truth gross position qty (long+short) via the
 // exposure guard's source, or 0 when the guard is not wired.
