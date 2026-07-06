@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""breakout_score — Q1:规则版"区间突破概率"打分(数据管道 + 打分,第一块砖).
+"""breakout_score — Q1:区间突破概率(规则版打分 + 预测力验证).
 
 思路(用户框架):不判断"现在是不是震荡",而是估计"未来容易不容易突破"。
-5 个**领先**信号,全部用 **rolling percentile**(不是固定阈值——抗过拟合:
-每个值只看它在自己近期分布里的位置):
+5 个**领先**信号,全部 rolling percentile(抗过拟合):
+  ① ATR 压缩  ② OI 增加  ③ Funding 极端  ④ 量价背离  ⑤ 区间时长
+加权 → 0..1 突破概率分。高分 → 别 Grid(趋势准备);低分 → 区间平静,Grid 可开。
 
-  1. ATR 压缩       — 波动收缩 → coil → 突破  (低 ATR 分位 = 高突破分)
-  2. OI 增加        — 持仓量上升 = 有人在建仓/蓄势
-  3. Funding 极端   — 一边太挤 → 挤压/趋势风险
-  4. 量价背离       — 量涨价平 = 换手/吸筹 → 突破
-  5. 区间时长       — 窄区间盘越久越容易破(反直觉但对)
-
-高分 → 别开 Grid(趋势腿准备);低分 → 区间平静,Grid 可开。
-这是**打分管道**;"这个分数是否真的预示突破"要下一步回测验证。
-只用 Binance 公开 fapi,无需 key。
-
+两种模式:
+  # 当前打分:
   python3 scripts/breakout_score.py --symbol BTCUSDT --interval 1h
+  # 验证预测力(标注历史突破,看分数高时是不是真的更容易突破):
+  python3 scripts/breakout_score.py --symbol BTCUSDT --interval 1h --validate
+
+打分是**因果**的(percentile 只用过去);突破标签用未来 H 根(仅作验证目标)。
+只用 Binance 公开 fapi,无需 key。
 """
 import argparse
 import json
@@ -24,8 +22,6 @@ import urllib.request
 from datetime import datetime, timezone
 
 FAPI = "https://fapi.binance.com"
-
-# 五个信号在总分里的权重(可调;先等权)。高分=突破更可能=别 grid。
 WEIGHTS = {"atr": 0.25, "oi": 0.20, "funding": 0.15, "voldiv": 0.20, "duration": 0.20}
 
 
@@ -35,7 +31,7 @@ def get(url, retries=3):
         try:
             with urllib.request.urlopen(url, timeout=20) as r:
                 return json.loads(r.read())
-        except Exception as e:  # 瞬时网络中断(IncompleteRead 等)重试
+        except Exception as e:
             last = e
             time.sleep(1.5 * (a + 1))
     raise last
@@ -43,123 +39,170 @@ def get(url, retries=3):
 
 def fetch_klines(sym, interval, limit):
     d = get(f"{FAPI}/fapi/v1/klines?symbol={sym}&interval={interval}&limit={limit}")
-    return [{"t": k[0], "o": float(k[1]), "h": float(k[2]), "l": float(k[3]),
-             "c": float(k[4]), "v": float(k[7])} for k in d]  # v = quote volume
+    return [{"t": k[0], "h": float(k[2]), "l": float(k[3]), "c": float(k[4]), "v": float(k[7])} for k in d]
 
 
-def fetch_oi(sym, period, limit):
+def fetch_oi(sym, period, limit=500):
     try:
         d = get(f"{FAPI}/futures/data/openInterestHist?symbol={sym}&period={period}&limit={limit}")
-        return {int(x["timestamp"]): float(x["sumOpenInterest"]) for x in d}
-    except Exception:
-        return {}
-
-
-def fetch_funding(sym, limit=200):
-    try:
-        d = get(f"{FAPI}/fapi/v1/fundingRate?symbol={sym}&limit={limit}")
-        return sorted(((int(x["fundingTime"]), float(x["fundingRate"])) for x in d))
+        return sorted((int(x["timestamp"]), float(x["sumOpenInterest"])) for x in d)
     except Exception:
         return []
 
 
+def fetch_funding(sym, limit=1000):
+    try:
+        d = get(f"{FAPI}/fapi/v1/fundingRate?symbol={sym}&limit={limit}")
+        return sorted((int(x["fundingTime"]), float(x["fundingRate"])) for x in d)
+    except Exception:
+        return []
+
+
+def interval_hours(iv):
+    return int(iv[:-1]) * {"m": 1 / 60, "h": 1, "d": 24}[iv[-1]]
+
+
 def atr_series(kl, n=14):
-    """Wilder-ish ATR:每根的 true range 的 n 期简单均值。"""
     tr = [kl[0]["h"] - kl[0]["l"]]
     for i in range(1, len(kl)):
         pc = kl[i - 1]["c"]
         tr.append(max(kl[i]["h"] - kl[i]["l"], abs(kl[i]["h"] - pc), abs(kl[i]["l"] - pc)))
+    return [None if i < n - 1 else sum(tr[i - n + 1:i + 1]) / n for i in range(len(kl))]
+
+
+def align(sorted_pairs, kl):
+    """两指针:每根 K 线取最近一个 ts<=bar 的值(前向填充)。O(n+m)。"""
     out = [None] * len(kl)
-    for i in range(len(kl)):
-        if i >= n - 1:
-            out[i] = sum(tr[i - n + 1:i + 1]) / n
+    j, last = 0, None
+    for i, k in enumerate(kl):
+        while j < len(sorted_pairs) and sorted_pairs[j][0] <= k["t"]:
+            last = sorted_pairs[j][1]
+            j += 1
+        out[i] = last
     return out
 
 
 def pctile(value, sample):
-    """value 在 sample 里的分位(<=value 的占比),0..1。"""
     s = [x for x in sample if x is not None]
-    if not s:
+    if value is None or not s:
         return 0.5
     return sum(1 for x in s if x <= value) / len(s)
 
 
-def latest_scores(sym, interval, oi_period, window):
-    kl = fetch_klines(sym, interval, max(window + 60, 200))
-    if len(kl) < window + 20:
-        raise SystemExit(f"K 线不足({len(kl)})")
-    oi_map = fetch_oi(sym, oi_period, 500)
-    fund = fetch_funding(sym)
-
+def compute_signals(kl, oi_pairs, fund_pairs, W, bars_per_day):
+    """逐根因果计算 5 个子分 + 总分。返回并行数组。"""
     n = len(kl)
+    close = [k["c"] for k in kl]
+    vol = [k["v"] for k in kl]
     atr = atr_series(kl, 14)
-    closes = [k["c"] for k in kl]
-    vols = [k["v"] for k in kl]
-    W = window
+    oi = align(oi_pairs, kl) if oi_pairs else [None] * n
+    fabs = [abs(x) if x is not None else None for x in align(fund_pairs, kl)] if fund_pairs else [None] * n
 
-    def win(series, i):
+    oi_chg = [None] * n
+    for i in range(20, n):
+        a, b = oi[i - 20], oi[i]
+        if a and b and a > 0:
+            oi_chg[i] = b / a - 1
+
+    K = 8
+    rng = [None] * n
+    for i in range(K, n):
+        w = close[i - K:i + 1]
+        rng[i] = (max(w) - min(w)) / (sum(w) / len(w))
+
+    def w_of(series, i):
         return series[max(0, i - W + 1):i + 1]
 
-    i = n - 1  # 最新一根
-    price = closes[i]
+    rng_p = [pctile(rng[i], w_of(rng, i)) if rng[i] is not None else None for i in range(n)]
 
-    # ① ATR 压缩:当前 ATR 在近 W 期的分位越低 → 越压缩 → 突破分越高
-    atr_p = pctile(atr[i], win(atr, i))
-    s_atr = 1 - atr_p
-
-    # ② OI:近 20 根 OI 变化率的分位越高(涨得猛) → 突破分越高
-    ts_sorted = sorted(oi_map)
-    def oi_at(t):  # 最近 <= t 的 OI
-        c = [x for x in ts_sorted if x <= t]
-        return oi_map[c[-1]] if c else None
-    oi_now = oi_at(kl[i]["t"])
-    oi_chg = None
-    oi_chg_series = [None] * n
-    if oi_now:
-        for j in range(20, n):
-            a = oi_at(kl[j - 20]["t"]); b = oi_at(kl[j]["t"])
-            if a and b and a > 0:
-                oi_chg_series[j] = b / a - 1
-        oi_chg = oi_chg_series[i]
-    s_oi = pctile(oi_chg, win(oi_chg_series, i)) if oi_chg is not None else 0.5
-
-    # ③ Funding 极端:|funding| 的分位越高 → 越极端 → 突破分越高
-    fr = fund[-1][1] if fund else 0.0
-    fabs = [abs(r) for _, r in fund] if fund else [0.0]
-    s_fund = pctile(abs(fr), fabs)
-
-    # ④ 量价背离:量分位高 且 近K根价幅分位低 → 换手/吸筹 → 突破分高
-    K = 8
-    rng_series = [None] * n
-    for j in range(K, n):
-        w = closes[j - K:j + 1]
-        rng_series[j] = (max(w) - min(w)) / (sum(w) / len(w))
-    vol_p = pctile(vols[i], win(vols, i))
-    rng_p = pctile(rng_series[i], win(rng_series, i)) if rng_series[i] is not None else 0.5
-    s_voldiv = vol_p * (1 - rng_p)
-
-    # ⑤ 区间时长:连续多少根"K 根价幅分位 < 0.35"(即持续压缩),越久 → 突破分越高
-    age = 0
-    for j in range(i, K, -1):
-        rp = pctile(rng_series[j], win(rng_series, j)) if rng_series[j] is not None else 1.0
-        if rp < 0.35:
-            age += 1
-        else:
-            break
-    bars_per_day = 24 / interval_hours(interval)
-    s_dur = min(age / (2 * bars_per_day), 1.0)  # 满 2 天封顶
-
-    subs = {"atr": s_atr, "oi": s_oi, "funding": s_fund, "voldiv": s_voldiv, "duration": s_dur}
-    score = sum(WEIGHTS[k] * subs[k] for k in WEIGHTS)
-    ctx = {"price": price, "atr_pctile": atr_p, "oi_chg": oi_chg, "funding": fr,
-           "vol_pctile": vol_p, "range_pctile": rng_p, "range_age_bars": age,
-           "oi_available": bool(oi_map)}
-    return score, subs, ctx
+    subs = {k: [None] * n for k in WEIGHTS}
+    score = [None] * n
+    for i in range(n):
+        if atr[i] is None or i < W // 2:
+            continue
+        subs["atr"][i] = 1 - pctile(atr[i], w_of(atr, i))
+        subs["oi"][i] = pctile(oi_chg[i], w_of(oi_chg, i)) if oi_chg[i] is not None else 0.5
+        subs["funding"][i] = pctile(fabs[i], w_of(fabs, i)) if fabs[i] is not None else 0.5
+        vp = pctile(vol[i], w_of(vol, i))
+        rp = rng_p[i] if rng_p[i] is not None else 0.5
+        subs["voldiv"][i] = vp * (1 - rp)
+        age = 0
+        for j in range(i, K, -1):
+            if rng_p[j] is not None and rng_p[j] < 0.35:
+                age += 1
+            else:
+                break
+        subs["duration"][i] = min(age / (2 * bars_per_day), 1.0)
+        score[i] = sum(WEIGHTS[k] * subs[k][i] for k in WEIGHTS)
+    return {"score": score, "subs": subs, "atr": atr, "close": close,
+            "ctx": {"oi": bool(oi_pairs), "rng_p": rng_p, "oi_chg": oi_chg, "fabs": fabs, "vol": vol}}
 
 
-def interval_hours(iv):
-    unit = iv[-1]; num = int(iv[:-1])
-    return num * {"m": 1 / 60, "h": 1, "d": 24}[unit]
+def buckets(pairs, nb=5):
+    """pairs=[(x,label)]. 按 x 排序分 nb 档,返回每档 (x区间, 样本数, 突破率)。"""
+    pairs = sorted(pairs)
+    m = len(pairs)
+    out = []
+    for b in range(nb):
+        seg = pairs[b * m // nb:(b + 1) * m // nb]
+        if seg:
+            rate = sum(l for _, l in seg) / len(seg)
+            out.append((seg[0][0], seg[-1][0], len(seg), rate))
+    return out
+
+
+def do_validate(sym, interval, oi_period, W, horizon_h, atr_mult):
+    ih = interval_hours(interval)
+    bpd = 24 / ih
+    limit = 1500
+    kl = fetch_klines(sym, interval, limit)
+    sig = compute_signals(kl, fetch_oi(sym, oi_period), fetch_funding(sym), W, bpd)
+    n = len(kl)
+    score, atr, close = sig["score"], sig["atr"], sig["close"]
+    H = max(1, round(horizon_h / ih))
+
+    # 标注突破:未来 H 根内,|收盘位移| > atr_mult × ATR(i) 即算一次突破
+    pairs = []
+    persig = {k: [] for k in WEIGHTS}
+    for i in range(n):
+        if score[i] is None or atr[i] is None or i + H >= n:
+            continue
+        move = max(abs(close[j] - close[i]) for j in range(i + 1, i + H + 1))
+        lab = 1 if move > atr_mult * atr[i] else 0
+        pairs.append((score[i], lab))
+        for k in WEIGHTS:
+            persig[k].append((sig["subs"][k][i], lab))
+
+    if not pairs:
+        raise SystemExit("样本不足(数据太少或 horizon 太长)")
+    base = sum(l for _, l in pairs) / len(pairs)
+
+    print(f"# {sym} {interval}  验证突破预测力  样本 {len(pairs)} 根  "
+          f"覆盖 ~{len(pairs)*ih/24:.0f} 天  ({datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC})")
+    print(f"# 突破定义: 未来 {horizon_h}h 内位移 > {atr_mult}×ATR   基准突破率 {base*100:.1f}%")
+    if not sig["ctx"]["oi"]:
+        print("# ⚠ OI 拿不到,② 用中性 0.5(该信号在本次验证无效)")
+    print("=" * 70)
+    print("  总分分档(低→高)  样本  该档后续突破率   vs 基准")
+    for lo, hi, cnt, rate in buckets(pairs):
+        lift = rate - base
+        arrow = "↑" if lift > 0.02 else ("↓" if lift < -0.02 else "·")
+        print(f"    [{lo:.2f},{hi:.2f}]   {cnt:>4}   {rate*100:>5.1f}%   {lift*100:>+5.1f}pp {arrow}")
+    top = buckets(pairs)[-1][3]
+    bot = buckets(pairs)[0][3]
+    print("-" * 70)
+    print(f"  顶档 vs 底档突破率: {top*100:.1f}% vs {bot*100:.1f}%  "
+          f"→ lift {(top-bot)*100:+.1f}pp  {'有预测力 ✓' if top-bot > 0.05 else '预测力弱/无 ✗'}")
+    print("=" * 70)
+    print("  逐信号预测力(各自 顶档 vs 底档突破率,看谁真有用):")
+    for k in WEIGHTS:
+        ps = [p for p in persig[k] if p[0] is not None]
+        if len(ps) < 20:
+            continue
+        bk = buckets(ps)
+        t, b = bk[-1][3], bk[0][3]
+        useful = "有用 ✓" if t - b > 0.05 else ("反向!" if t - b < -0.05 else "无用 ✗")
+        print(f"    {k:<9} 顶 {t*100:>5.1f}% / 底 {b*100:>5.1f}%  lift {(t-b)*100:>+5.1f}pp  {useful}")
 
 
 def bar(x, width=20):
@@ -167,40 +210,46 @@ def bar(x, width=20):
     return "█" * n + "·" * (width - n)
 
 
+def do_latest(sym, interval, oi_period, W):
+    bpd = 24 / interval_hours(interval)
+    kl = fetch_klines(sym, interval, max(W + 60, 200))
+    sig = compute_signals(kl, fetch_oi(sym, oi_period), fetch_funding(sym), W, bpd)
+    i = len(kl) - 1
+    while i >= 0 and sig["score"][i] is None:
+        i -= 1
+    subs = {k: sig["subs"][k][i] for k in WEIGHTS}
+    score = sig["score"][i]
+    print(f"# {sym} {interval}  {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}  "
+          f"price {sig['close'][i]:.4f}  (percentile 窗口 {W} 根)")
+    if not sig["ctx"]["oi"]:
+        print("# ⚠ OI 历史拿不到,② 用中性 0.5")
+    print("-" * 60)
+    lab = {"atr": "① ATR 压缩", "oi": "② OI 增加", "funding": "③ Funding 极端",
+           "voldiv": "④ 量价背离", "duration": "⑤ 区间时长"}
+    for k in WEIGHTS:
+        print(f"  {lab[k]:<14} {bar(subs[k])} {subs[k]:.2f}  (w={WEIGHTS[k]})")
+    print("-" * 60)
+    print(f"  突破概率分  {bar(score)} {score:.2f}")
+    v = ("🔴 高 → 别开 Grid、趋势准备" if score >= 0.6 else
+         "🟢 低 → 区间平静,Grid 可开(带硬止损)" if score <= 0.4 else "🟡 中 → 谨慎降仓")
+    print(f"  判定       {v}")
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Q1 区间突破概率打分(规则版)")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="BTCUSDT")
-    ap.add_argument("--interval", default="1h", help="K线/OI 周期,如 15m/1h/4h")
-    ap.add_argument("--oi-period", default=None, help="OI 周期(默认同 --interval)")
+    ap.add_argument("--interval", default="1h")
+    ap.add_argument("--oi-period", default=None)
     ap.add_argument("--window", type=int, default=100, help="percentile 滚动窗口(根)")
+    ap.add_argument("--validate", action="store_true", help="验证模式:标注历史突破测预测力")
+    ap.add_argument("--horizon", type=float, default=4.0, help="突破前瞻小时数(验证用)")
+    ap.add_argument("--atr-mult", type=float, default=2.0, help="位移 > 此倍数×ATR 算突破")
     args = ap.parse_args()
     oi_period = args.oi_period or args.interval
-
-    score, subs, ctx = latest_scores(args.symbol, args.interval, oi_period, args.window)
-
-    print(f"# {args.symbol} {args.interval}  {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}  "
-          f"price {ctx['price']:.2f}  (percentile 窗口 {args.window} 根)")
-    if not ctx["oi_available"]:
-        print("# ⚠ OI 历史拿不到(可能新币/超出30天),OI 信号用中性 0.5")
-    print("-" * 66)
-    labels = {"atr": "① ATR 压缩", "oi": "② OI 增加", "funding": "③ Funding 极端",
-              "voldiv": "④ 量价背离", "duration": "⑤ 区间时长"}
-    for k in ["atr", "oi", "funding", "voldiv", "duration"]:
-        print(f"  {labels[k]:<14} {bar(subs[k])} {subs[k]:.2f}  (w={WEIGHTS[k]})")
-    print("-" * 66)
-    print(f"  突破概率分  {bar(score)} {score:.2f}")
-    if score >= 0.6:
-        verdict = "🔴 高 → 别开 Grid、趋势腿准备(容易突破)"
-    elif score <= 0.4:
-        verdict = "🟢 低 → 区间平静,Grid 可开(带硬止损)"
+    if args.validate:
+        do_validate(args.symbol, args.interval, oi_period, args.window, args.horizon, args.atr_mult)
     else:
-        verdict = "🟡 中 → 谨慎,倾向 Grid 降仓"
-    print(f"  判定       {verdict}")
-    print("-" * 66)
-    print(f"  参考: ATR分位 {ctx['atr_pctile']:.2f}  "
-          f"OI20变化 {('%+.1f%%' % (ctx['oi_chg']*100)) if ctx['oi_chg'] is not None else 'n/a'}  "
-          f"funding {ctx['funding']*100:+.4f}%  量分位 {ctx['vol_pctile']:.2f}  "
-          f"价幅分位 {ctx['range_pctile']:.2f}  压缩已持续 {ctx['range_age_bars']} 根")
+        do_latest(args.symbol, args.interval, oi_period, args.window)
 
 
 if __name__ == "__main__":
