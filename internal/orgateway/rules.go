@@ -15,6 +15,10 @@ const (
 	ReasonMaxGrossLeverage    = "MAX_GROSS_LEVERAGE"
 	ReasonMaxNotionalPerOrder = "MAX_NOTIONAL_PER_ORDER"
 	ReasonOrderRate           = "ORDER_RATE_LIMIT"
+	// Capital Layer (Layer 3) enforcement — the DECISION is the PoolManager's; the
+	// ORG is the single gate that enforces its published pool status.
+	ReasonPoolHalted   = "POOL_HALTED"
+	ReasonPoolExposure = "POOL_EXPOSURE"
 	// Portfolio/account layer — NOT the order gateway (see note below).
 	ReasonMaxPositionPct    = "MAX_POSITION_PCT"
 	ReasonMaxSingleTradePct = "MAX_SINGLE_TRADE_PCT"
@@ -137,6 +141,39 @@ func (r *OrderRateRule) Eval(req strategy.OrderRequest, st OrderState) Decision 
 			"%d orders within %s ≥ max %d", len(r.times), r.Window, r.Max)}
 	}
 	r.times = append(r.times, st.Now)
+	return allow
+}
+
+// ─── Capital Layer (Layer 3) enforcement — decided elsewhere, enforced here ──────
+// PoolGateRule is the ONE place a pool decision becomes an order block. It holds no
+// pool logic: it reads the pool status the PoolManager published onto OrderState and
+// denies opening orders whose pool is HALTED, or which would push the pool's
+// DIRECTIONAL exposure past its cap. Closes always pass. This keeps a single
+// enforcement gate (ORG) rather than a second gate in the PoolManager.
+type PoolGateRule struct{}
+
+func (r PoolGateRule) Name() string { return "POOL_GATE" }
+
+func (r PoolGateRule) Eval(req strategy.OrderRequest, st OrderState) Decision {
+	if !opensOrIncreases(req) {
+		return allow
+	}
+	if st.PoolHalted {
+		return Decision{Reason: ReasonPoolHalted, Detail: fmt.Sprintf("pool %s HALTED", st.Pool)}
+	}
+	if st.PoolEquity <= 0 {
+		return allow
+	}
+	added := orderCost(req, st) / st.PoolEquity // this order's contribution to pool exposure
+	if req.Side == strategy.SideBuy {           // opening long (opens filter ⇒ Long/Net)
+		if st.PoolMaxLong > 0 && st.PoolLongExp+added > st.PoolMaxLong {
+			return Decision{Reason: ReasonPoolExposure, Detail: fmt.Sprintf(
+				"pool %s long exp %.2f+%.2f > cap %.2f", st.Pool, st.PoolLongExp, added, st.PoolMaxLong)}
+		}
+	} else if st.PoolMaxShort > 0 && st.PoolShortExp+added > st.PoolMaxShort { // opening short
+		return Decision{Reason: ReasonPoolExposure, Detail: fmt.Sprintf(
+			"pool %s short exp %.2f+%.2f > cap %.2f", st.Pool, st.PoolShortExp, added, st.PoolMaxShort)}
+	}
 	return allow
 }
 

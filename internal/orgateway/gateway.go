@@ -73,6 +73,17 @@ type OrderState struct {
 	// the order gateway (see the note on those rules in rules.go).
 	PeakEquity     float64 // running peak equity (for account drawdown)
 	DayStartEquity float64 // equity at the start of the trading day (for daily loss)
+
+	// Capital Layer (Layer 3) published pool status for THIS order's pool. The ORG
+	// only enforces it; the pool DECISION lives in the PoolManager. Primitives (not a
+	// pool.Snapshot) so the gateway holds no dependency on the pool package.
+	Pool         string
+	PoolHalted   bool
+	PoolEquity   float64
+	PoolLongExp  float64
+	PoolShortExp float64
+	PoolMaxLong  float64
+	PoolMaxShort float64
 }
 
 // StateProvider supplies the account/market state at decision time. Each engine

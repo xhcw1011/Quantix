@@ -102,6 +102,38 @@ func TestOrderRateRule(t *testing.T) {
 	}
 }
 
+func TestPoolGateHalted(t *testing.T) {
+	r := PoolGateRule{}
+	halted := OrderState{Pool: "Growth", PoolHalted: true, PoolEquity: 10000, Price: 100}
+	if d := r.Eval(openLong(1), halted); d.Allow || d.Reason != ReasonPoolHalted {
+		t.Fatalf("HALTED pool must DENY opens, got %+v", d)
+	}
+	if d := r.Eval(closeLong(9999), halted); !d.Allow {
+		t.Fatalf("HALTED pool must still ALLOW closes, got %+v", d)
+	}
+}
+
+func TestPoolGateDirectionalExposure(t *testing.T) {
+	r := PoolGateRule{}
+	// long already at 0.8 of pool equity, cap 1.0
+	lng := OrderState{Pool: "Yield", PoolEquity: 10000, PoolLongExp: 0.8, PoolMaxLong: 1.0, Price: 100}
+	if d := r.Eval(openLong(30), lng); d.Allow || d.Reason != ReasonPoolExposure { // +0.3 → 1.1 > 1.0
+		t.Fatalf("over pool long cap should DENY, got %+v", d)
+	}
+	if d := r.Eval(openLong(10), lng); !d.Allow { // +0.1 → 0.9 ≤ 1.0
+		t.Fatalf("within pool long cap should ALLOW, got %+v", d)
+	}
+	// short cap is independent (direction-aware, not netted)
+	sht := OrderState{Pool: "Growth", PoolEquity: 10000, PoolShortExp: 0.45, PoolMaxShort: 0.5, Price: 100}
+	if d := r.Eval(openShort(10), sht); d.Allow || d.Reason != ReasonPoolExposure { // +0.1 → 0.55 > 0.5
+		t.Fatalf("over pool short cap should DENY, got %+v", d)
+	}
+	// a long order is judged against the LONG cap, unaffected by short exposure
+	if d := r.Eval(openLong(10), sht); !d.Allow {
+		t.Fatalf("long order should not be blocked by short exposure, got %+v", d)
+	}
+}
+
 func TestDailyLossRule(t *testing.T) {
 	r := DailyLossRule{Max: 0.03}
 	// day started at 10000; now 9600 = -4% > 3% limit
