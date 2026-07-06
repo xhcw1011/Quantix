@@ -28,3 +28,23 @@ func TestManagerIsolatesPools(t *testing.T) {
 		t.Fatal("unmapped strategy → fail-open ACTIVE")
 	}
 }
+
+// Per-engine Report + dynamic Assign: members report independently, the pool
+// aggregates all members' latest states.
+func TestManagerReportAndAssign(t *testing.T) {
+	m := NewManager([]Config{{Name: "Growth", NotionalCap: 10000, MaxDrawdown: 0.10, RecoverDrawdown: 0.05}}, nil)
+	m.Assign("macross", "Growth")
+	m.Assign("spottrend", "Growth")
+
+	m.Report("macross", ms(0, -700, 0, 0)) // Growth -700 → DD 7% < 10% → ACTIVE
+	if m.StatusFor("macross").Status != Active {
+		t.Fatal("7% DD should be ACTIVE")
+	}
+	m.Report("spottrend", ms(0, -600, 0, 0)) // Growth now -1300 → DD 13% → HALT
+	if m.StatusFor("macross").Status != Halted || m.StatusFor("spottrend").Status != Halted {
+		t.Fatal("combined member DD should HALT Growth for all its members")
+	}
+	if m.StatusFor("grid").Status != Active {
+		t.Fatal("unassigned strategy → fail-open ACTIVE")
+	}
+}

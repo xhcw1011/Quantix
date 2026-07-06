@@ -465,6 +465,11 @@ func (e *Engine) onBar(bar exchange.Kline) {
 	e.staleAlerted = false
 	e.broker.SetLastPrice(bar.Close)
 
+	// Report this engine's state to the Capital Layer (Layer 3) each live bar.
+	if e.cfg.Pool != nil && !bar.Warmup {
+		e.cfg.Pool.Report(e.cfg.StrategyID, e.poolMemberState())
+	}
+
 	// Equity from WS ACCOUNT_UPDATE push (futures) or local calc (spot).
 	var equity float64
 	cachedEq := math.Float64frombits(e.cachedEquityBits.Load())

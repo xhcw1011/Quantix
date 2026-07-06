@@ -58,6 +58,18 @@ func (e *Engine) printStatus() {
 		)
 	}
 
+	// Capital Layer (Layer 3) pool status for this engine.
+	if e.cfg.Pool != nil {
+		ps := e.cfg.Pool.StatusFor(e.cfg.StrategyID)
+		e.log.Info("──── Pool (Capital Layer) ────",
+			zap.String("pool", ps.Name),
+			zap.String("status", ps.Status.String()),
+			zap.Float64("pool_dd_pct", ps.Drawdown*100),
+			zap.Float64("pool_long_exp", ps.LongExp),
+			zap.Float64("pool_short_exp", ps.ShortExp),
+		)
+	}
+
 	// Push to WS dashboard via OnStatus callback (set by EngineManager when wsHub
 	// is wired). Includes engine-level metrics + any strategy-reported state.
 	if e.cfg.OnStatus != nil && e.cfg.UserID > 0 {

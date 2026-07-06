@@ -22,6 +22,7 @@ import (
 	"github.com/Quantix/quantix/internal/notify"
 	"github.com/Quantix/quantix/internal/oms"
 	"github.com/Quantix/quantix/internal/paper"
+	"github.com/Quantix/quantix/internal/pool"
 	"github.com/Quantix/quantix/internal/risk"
 	"github.com/Quantix/quantix/internal/strategy/registry"
 )
@@ -36,8 +37,8 @@ type RiskOverride struct {
 // PaperConfig holds paper-trading-specific parameters.
 type PaperConfig struct {
 	InitialCapital float64 `json:"initial_capital"` // default 10000
-	FeeRate        float64 `json:"fee_rate"`         // default 0.001
-	Slippage       float64 `json:"slippage"`         // default 0.0005
+	FeeRate        float64 `json:"fee_rate"`        // default 0.001
+	Slippage       float64 `json:"slippage"`        // default 0.0005
 }
 
 // StartRequest contains parameters to start a live or paper engine for a user.
@@ -47,10 +48,10 @@ type StartRequest struct {
 	Symbol       string         `json:"symbol"`
 	Interval     string         `json:"interval"`
 	Intervals    []string       `json:"intervals,omitempty"` // multi-timeframe: e.g. ["1m","5m","15m"]
-	Mode         string         `json:"mode"`             // "live" (default) | "paper"
-	Leverage     int            `json:"leverage"`          // 1–20; 0 = use exchange default (futures/swap only)
-	ContractMode string         `json:"contract_mode"`     // "hedge" | "one_way" (futures/swap only)
-	Params       map[string]any `json:"params,omitempty"` // extra strategy parameters
+	Mode         string         `json:"mode"`                // "live" (default) | "paper"
+	Leverage     int            `json:"leverage"`            // 1–20; 0 = use exchange default (futures/swap only)
+	ContractMode string         `json:"contract_mode"`       // "hedge" | "one_way" (futures/swap only)
+	Params       map[string]any `json:"params,omitempty"`    // extra strategy parameters
 	Risk         *RiskOverride  `json:"risk,omitempty"`
 	Paper        *PaperConfig   `json:"paper,omitempty"` // required when mode=paper
 	// ConfirmLive must be true when mode is "live". This is a safety gate to
@@ -96,7 +97,7 @@ type runningEngine struct {
 // with UnrealizedPnL pre-computed using the engine's last known price.
 type PositionView struct {
 	Symbol        string  `json:"symbol"`
-	PositionSide  string  `json:"position_side"`  // "" (net/spot), "LONG", or "SHORT"
+	PositionSide  string  `json:"position_side"` // "" (net/spot), "LONG", or "SHORT"
 	Qty           float64 `json:"qty"`
 	AvgEntryPrice float64 `json:"avg_entry_price"`
 	UnrealizedPnL float64 `json:"unrealized_pnl"`
@@ -120,22 +121,23 @@ type EnginePositions struct {
 type EngineManager struct {
 	mu      sync.RWMutex
 	engines map[int]map[string]*runningEngine
+	pools   map[int]*pool.Manager // per-user Capital Layer (Layer 3), lazily created
 
-	store      *data.Store
-	enc        *Encryptor
-	smtpCfg    config.SMTPConfig
-	wsHub      *WSHub
-	log        *zap.Logger
+	store   *data.Store
+	enc     *Encryptor
+	smtpCfg config.SMTPConfig
+	wsHub   *WSHub
+	log     *zap.Logger
 
 	// Per-engine default configuration (read from config file).
-	riskDef         config.RiskConfig
-	paperDef        config.PaperConfig
-	backfillLim     int
-	monitorCfg      config.MonitorConfig
-	liveEnabled     bool
-	openaiCfg       config.OpenAIConfig
-	wsCfg           config.WSConfig
-	redis           *redis.Client // nil if Redis not configured
+	riskDef     config.RiskConfig
+	paperDef    config.PaperConfig
+	backfillLim int
+	monitorCfg  config.MonitorConfig
+	liveEnabled bool
+	openaiCfg   config.OpenAIConfig
+	wsCfg       config.WSConfig
+	redis       *redis.Client // nil if Redis not configured
 
 	// binanceNetworkMode tracks the first Binance network mode seen in this process.
 	// go-binance uses package-level globals (UseTestnet/UseDemo), so all Binance brokers
@@ -154,6 +156,7 @@ func NewEngineManager(store *data.Store, enc *Encryptor, smtpCfg config.SMTPConf
 	}
 	return &EngineManager{
 		engines:     make(map[int]map[string]*runningEngine),
+		pools:       make(map[int]*pool.Manager),
 		store:       store,
 		enc:         enc,
 		smtpCfg:     smtpCfg,
@@ -173,6 +176,38 @@ func NewEngineManager(store *data.Store, enc *Encryptor, smtpCfg config.SMTPConf
 // LiveEnabled reports whether the live-trading kill-switch is on.
 // Used by the health/ready endpoint.
 func (m *EngineManager) LiveEnabled() bool { return m.liveEnabled }
+
+// poolManagerFor returns the user's shared Capital-Layer PoolManager, creating it on
+// first use. Caller MUST hold m.mu (the engine-create path already does). The
+// NotionalCap / thresholds are v1 shadow placeholders pending the deferred capital
+// allocation.
+func (m *EngineManager) poolManagerFor(userID int) *pool.Manager {
+	if pm, ok := m.pools[userID]; ok {
+		return pm
+	}
+	pm := pool.NewManager([]pool.Config{
+		{Name: "Growth", NotionalCap: 10000, MaxDrawdown: 0.25, RecoverDrawdown: 0.15, RecoverBars: 5, MaxLongExp: 1.5, MaxShortExp: 1.5},
+		{Name: "Yield", NotionalCap: 10000, MaxDrawdown: 0.15, RecoverDrawdown: 0.08, RecoverBars: 5, MaxLongExp: 1.2, MaxShortExp: 0.5},
+		{Name: "Cash", NotionalCap: 0},
+		{Name: "default", NotionalCap: 10000, MaxDrawdown: 0.30, RecoverDrawdown: 0.20, RecoverBars: 5, MaxLongExp: 2.0, MaxShortExp: 2.0},
+	}, nil)
+	m.pools[userID] = pm
+	return pm
+}
+
+// poolForStrategy maps a strategy to its behavior-family pool. MeanReversion floats
+// into Growth for now (migratable later); unclassified strategies (ai, composite,
+// ml) go to a loose default pool.
+func poolForStrategy(strategyID string) string {
+	switch strategyID {
+	case "macross", "spottrend", "meanreversion":
+		return "Growth"
+	case "grid", "dca", "dipdca", "spotgrid", "rebalance":
+		return "Yield"
+	default:
+		return "default"
+	}
+}
 
 // Start creates and runs a live or paper engine for the user.
 // Returns the engineID on success.
@@ -214,7 +249,9 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 	// WS must subscribe to all needed intervals, not just primary.
 	if paramIntervals, ok := req.Params["Intervals"].([]any); ok {
 		existing := make(map[string]bool)
-		for _, iv := range req.Intervals { existing[iv] = true }
+		for _, iv := range req.Intervals {
+			existing[iv] = true
+		}
 		for _, iv := range paramIntervals {
 			if s, ok := iv.(string); ok && !existing[s] {
 				req.Intervals = append(req.Intervals, s)
@@ -224,7 +261,9 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 	}
 	if paramIntervals, ok := req.Params["Intervals"].([]string); ok {
 		existing := make(map[string]bool)
-		for _, iv := range req.Intervals { existing[iv] = true }
+		for _, iv := range req.Intervals {
+			existing[iv] = true
+		}
 		for _, iv := range paramIntervals {
 			if !existing[iv] {
 				req.Intervals = append(req.Intervals, iv)
@@ -532,6 +571,12 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 				hub.Broadcast(uid, map[string]any{"type": "status", "data": status})
 			}
 		}
+		// Capital Layer (Layer 3): attach this engine to its behavior-family pool in
+		// the user's shared PoolManager. Shadow — the ORG's PoolGateRule only logs.
+		userPool := m.poolManagerFor(userID)
+		userPool.Assign(engineID, poolForStrategy(req.StrategyID))
+		liveCfg.Pool = userPool
+
 		tm := monitor.NewTradingMetrics()
 		eng, err := live.NewEngine(liveCfg, strat, rm, nil, tm, notifier, orderClient, m.log)
 		if err != nil {

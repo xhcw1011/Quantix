@@ -17,6 +17,7 @@ import (
 	"github.com/Quantix/quantix/internal/notify"
 	"github.com/Quantix/quantix/internal/oms"
 	"github.com/Quantix/quantix/internal/orgateway"
+	"github.com/Quantix/quantix/internal/pool"
 	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/risk"
 	"github.com/Quantix/quantix/internal/strategy"
@@ -50,6 +51,11 @@ type EngineConfig struct {
 	// SkipCleanSlate skips cancelling all exchange orders on startup.
 	// Set to true when user has manual positions/orders that should not be touched.
 	SkipCleanSlate bool
+
+	// Pool is the shared per-user Capital Layer (Layer 3); nil = pooling off. When
+	// set, the engine reports its member state each bar and the ORG gains the
+	// (shadow) PoolGateRule reading this pool's published status.
+	Pool *pool.Manager
 }
 
 // Engine drives live trading:
@@ -139,14 +145,18 @@ func NewEngine(
 	// engine, which decides per-strategy exposure; putting them in the per-strategy
 	// order gateway wrongly kills single-symbol strategies. Runs in Shadow (evaluate
 	// + log + count, never block) until validated, then Enforce.
+	orgRules := []orgateway.Rule{
+		orgateway.MaxGrossLeverageRule{Frac: defaultMaxGrossExposureFrac},
+		orgateway.MaxNotionalPerOrderRule{Max: orgMaxNotionalPerOrder},
+		&orgateway.OrderRateRule{Max: orgMaxOrdersPerMin, Window: time.Minute},
+	}
+	if cfg.Pool != nil { // Layer-3 enforcement lives at the single gate (shadow)
+		orgRules = append(orgRules, orgateway.PoolGateRule{})
+	}
 	org := orgateway.New(
 		broker,
-		[]orgateway.Rule{
-			orgateway.MaxGrossLeverageRule{Frac: defaultMaxGrossExposureFrac},
-			orgateway.MaxNotionalPerOrderRule{Max: orgMaxNotionalPerOrder},
-			&orgateway.OrderRateRule{Max: orgMaxOrdersPerMin, Window: time.Minute},
-		},
-		&orgLiveState{broker: broker, positions: pm, risk: rm},
+		orgRules,
+		&orgLiveState{broker: broker, positions: pm, risk: rm, pool: cfg.Pool, stratID: cfg.StrategyID},
 		orgateway.Shadow,
 		log,
 	)
@@ -350,6 +360,8 @@ type orgLiveState struct {
 	broker    *Broker
 	positions *oms.PositionManager
 	risk      *risk.Manager // for account peak equity (Layer 3 drawdown rule)
+	pool      *pool.Manager // Capital Layer (Layer 3); nil = pooling off
+	stratID   string        // this engine's pool-membership key
 }
 
 func (s *orgLiveState) Snapshot(req strategy.OrderRequest) orgateway.OrderState {
@@ -358,7 +370,7 @@ func (s *orgLiveState) Snapshot(req strategy.OrderRequest) orgateway.OrderState 
 	if pos, ok := s.positions.Position(req.Symbol); ok {
 		posVal = math.Abs(pos.Qty) * price
 	}
-	return orgateway.OrderState{
+	st := orgateway.OrderState{
 		Equity:         s.broker.Equity(),
 		PositionValue:  posVal,
 		GrossNotional:  s.broker.GrossQty() * price,
@@ -368,4 +380,35 @@ func (s *orgLiveState) Snapshot(req strategy.OrderRequest) orgateway.OrderState 
 		PeakEquity:     s.risk.PeakEquity(),
 		DayStartEquity: s.broker.DayStartEquity(),
 	}
+	if s.pool != nil { // fill pool status the PoolGateRule enforces
+		ps := s.pool.StatusFor(s.stratID)
+		st.Pool = ps.Name
+		st.PoolHalted = ps.Status == pool.Halted
+		st.PoolEquity = ps.Equity
+		st.PoolLongExp = ps.LongExp
+		st.PoolShortExp = ps.ShortExp
+		st.PoolMaxLong = ps.MaxLongExp
+		st.PoolMaxShort = ps.MaxShortExp
+	}
+	return st
+}
+
+// poolMemberState summarizes this engine's contribution to its pool: cumulative
+// realized PnL, current unrealized, and directional (long/short) notional.
+func (e *Engine) poolMemberState() pool.MemberState {
+	price := e.broker.LastPrice()
+	var longN, shortN, unreal float64
+	for _, p := range e.positions.All() {
+		notional := math.Abs(p.Qty) * price
+		if p.PositionSide == string(strategy.PositionSideShort) {
+			shortN += notional
+		} else {
+			longN += notional
+		}
+		unreal += p.UnrealizedPnL(price)
+	}
+	e.fillMu.Lock()
+	realized := e.realizedPnL
+	e.fillMu.Unlock()
+	return pool.MemberState{Realized: realized, Unrealized: unreal, LongNotional: longN, ShortNotional: shortN}
 }
