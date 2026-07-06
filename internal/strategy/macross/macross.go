@@ -100,11 +100,15 @@ func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if m.cfg.EnableShort {
 		flat := !m.hasLong && !m.hasShort
 		if dir := primeDirection(m.sawWarmup, bar.Warmup, m.primed, flat, indicator.Last(fast), indicator.Last(slow)); dir != 0 {
-			m.primed = true
-			ctx.Log.Info("macross: priming position from trend state after warmup",
-				zap.String("symbol", bar.Symbol), zap.Int("dir", dir),
-				zap.Float64("fast", indicator.Last(fast)), zap.Float64("slow", indicator.Last(slow)))
+			// Only consume the prime once we actually enter. If the trend filter
+			// blocks it (choppy ER), leave primed=false so we retry on later bars
+			// and establish the position when the regime turns trending — otherwise
+			// a one-off low-ER bar would leave us flat through a whole trend.
 			if m.trendOK() {
+				m.primed = true
+				ctx.Log.Info("macross: priming position from trend state after warmup",
+					zap.String("symbol", bar.Symbol), zap.Int("dir", dir),
+					zap.Float64("fast", indicator.Last(fast)), zap.Float64("slow", indicator.Last(slow)))
 				if dir > 0 {
 					m.openLong(ctx, bar)
 				} else {
