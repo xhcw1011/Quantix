@@ -41,6 +41,10 @@ type Config struct {
 	// TrendFilterMin <= 0 disables the filter (default — unchanged behaviour).
 	TrendFilterN   int
 	TrendFilterMin float64
+	// CrossBufferPct requires fast to clear slow by this fraction before a cross
+	// counts, filtering marginal "touch" crosses that whipsaw in chop (e.g. the
+	// 2026-07-05 fast/slow 0.0009% touch). 0 = raw cross. Default 0.0015 (0.15%).
+	CrossBufferPct float64
 }
 
 // MACross is a dual-SMA crossover strategy with optional short-selling support.
@@ -155,48 +159,52 @@ func (m *MACross) trendOK() bool {
 func (m *MACross) onBarSimple(ctx *strategy.Context, bar exchange.Kline, fast, slow []float64) {
 	_, _, hasPosition := ctx.Portfolio.Position(bar.Symbol)
 
-	switch {
-	case indicator.CrossOver(fast, slow) && !hasPosition && m.trendOK():
-		ctx.Log.Info("golden cross — BUY",
-			zap.String("symbol", bar.Symbol),
-			zap.Float64("fast", indicator.Last(fast)),
-			zap.Float64("slow", indicator.Last(slow)),
-			zap.Float64("close", bar.Close),
-		)
-		req := strategy.OrderRequest{
-			Symbol: bar.Symbol,
-			Side:   strategy.SideBuy,
-			Type:   strategy.OrderMarket,
-			Qty:    0, // all-in
+	switch crossDir(fast, slow, m.cfg.CrossBufferPct) {
+	case 1:
+		if !hasPosition && m.trendOK() {
+			ctx.Log.Info("golden cross — BUY",
+				zap.String("symbol", bar.Symbol),
+				zap.Float64("fast", indicator.Last(fast)),
+				zap.Float64("slow", indicator.Last(slow)),
+				zap.Float64("close", bar.Close),
+			)
+			req := strategy.OrderRequest{
+				Symbol: bar.Symbol,
+				Side:   strategy.SideBuy,
+				Type:   strategy.OrderMarket,
+				Qty:    0, // all-in
+			}
+			if m.cfg.StopLossPct > 0 {
+				req.StopLoss = bar.Close * (1 - m.cfg.StopLossPct)
+			}
+			if m.cfg.TakeProfitPct > 0 {
+				req.TakeProfit = bar.Close * (1 + m.cfg.TakeProfitPct)
+			}
+			ctx.PlaceOrder(req)
 		}
-		if m.cfg.StopLossPct > 0 {
-			req.StopLoss = bar.Close * (1 - m.cfg.StopLossPct)
-		}
-		if m.cfg.TakeProfitPct > 0 {
-			req.TakeProfit = bar.Close * (1 + m.cfg.TakeProfitPct)
-		}
-		ctx.PlaceOrder(req)
 
-	case indicator.CrossUnder(fast, slow) && hasPosition:
-		ctx.Log.Info("death cross — SELL",
-			zap.String("symbol", bar.Symbol),
-			zap.Float64("fast", indicator.Last(fast)),
-			zap.Float64("slow", indicator.Last(slow)),
-			zap.Float64("close", bar.Close),
-		)
-		ctx.PlaceOrder(strategy.OrderRequest{
-			Symbol: bar.Symbol,
-			Side:   strategy.SideSell,
-			Type:   strategy.OrderMarket,
-			Qty:    0, // close all
-		})
+	case -1:
+		if hasPosition {
+			ctx.Log.Info("death cross — SELL",
+				zap.String("symbol", bar.Symbol),
+				zap.Float64("fast", indicator.Last(fast)),
+				zap.Float64("slow", indicator.Last(slow)),
+				zap.Float64("close", bar.Close),
+			)
+			ctx.PlaceOrder(strategy.OrderRequest{
+				Symbol: bar.Symbol,
+				Side:   strategy.SideSell,
+				Type:   strategy.OrderMarket,
+				Qty:    0, // close all
+			})
+		}
 	}
 }
 
 // onBarHedge handles the hedge mode (simultaneous LONG/SHORT for futures/swap).
 func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, slow []float64) {
-	switch {
-	case indicator.CrossOver(fast, slow):
+	switch crossDir(fast, slow, m.cfg.CrossBufferPct) {
+	case 1:
 		// Golden cross: close short (if open), then open long
 		ctx.Log.Info("golden cross — close SHORT, open LONG",
 			zap.String("symbol", bar.Symbol),
@@ -211,7 +219,7 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 			m.openLong(ctx, bar)
 		}
 
-	case indicator.CrossUnder(fast, slow):
+	case -1:
 		// Death cross: close long (if open), then open short
 		ctx.Log.Info("death cross — close LONG, open SHORT",
 			zap.String("symbol", bar.Symbol),
@@ -304,9 +312,16 @@ func init() {
 		}
 		if v, ok := params["TrendFilterN"]; ok {
 			cfg.TrendFilterN = toInt(v)
+		} else {
+			cfg.TrendFilterN = 10 // default: ER lookback
 		}
 		if v, ok := params["TrendFilterMin"]; ok {
-			cfg.TrendFilterMin = toFloat(v)
+			cfg.TrendFilterMin = toFloat(v) // explicit (incl. 0 = filter off)
+		} else {
+			cfg.TrendFilterMin = 0.20 // default ON — only open in trending regimes (backtest-validated)
+		}
+		if v, ok := params["CrossBufferPct"]; ok {
+			cfg.CrossBufferPct = toFloat(v) // opt-in; default 0 (backtest showed a buffer hurts)
 		}
 		if cfg.FastPeriod == 0 {
 			cfg.FastPeriod = 10
