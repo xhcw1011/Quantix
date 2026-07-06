@@ -135,7 +135,7 @@ def compute_signals(kl, oi_pairs, fund_pairs, W, bars_per_day):
         subs["duration"][i] = min(age / (2 * bars_per_day), 1.0)
         score[i] = sum(WEIGHTS[k] * subs[k][i] for k in WEIGHTS)
     return {"score": score, "subs": subs, "atr": atr, "close": close,
-            "ctx": {"oi": bool(oi_pairs), "rng_p": rng_p, "oi_chg": oi_chg, "fabs": fabs, "vol": vol}}
+            "ctx": {"oi": bool(oi_pairs), "fund": bool(fund_pairs)}}
 
 
 def buckets(pairs, nb=5):
@@ -180,8 +180,9 @@ def do_validate(sym, interval, oi_period, W, horizon_h, atr_mult):
     print(f"# {sym} {interval}  验证突破预测力  样本 {len(pairs)} 根  "
           f"覆盖 ~{len(pairs)*ih/24:.0f} 天  ({datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC})")
     print(f"# 突破定义: 未来 {horizon_h}h 内位移 > {atr_mult}×ATR   基准突破率 {base*100:.1f}%")
-    if not sig["ctx"]["oi"]:
-        print("# ⚠ OI 拿不到,② 用中性 0.5(该信号在本次验证无效)")
+    miss = [n for n, ok in [("OI", sig["ctx"]["oi"]), ("Funding", sig["ctx"]["fund"])] if not ok]
+    if miss:
+        print(f"# ⚠ {'/'.join(miss)} 数据拿不到 → 这些信号退成常量,本次验证对它们无效(标 N/A)")
     print("=" * 70)
     print("  总分分档(低→高)  样本  该档后续突破率   vs 基准")
     for lo, hi, cnt, rate in buckets(pairs):
@@ -197,7 +198,11 @@ def do_validate(sym, interval, oi_period, W, horizon_h, atr_mult):
     print("  逐信号预测力(各自 顶档 vs 底档突破率,看谁真有用):")
     for k in WEIGHTS:
         ps = [p for p in persig[k] if p[0] is not None]
+        vals = [x for x, _ in ps]
         if len(ps) < 20:
+            continue
+        if max(vals) - min(vals) < 1e-6:  # 常量=数据缺失/退化,分档是时间巧合,不算数
+            print(f"    {k:<9} 常量({vals[0]:.2f}) → N/A(数据缺失,无法判断)")
             continue
         bk = buckets(ps)
         t, b = bk[-1][3], bk[0][3]
