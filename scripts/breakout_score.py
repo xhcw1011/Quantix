@@ -108,16 +108,22 @@ def compute_signals(kl, oi_pairs, fund_pairs, W, bars_per_day):
 
     K = 8
     rng = [None] * n
+    vol_ratio = [None] * n  # 当前量 / 近K根均量(量的"上升"程度)
     for i in range(K, n):
         w = close[i - K:i + 1]
         rng[i] = (max(w) - min(w)) / (sum(w) / len(w))
+        m = sum(vol[i - K:i]) / K
+        if m > 0:
+            vol_ratio[i] = vol[i] / m
 
     def w_of(series, i):
         return series[max(0, i - W + 1):i + 1]
 
     rng_p = [pctile(rng[i], w_of(rng, i)) if rng[i] is not None else None for i in range(n)]
 
-    subs = {k: [None] * n for k in WEIGHTS}
+    # 诊断用子信号 = 5 原始 + voldiv 的分解(量高/量升/区间紧)
+    SUB = ["atr", "oi", "funding", "voldiv", "duration", "vol_hi", "vol_up", "range_tight"]
+    subs = {k: [None] * n for k in SUB}
     score = [None] * n
     for i in range(n):
         if atr[i] is None or i < W // 2:
@@ -128,6 +134,9 @@ def compute_signals(kl, oi_pairs, fund_pairs, W, bars_per_day):
         vp = pctile(vol[i], w_of(vol, i))
         rp = rng_p[i] if rng_p[i] is not None else 0.5
         subs["voldiv"][i] = vp * (1 - rp)
+        subs["vol_hi"][i] = vp                              # 量的绝对水平(分位)
+        subs["range_tight"][i] = 1 - rp                    # 区间收紧(=压缩,和 duration 同源?)
+        subs["vol_up"][i] = pctile(vol_ratio[i], w_of(vol_ratio, i)) if vol_ratio[i] is not None else 0.5
         age = 0
         for j in range(i, K, -1):
             if rng_p[j] is not None and rng_p[j] < 0.35:
@@ -212,18 +221,22 @@ def do_validate(sym, interval, oi_period, W, horizon_h, atr_mult):
         print(f"    {k:<9} 顶 {t*100:>5.1f}% / 底 {b*100:>5.1f}%  lift {(t-b)*100:>+5.1f}pp  {useful}")
 
 
-def label_indices(sig, horizon_h, atr_mult, ih):
-    """返回 [(bar_index, breakout_label)]:未来 H 根内位移 > atr_mult×ATR 即突破。"""
+def label_indices(sig, horizon_h, atr_mult, ih, abs_pct=None):
+    """[(bar_index, breakout_label)]. 默认:未来 H 根位移 > atr_mult×ATR(相对)。
+    abs_pct 设了则用**绝对**定义:位移%(相对现价)排在所有前瞻位移的前 (100-abs_pct)%。"""
     score, atr, close = sig["score"], sig["atr"], sig["close"]
     n = len(close)
     H = max(1, round(horizon_h / ih))
-    out = []
+    fwd = []  # (i, move_abs, move_frac, atr_i)
     for i in range(n):
-        if score[i] is None or atr[i] is None or i + H >= n:
+        if score[i] is None or i + H >= n or (abs_pct is None and atr[i] is None):
             continue
         move = max(abs(close[j] - close[i]) for j in range(i + 1, i + H + 1))
-        out.append((i, 1 if move > atr_mult * atr[i] else 0))
-    return out
+        fwd.append((i, move, move / close[i], atr[i]))
+    if abs_pct is not None:  # 绝对门槛(固定的大动作定义,与压缩无关)
+        thr = sorted(f[2] for f in fwd)[min(len(fwd) - 1, int(len(fwd) * abs_pct / 100))]
+        return [(i, 1 if frac > thr else 0) for i, mv, frac, a in fwd]
+    return [(i, 1 if mv > atr_mult * a else 0) for i, mv, frac, a in fwd if a is not None]
 
 
 def _seg_lift(sig, seg, name):
@@ -236,28 +249,29 @@ def _seg_lift(sig, seg, name):
     return bk[-1][3] - bk[0][3]
 
 
-def do_oos(sym, interval, oi_period, W, horizon_h, atr_mult, train_frac):
+def do_oos(sym, interval, oi_period, W, horizon_h, atr_mult, train_frac, abs_pct=None):
     ih = interval_hours(interval)
     kl = fetch_klines(sym, interval, 1500)
     sig = compute_signals(kl, fetch_oi(sym, oi_period), fetch_funding(sym), W, 24 / ih)
-    labeled = label_indices(sig, horizon_h, atr_mult, ih)
+    labeled = label_indices(sig, horizon_h, atr_mult, ih, abs_pct)
     if len(labeled) < 200:
         raise SystemExit("样本不足")
     cut = int(len(labeled) * train_frac)
     train, test = labeled[:cut], labeled[cut:]
 
-    print(f"# {sym} {interval}  OOS 验证  train {len(train)} / test {len(test)} 根  "
-          f"(突破: 未来{horizon_h}h > {atr_mult}×ATR,base {sum(l for _,l in labeled)/len(labeled)*100:.0f}%)")
-    print("# 权重已锁定(区间时长+量价背离);逐信号 train/test lift 供诊断,composite 看 TEST 是否保持")
-    print("=" * 66)
+    bdef = f"绝对: 未来{horizon_h}h 位移%排前{100-abs_pct:.0f}%" if abs_pct else f"相对: 未来{horizon_h}h > {atr_mult}×ATR"
+    print(f"# {sym} {interval}  OOS  train {len(train)}/test {len(test)}  "
+          f"(突破定义 {bdef},base {sum(l for _,l in labeled)/len(labeled)*100:.0f}%)")
+    print("# 锁定权重=区间时长+量价背离;逐信号 train/test lift 诊断(含 voldiv 分解),composite 看 TEST")
+    print("=" * 68)
     print("  逐信号 lift:      train      test      稳健?")
-    for k in WEIGHTS:
+    for k in sig["subs"]:
         lt, lv = _seg_lift(sig, train, k), _seg_lift(sig, test, k)
         ts = f"{lt*100:+.1f}pp" if lt is not None else "N/A"
         vs = f"{lv*100:+.1f}pp" if lv is not None else "N/A"
         both = lt is not None and lv is not None and lt > 0.03 and lv > 0.03
         robust = "稳 ✓" if both else ("过拟合? ✗" if (lt is not None and lt > 0.03) else "—")
-        mark = "  ←锁定" if WEIGHTS[k] > 0 else ""
+        mark = "  ←锁定" if WEIGHTS.get(k, 0) > 0 else ""
         print(f"    {k:<9}     {ts:>8}   {vs:>8}    {robust}{mark}")
     print("-" * 66)
     locked = [k for k in WEIGHTS if WEIGHTS[k] > 0]
@@ -323,11 +337,13 @@ def main():
     ap.add_argument("--oos", action="store_true", help="样本外:train 定权重、test 验证是否保持")
     ap.add_argument("--train-frac", type=float, default=0.65, help="train 占比(前 X 时序)")
     ap.add_argument("--horizon", type=float, default=4.0, help="突破前瞻小时数(验证用)")
-    ap.add_argument("--atr-mult", type=float, default=2.0, help="位移 > 此倍数×ATR 算突破")
+    ap.add_argument("--atr-mult", type=float, default=2.0, help="位移 > 此倍数×ATR 算突破(相对)")
+    ap.add_argument("--abs-pct", type=float, default=None,
+                    help="改用绝对门槛:位移%排前(100-此值)%算突破,如 70=前30%大动作。去伪用")
     args = ap.parse_args()
     oi_period = args.oi_period or args.interval
     if args.oos:
-        do_oos(args.symbol, args.interval, oi_period, args.window, args.horizon, args.atr_mult, args.train_frac)
+        do_oos(args.symbol, args.interval, oi_period, args.window, args.horizon, args.atr_mult, args.train_frac, args.abs_pct)
     elif args.validate:
         do_validate(args.symbol, args.interval, oi_period, args.window, args.horizon, args.atr_mult)
     else:
