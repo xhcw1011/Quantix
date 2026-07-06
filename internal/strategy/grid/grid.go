@@ -21,6 +21,16 @@ type Config struct {
 	GridLevels  int     // number of grid levels per side, default 5
 	GridSpacing float64 // fractional spacing between levels, default 0.01 (1%)
 	BaseQty     float64 // fixed quantity per grid level (0 = use equal cash split)
+
+	// Volatility gate (opt-in; enabled when VolGateWindow > 0). Flattens the grid
+	// and pauses when recent volume signals an incoming large move, re-centering
+	// when calm returns. See volgate.go for the signal + 3-mechanism state machine.
+	VolGateWindow      int     // percentile lookback (bars); 0 = gate disabled
+	VolGateRatioBars   int     // bars averaged for the "rising volume" ratio (default 8)
+	VolGateExit        float64 // score >= this → gate off (default 0.70)
+	VolGateEnter       float64 // score < this → eligible-calm for re-entry (default 0.40)
+	VolGateCooldown    int     // bars to wait after an exit (default 3)
+	VolGatePersistence int     // consecutive low bars required to re-enter (default 3)
 }
 
 func (c *Config) withDefaults() Config {
@@ -30,6 +40,20 @@ func (c *Config) withDefaults() Config {
 	}
 	if out.GridSpacing == 0 {
 		out.GridSpacing = 0.01
+	}
+	if out.VolGateWindow > 0 { // gate enabled → fill in researched defaults
+		if out.VolGateExit == 0 {
+			out.VolGateExit = 0.70
+		}
+		if out.VolGateEnter == 0 {
+			out.VolGateEnter = 0.40
+		}
+		if out.VolGateCooldown == 0 {
+			out.VolGateCooldown = 3
+		}
+		if out.VolGatePersistence == 0 {
+			out.VolGatePersistence = 3
+		}
 	}
 	return out
 }
@@ -42,15 +66,28 @@ type Grid struct {
 	levelPrice []float64
 	// gridBuys[i] tracks whether we have a position at level i.
 	gridBuys []bool
+	// gate is the optional volatility on/off switch (nil = disabled).
+	gate *volGate
 }
 
 // New creates a new Grid strategy.
 func New(cfg Config) *Grid {
 	cfg = cfg.withDefaults()
-	return &Grid{
+	g := &Grid{
 		cfg:      cfg,
 		gridBuys: make([]bool, cfg.GridLevels),
 	}
+	if cfg.VolGateWindow > 0 {
+		g.gate = newVolGate(volGateCfg{
+			Window:      cfg.VolGateWindow,
+			RatioBars:   cfg.VolGateRatioBars,
+			ExitThresh:  cfg.VolGateExit,
+			EnterThresh: cfg.VolGateEnter,
+			Cooldown:    cfg.VolGateCooldown,
+			Persistence: cfg.VolGatePersistence,
+		})
+	}
+	return g
 }
 
 // Name implements strategy.Strategy.
@@ -65,6 +102,24 @@ func (g *Grid) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 
 	price := bar.Close
+
+	// Volatility gate: feed every bar's volume (kept up to date even during
+	// warmup/init). When it signals "volatile", flatten the inventory and pause;
+	// the grid re-centers on the next calm bar.
+	if g.gate != nil && !g.gate.update(bar.Volume) {
+		if q, _, ok := ctx.Portfolio.Position(bar.Symbol); ok && q > 0 {
+			ctx.Log.Info("grid volatility-gate: flatten & pause",
+				zap.String("symbol", bar.Symbol), zap.Float64("qty", q), zap.Float64("close", price))
+			ctx.PlaceOrder(strategy.OrderRequest{
+				Symbol: bar.Symbol, Side: strategy.SideSell, Type: strategy.OrderMarket, Qty: q,
+			})
+		}
+		for i := range g.gridBuys {
+			g.gridBuys[i] = false
+		}
+		g.basePrice = 0 // re-center the grid when calm returns
+		return
+	}
 
 	// Initialise grid on first bar
 	if g.basePrice == 0 {
@@ -169,6 +224,24 @@ func init() {
 		}
 		if v, ok := params["BaseQty"]; ok {
 			cfg.BaseQty = toFloat(v)
+		}
+		if v, ok := params["VolGateWindow"]; ok {
+			cfg.VolGateWindow = toInt(v)
+		}
+		if v, ok := params["VolGateRatioBars"]; ok {
+			cfg.VolGateRatioBars = toInt(v)
+		}
+		if v, ok := params["VolGateExit"]; ok {
+			cfg.VolGateExit = toFloat(v)
+		}
+		if v, ok := params["VolGateEnter"]; ok {
+			cfg.VolGateEnter = toFloat(v)
+		}
+		if v, ok := params["VolGateCooldown"]; ok {
+			cfg.VolGateCooldown = toInt(v)
+		}
+		if v, ok := params["VolGatePersistence"]; ok {
+			cfg.VolGatePersistence = toInt(v)
 		}
 		if cfg.GridLevels < 0 {
 			return nil, fmt.Errorf("GridLevels must be >= 0 (got %d)", cfg.GridLevels)
