@@ -22,9 +22,14 @@ import urllib.request
 from datetime import datetime, timezone
 
 FAPI = "https://fapi.binance.com"
-# 权重:OOS 验证后锁定——只有 区间时长 + 量价背离 在两个币、样本内外全部保持;
-# ATR(BTC 上过拟合)、OI/Funding(没撑住/数据缺)剔除(权重 0,仍算子分供诊断)。
-WEIGHTS = {"atr": 0.0, "oi": 0.0, "funding": 0.0, "voldiv": 0.5, "duration": 0.5}
+# 权重:绝对门槛去伪后重锁(见本文件顶注)。旧锁 区间时长+量价背离 在 ATR-相对标签下
+# 有 +20pp,但换成"绝对大动作"标签后 composite 翻负(BTC -8.2 / ETH -3.3)——那 +20pp
+# 大半是"压缩→低 ATR→低门槛→机械易触发"的测量假象。分解 voldiv 后,真正扛住绝对门槛的是
+# 成交量:vol_hi(量水平)+ vol_up(量在升)。重锁后 6/6 过 OOS:BTC/ETH/SOL/BNB 1h + BTC/ETH 4h
+# (+14~+29pp),跨币跨周期都稳(压缩信号在 4h 死过,成交量没有)。
+# ⚠ 但这本质是**波动率聚集**:是"现在/接下来是否有大动作"的同步-略滞后信号,不是"静市将破"的
+# 领先信号,且只测幅度不测方向。用途 = grid 的开关闸(量低才铺网),不是领先突破预测器。
+WEIGHTS = {"atr": 0.0, "oi": 0.0, "funding": 0.0, "voldiv": 0.0, "duration": 0.0, "vol_hi": 0.5, "vol_up": 0.5}
 
 
 def get(url, retries=3):
@@ -221,9 +226,11 @@ def do_validate(sym, interval, oi_period, W, horizon_h, atr_mult):
         print(f"    {k:<9} 顶 {t*100:>5.1f}% / 底 {b*100:>5.1f}%  lift {(t-b)*100:>+5.1f}pp  {useful}")
 
 
-def label_indices(sig, horizon_h, atr_mult, ih, abs_pct=None):
+def label_indices(sig, horizon_h, atr_mult, ih, abs_pct=None, skip=0):
     """[(bar_index, breakout_label)]. 默认:未来 H 根位移 > atr_mult×ATR(相对)。
-    abs_pct 设了则用**绝对**定义:位移%(相对现价)排在所有前瞻位移的前 (100-abs_pct)%。"""
+    abs_pct 设了则用**绝对**定义:位移%(相对现价)排在所有前瞻位移的前 (100-abs_pct)%。
+    skip>0 跳过紧邻的前 skip 根(前瞻窗口 [i+1+skip .. i+H]),用来分辨信号是"同步(已在动)"
+    还是"有持续性(可动作)":若 skip 后 lift 崩 → 纯同步、不可交易;扛住 → 有持续性。"""
     score, atr, close = sig["score"], sig["atr"], sig["close"]
     n = len(close)
     H = max(1, round(horizon_h / ih))
@@ -231,7 +238,10 @@ def label_indices(sig, horizon_h, atr_mult, ih, abs_pct=None):
     for i in range(n):
         if score[i] is None or i + H >= n or (abs_pct is None and atr[i] is None):
             continue
-        move = max(abs(close[j] - close[i]) for j in range(i + 1, i + H + 1))
+        lo = i + 1 + skip
+        if lo > i + H:
+            continue
+        move = max(abs(close[j] - close[i]) for j in range(lo, i + H + 1))
         fwd.append((i, move, move / close[i], atr[i]))
     if abs_pct is not None:  # 绝对门槛(固定的大动作定义,与压缩无关)
         thr = sorted(f[2] for f in fwd)[min(len(fwd) - 1, int(len(fwd) * abs_pct / 100))]
@@ -249,11 +259,11 @@ def _seg_lift(sig, seg, name):
     return bk[-1][3] - bk[0][3]
 
 
-def do_oos(sym, interval, oi_period, W, horizon_h, atr_mult, train_frac, abs_pct=None):
+def do_oos(sym, interval, oi_period, W, horizon_h, atr_mult, train_frac, abs_pct=None, skip=0):
     ih = interval_hours(interval)
     kl = fetch_klines(sym, interval, 1500)
     sig = compute_signals(kl, fetch_oi(sym, oi_period), fetch_funding(sym), W, 24 / ih)
-    labeled = label_indices(sig, horizon_h, atr_mult, ih, abs_pct)
+    labeled = label_indices(sig, horizon_h, atr_mult, ih, abs_pct, skip)
     if len(labeled) < 200:
         raise SystemExit("样本不足")
     cut = int(len(labeled) * train_frac)
@@ -340,10 +350,12 @@ def main():
     ap.add_argument("--atr-mult", type=float, default=2.0, help="位移 > 此倍数×ATR 算突破(相对)")
     ap.add_argument("--abs-pct", type=float, default=None,
                     help="改用绝对门槛:位移%排前(100-此值)%算突破,如 70=前30%大动作。去伪用")
+    ap.add_argument("--skip-bars", type=int, default=0,
+                    help="前瞻窗口跳过紧邻的前 N 根,分辨信号是同步(已在动)还是有持续性(可动作)")
     args = ap.parse_args()
     oi_period = args.oi_period or args.interval
     if args.oos:
-        do_oos(args.symbol, args.interval, oi_period, args.window, args.horizon, args.atr_mult, args.train_frac, args.abs_pct)
+        do_oos(args.symbol, args.interval, oi_period, args.window, args.horizon, args.atr_mult, args.train_frac, args.abs_pct, args.skip_bars)
     elif args.validate:
         do_validate(args.symbol, args.interval, oi_period, args.window, args.horizon, args.atr_mult)
     else:
