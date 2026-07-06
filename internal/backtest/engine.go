@@ -57,15 +57,17 @@ func New(cfg Config, store *data.Store, strat strategy.Strategy, log *zap.Logger
 	broker := NewSimBroker(cfg.FeeRate, cfg.Slippage, portfolio, log)
 
 	// Order Risk Gateway in Shadow mode: measure how often each strategy's orders
-	// would trip the live Layer-1 limits across history (never blocks; a Nop logger
-	// keeps research backtests quiet — the tally surfaces in the Report). Layer-3
-	// account rules auto-skip here (no live account/day state in a backtest).
+	// would trip the Layer-1 ORDER-SAFETY limits across history (never blocks; a Nop
+	// logger keeps research backtests quiet — the tally surfaces in the Report).
+	// Layer 1 only, deliberately: portfolio-relative caps (position %, single-trade
+	// %) belong in the portfolio engine, not the per-strategy order gateway.
 	org := orgateway.New(
 		broker,
 		[]orgateway.Rule{
-			orgateway.MaxPositionPctRule{Max: btORGMaxPositionPct},
-			orgateway.MaxSingleTradePctRule{Max: btORGMaxSingleTradePct},
+			// Spot backtest → leverage 1; frac 1.0 means "fully invested is fine",
+			// so a normal single-symbol strategy is not flagged as over-leveraged.
 			orgateway.MaxGrossLeverageRule{Frac: btORGGrossFrac},
+			orgateway.MaxNotionalPerOrderRule{Max: btORGMaxNotionalPerOrder},
 		},
 		&orgBTState{portfolio: portfolio, broker: broker},
 		orgateway.Shadow,
@@ -85,12 +87,11 @@ func New(cfg Config, store *data.Store, strat strategy.Strategy, log *zap.Logger
 	}
 }
 
-// ORG backtest thresholds mirror the live risk-config defaults, so a backtest DENY
-// rate reads as "how often this strategy would trip the live limits".
+// ORG backtest Layer-1 thresholds. Spot (leverage 1), so gross frac 1.0 = "fully
+// invested is fine"; per-order notional cap off by default.
 const (
-	btORGMaxPositionPct    = 0.10
-	btORGMaxSingleTradePct = 0.02
-	btORGGrossFrac         = 0.8
+	btORGGrossFrac           = 1.0
+	btORGMaxNotionalPerOrder = 0.0
 )
 
 // orgBTState feeds the backtest ORG a per-order snapshot from the sim portfolio.

@@ -4,9 +4,17 @@
 //	Strategy → ctx.PlaceOrder → [ORG] → realBroker → Exchange
 //
 // ORG is a decorator around strategy.Broker, so it is engine-agnostic and the
-// broker never needs to know which strategy produced an order. V1 implements
-// Layer 1 (Order Validation) only: hard ALLOW/DENY checks with a Risk Reason.
-// Layers 2-4 (risk events / account risk / position sizing) come later.
+// broker never needs to know which strategy produced an order.
+//
+// ORG is Layer 1 of a 3-layer risk structure and does ONE thing: decide whether a
+// single order is safe — strategy- and portfolio-agnostic (max leverage, max
+// notional per order, order-rate limit, blacklist). It must NOT enforce
+// portfolio-relative caps (position %, cross-strategy exposure): those live in the
+// portfolio engine (Layer 3), which sizes each strategy's exposure. Per-strategy
+// sizing itself is the strategy engine (Layer 2). Putting portfolio rules in this
+// per-strategy gateway wrongly kills single-symbol strategies. Hard ALLOW/DENY with
+// a Risk Reason; the portfolio-layer rule implementations also live in this package
+// (rules.go) for that engine to reuse, but are not wired into the gateway.
 //
 // It runs in one of two modes:
 //   - Shadow  — evaluate, log the decision, record stats, but ALWAYS forward.
@@ -18,6 +26,7 @@ package orgateway
 
 import (
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -53,13 +62,15 @@ var allow = Decision{Allow: true}
 
 // OrderState is the account/market snapshot a rule needs to judge one order.
 type OrderState struct {
-	Equity        float64 // account equity
-	PositionValue float64 // current notional of the position in the order's symbol (abs)
-	GrossNotional float64 // total gross notional across all open positions (abs)
-	Price         float64 // current price for the order's symbol
-	Leverage      float64 // account max leverage (for the gross-leverage rule)
+	Equity        float64   // account equity
+	PositionValue float64   // current notional of the position in the order's symbol (abs)
+	GrossNotional float64   // total gross notional across all open positions (abs)
+	Price         float64   // current price for the order's symbol
+	Leverage      float64   // account max leverage (for the gross-leverage rule)
+	Now           time.Time // decision time (for the order-rate rule)
 
-	// Account-level state (Layer 3 rules).
+	// Account/portfolio-level state — consumed by the portfolio-layer rules, NOT
+	// the order gateway (see the note on those rules in rules.go).
 	PeakEquity     float64 // running peak equity (for account drawdown)
 	DayStartEquity float64 // equity at the start of the trading day (for daily loss)
 }

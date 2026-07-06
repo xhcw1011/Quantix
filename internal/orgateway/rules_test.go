@@ -2,6 +2,7 @@ package orgateway
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Quantix/quantix/internal/strategy"
 )
@@ -56,6 +57,48 @@ func TestMaxGrossLeverageRule(t *testing.T) {
 	}
 	if d := r.Eval(openShort(50), st); d.Allow { // opening a short also adds gross notional
 		t.Fatalf("opening short over gross-leverage should DENY, got %+v", d)
+	}
+}
+
+func TestMaxNotionalPerOrderRule(t *testing.T) {
+	r := MaxNotionalPerOrderRule{Max: 5000} // absolute $ cap per order
+	st := OrderState{Equity: 100000, Price: 100}
+	if d := r.Eval(openLong(60), st); d.Allow || d.Reason != ReasonMaxNotionalPerOrder { // 6000 > 5000
+		t.Fatalf("over per-order notional should DENY, got %+v", d)
+	}
+	if d := r.Eval(openLong(40), st); !d.Allow { // 4000 <= 5000
+		t.Fatalf("within per-order notional should ALLOW, got %+v", d)
+	}
+	if d := r.Eval(closeLong(9999), st); !d.Allow {
+		t.Fatalf("closing must ALLOW, got %+v", d)
+	}
+	off := MaxNotionalPerOrderRule{Max: 0} // disabled
+	if d := off.Eval(openLong(9999), st); !d.Allow {
+		t.Fatalf("Max=0 disables the rule, got %+v", d)
+	}
+}
+
+func TestOrderRateRule(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	r := &OrderRateRule{Max: 3, Window: time.Minute}
+	// 3 orders within the window all pass; the 4th is denied
+	for i := 0; i < 3; i++ {
+		if d := r.Eval(openLong(1), OrderState{Now: base.Add(time.Duration(i) * time.Second)}); !d.Allow {
+			t.Fatalf("order %d within rate should ALLOW, got %+v", i, d)
+		}
+	}
+	if d := r.Eval(openLong(1), OrderState{Now: base.Add(3 * time.Second)}); d.Allow || d.Reason != ReasonOrderRate {
+		t.Fatalf("4th order in window should DENY ORDER_RATE_LIMIT, got %+v", d)
+	}
+	// well past the window → allowed again
+	if d := r.Eval(openLong(1), OrderState{Now: base.Add(2 * time.Minute)}); !d.Allow {
+		t.Fatalf("order past the window should ALLOW, got %+v", d)
+	}
+	// closing orders are never rate-limited
+	r2 := &OrderRateRule{Max: 1, Window: time.Minute}
+	r2.Eval(openLong(1), OrderState{Now: base})
+	if d := r2.Eval(closeLong(1), OrderState{Now: base}); !d.Allow {
+		t.Fatalf("closing must never be rate-limited, got %+v", d)
 	}
 }
 

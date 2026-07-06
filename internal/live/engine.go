@@ -101,10 +101,15 @@ type Engine struct {
 	posSyncer *position.Syncer // nil if not configured
 }
 
-// orgDailyLossLimit is the ORG daily-loss threshold: once the account is down this
-// fraction on the day, ORG denies opening orders (closes still pass). Starting value
-// to tune from shadow-mode data; there is no risk.Config field for it yet.
-const orgDailyLossLimit = 0.05
+const (
+	// orgMaxOrdersPerMin is the ORG order-rate guard: a runaway-loop backstop set
+	// far above normal trading (a grid may fire several orders on one bar; that is
+	// fine — this only trips on sustained runaway).
+	orgMaxOrdersPerMin = 120
+	// orgMaxNotionalPerOrder is an absolute fat-finger cap on one order's notional;
+	// 0 = disabled until a per-deployment value is chosen.
+	orgMaxNotionalPerOrder = 0
+)
 
 // NewEngine creates a live trading engine.
 // bus, metrics, notifier are optional — pass nil to disable.
@@ -127,21 +132,19 @@ func NewEngine(
 	broker := New(orderClient, o, pm, notif, log)
 
 	// Order Risk Gateway (ORG): every strategy order passes through it before the
-	// broker. V1 runs in Shadow mode — it evaluates, logs, and counts decisions but
-	// never blocks; the broker's own gross-exposure guard stays the live gate until
-	// ORG is validated and promoted to Enforce. Layer-1 (order validation) reuses the
-	// risk config; Layer-3 (account risk) turns the risk manager's soft circuit
-	// breaker into a real order gate — account drawdown uses the same MaxDrawdownPct.
+	// broker. It is Layer 1 only — pure ORDER SAFETY (is this single order safe),
+	// strategy- and portfolio-agnostic: max leverage, max notional per order, and an
+	// order-rate limit. Portfolio-relative caps (position %, single-trade %, account
+	// drawdown) deliberately do NOT live here — they belong in the portfolio/account
+	// engine, which decides per-strategy exposure; putting them in the per-strategy
+	// order gateway wrongly kills single-symbol strategies. Runs in Shadow (evaluate
+	// + log + count, never block) until validated, then Enforce.
 	org := orgateway.New(
 		broker,
 		[]orgateway.Rule{
-			// Layer 1 — order validation
-			orgateway.MaxPositionPctRule{Max: rm.Cfg().MaxPositionPct},
-			orgateway.MaxSingleTradePctRule{Max: rm.Cfg().MaxSingleLossPct},
 			orgateway.MaxGrossLeverageRule{Frac: defaultMaxGrossExposureFrac},
-			// Layer 3 — account risk (stop taking new risk on a bad day / in drawdown)
-			orgateway.DailyLossRule{Max: orgDailyLossLimit},
-			orgateway.AccountDrawdownRule{Max: rm.Cfg().MaxDrawdownPct},
+			orgateway.MaxNotionalPerOrderRule{Max: orgMaxNotionalPerOrder},
+			&orgateway.OrderRateRule{Max: orgMaxOrdersPerMin, Window: time.Minute},
 		},
 		&orgLiveState{broker: broker, positions: pm, risk: rm},
 		orgateway.Shadow,
@@ -361,6 +364,7 @@ func (s *orgLiveState) Snapshot(req strategy.OrderRequest) orgateway.OrderState 
 		GrossNotional:  s.broker.GrossQty() * price,
 		Price:          price,
 		Leverage:       float64(s.broker.MaxLeverage()),
+		Now:            time.Now(),
 		PeakEquity:     s.risk.PeakEquity(),
 		DayStartEquity: s.broker.DayStartEquity(),
 	}

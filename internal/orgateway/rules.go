@@ -2,6 +2,8 @@ package orgateway
 
 import (
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/Quantix/quantix/internal/strategy"
 )
@@ -9,12 +11,21 @@ import (
 // Risk Reason codes. Every DENY carries one so decisions are auditable and
 // countable in shadow-mode review.
 const (
+	// Layer 1 — order safety (belongs in the ORG order gateway).
+	ReasonMaxGrossLeverage    = "MAX_GROSS_LEVERAGE"
+	ReasonMaxNotionalPerOrder = "MAX_NOTIONAL_PER_ORDER"
+	ReasonOrderRate           = "ORDER_RATE_LIMIT"
+	// Portfolio/account layer — NOT the order gateway (see note below).
 	ReasonMaxPositionPct    = "MAX_POSITION_PCT"
 	ReasonMaxSingleTradePct = "MAX_SINGLE_TRADE_PCT"
-	ReasonMaxGrossLeverage  = "MAX_GROSS_LEVERAGE"
 	ReasonDailyLoss         = "DAILY_LOSS_LIMIT"
 	ReasonAccountDrawdown   = "ACCOUNT_DRAWDOWN"
 )
+
+// ─── Layer 1: order-safety rules ────────────────────────────────────────────────
+// These judge whether a SINGLE order is safe — strategy- and portfolio-agnostic.
+// This is all the ORG order gateway should enforce: max leverage, max notional per
+// order, order-rate limit (blacklist would go here too).
 
 // MaxPositionPctRule caps a single symbol's position notional at Max fraction of
 // equity. Mirrors the paper risk.Manager's Rule 1, now applied engine-wide.
@@ -75,10 +86,69 @@ func (r MaxGrossLeverageRule) Eval(req strategy.OrderRequest, st OrderState) Dec
 	return allow
 }
 
-// ─── Layer 3: account-risk rules ────────────────────────────────────────────────
-// These block new risk during a bad day / drawdown. They never block closes, so a
-// position can always be exited. This turns the risk manager's soft circuit breaker
-// (live-side it only logs) into a real order gate.
+// MaxNotionalPerOrderRule caps a single order's absolute notional (a fat-finger /
+// runaway sanity limit, independent of account size). Max<=0 disables it.
+type MaxNotionalPerOrderRule struct{ Max float64 }
+
+func (r MaxNotionalPerOrderRule) Name() string { return ReasonMaxNotionalPerOrder }
+
+func (r MaxNotionalPerOrderRule) Eval(req strategy.OrderRequest, st OrderState) Decision {
+	if !opensOrIncreases(req) || r.Max <= 0 {
+		return allow
+	}
+	cost := orderCost(req, st)
+	if cost > r.Max {
+		return Decision{Reason: ReasonMaxNotionalPerOrder, Detail: fmt.Sprintf(
+			"order notional %.2f > per-order cap %.2f", cost, r.Max)}
+	}
+	return allow
+}
+
+// OrderRateRule limits opening-order frequency to Max per Window — a runaway-loop
+// guard (the 31-ETH class). Stateful and concurrency-safe; uses st.Now. Bursts
+// within Max are fine (a grid may place several orders on one bar); it only trips
+// on sustained runaway. Max<=0 or a zero st.Now disables it.
+type OrderRateRule struct {
+	Max    int
+	Window time.Duration
+
+	mu    sync.Mutex
+	times []time.Time
+}
+
+func (r *OrderRateRule) Name() string { return ReasonOrderRate }
+
+func (r *OrderRateRule) Eval(req strategy.OrderRequest, st OrderState) Decision {
+	if !opensOrIncreases(req) || r.Max <= 0 || st.Now.IsZero() {
+		return allow
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cut := st.Now.Add(-r.Window)
+	kept := r.times[:0]
+	for _, t := range r.times {
+		if t.After(cut) {
+			kept = append(kept, t)
+		}
+	}
+	r.times = kept
+	if len(r.times) >= r.Max {
+		return Decision{Reason: ReasonOrderRate, Detail: fmt.Sprintf(
+			"%d orders within %s ≥ max %d", len(r.times), r.Window, r.Max)}
+	}
+	r.times = append(r.times, st.Now)
+	return allow
+}
+
+// ─── Portfolio / account layer — NOT the order gateway ───────────────────────────
+// The rules below are relative to account/portfolio state (equity %, drawdown),
+// not to a single order's intrinsic safety. Per the 3-layer split they belong in
+// the Portfolio/account engine, which decides how much exposure each strategy gets
+// — wiring them into the per-strategy order gateway wrongly kills single-symbol
+// strategies (they concentrate capital into one position by design). Kept here as
+// reusable Rule implementations for that layer to consume.
+//
+// These block new risk during a bad day / drawdown. They never block closes.
 
 // DailyLossRule denies opening orders once the day's loss vs the day-start equity
 // reaches Max (e.g. 0.03 = down 3% on the day → stop taking new risk).
