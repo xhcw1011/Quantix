@@ -60,3 +60,4 @@ bin/
 
 # Cross-compiled binaries from deploy.sh
 build/
+reports/baseline/
