@@ -210,6 +210,83 @@ def do_validate(sym, interval, oi_period, W, horizon_h, atr_mult):
         print(f"    {k:<9} 顶 {t*100:>5.1f}% / 底 {b*100:>5.1f}%  lift {(t-b)*100:>+5.1f}pp  {useful}")
 
 
+def label_indices(sig, horizon_h, atr_mult, ih):
+    """返回 [(bar_index, breakout_label)]:未来 H 根内位移 > atr_mult×ATR 即突破。"""
+    score, atr, close = sig["score"], sig["atr"], sig["close"]
+    n = len(close)
+    H = max(1, round(horizon_h / ih))
+    out = []
+    for i in range(n):
+        if score[i] is None or atr[i] is None or i + H >= n:
+            continue
+        move = max(abs(close[j] - close[i]) for j in range(i + 1, i + H + 1))
+        out.append((i, 1 if move > atr_mult * atr[i] else 0))
+    return out
+
+
+def _seg_lift(sig, seg, name):
+    """某信号在一段 bar 上的 顶档-底档 突破率差;常量/数据不足 → None。"""
+    ps = [(sig["subs"][name][i], lab) for i, lab in seg if sig["subs"][name][i] is not None]
+    vals = [x for x, _ in ps]
+    if len(ps) < 20 or (vals and max(vals) - min(vals) < 1e-6):
+        return None
+    bk = buckets(ps)
+    return bk[-1][3] - bk[0][3]
+
+
+def do_oos(sym, interval, oi_period, W, horizon_h, atr_mult, train_frac):
+    ih = interval_hours(interval)
+    kl = fetch_klines(sym, interval, 1500)
+    sig = compute_signals(kl, fetch_oi(sym, oi_period), fetch_funding(sym), W, 24 / ih)
+    labeled = label_indices(sig, horizon_h, atr_mult, ih)
+    if len(labeled) < 200:
+        raise SystemExit("样本不足")
+    cut = int(len(labeled) * train_frac)
+    train, test = labeled[:cut], labeled[cut:]
+
+    print(f"# {sym} {interval}  OOS 验证  train {len(train)} / test {len(test)} 根  "
+          f"(突破: 未来{horizon_h}h > {atr_mult}×ATR,base {sum(l for _,l in labeled)/len(labeled)*100:.0f}%)")
+    print("# 权重按 TRAIN 的逐信号 lift 定(>3pp 等权、其余剔),再看 TEST 是否保持")
+    print("=" * 66)
+    print("  逐信号 lift:      train      test      稳健?")
+    useful = []
+    for k in WEIGHTS:
+        lt, lv = _seg_lift(sig, train, k), _seg_lift(sig, test, k)
+        ts = f"{lt*100:+.1f}pp" if lt is not None else "N/A"
+        vs = f"{lv*100:+.1f}pp" if lv is not None else "N/A"
+        if lt is not None and lt > 0.03:
+            useful.append(k)
+            robust = "稳 ✓" if (lv is not None and lv > 0.03) else "过拟合? ✗"
+        else:
+            robust = "—"
+        print(f"    {k:<9}     {ts:>8}   {vs:>8}    {robust}")
+    print("-" * 66)
+    if not useful:
+        print("  train 里没有 lift>3pp 的信号 → 无可用组合")
+        return
+    w = {k: (1 / len(useful) if k in useful else 0) for k in WEIGHTS}
+
+    def comp(i):
+        return sum(w[k] * sig["subs"][k][i] for k in WEIGHTS if sig["subs"][k][i] is not None)
+
+    def clift(seg):
+        bk = buckets([(comp(i), lab) for i, lab in seg])
+        return bk[-1][3] - bk[0][3], bk[-1][3], bk[0][3]
+
+    tl, tt, tb = clift(train)
+    vl, vt, vb = clift(test)
+    print(f"  选中(train useful): {useful}  各权重 {1/len(useful):.2f}")
+    print(f"  重配 composite   train {tl*100:+.1f}pp(顶{tt*100:.0f}/底{tb*100:.0f})"
+          f"   test {vl*100:+.1f}pp(顶{vt*100:.0f}/底{vb*100:.0f})")
+    print("=" * 66)
+    if vl > 0.05:
+        print(f"  ✅ OOS 保持:test 顶/底仍拉开 {vl*100:+.1f}pp → 这段 edge 不是过拟合")
+    elif vl > 0.02:
+        print(f"  🟡 OOS 减弱:test {vl*100:+.1f}pp,还在但变小 → 谨慎,要更多数据")
+    else:
+        print(f"  ❌ OOS 崩:test {vl*100:+.1f}pp → train 的 edge 没撑过样本外")
+
+
 def bar(x, width=20):
     n = int(round(max(0.0, min(1.0, x)) * width))
     return "█" * n + "·" * (width - n)
@@ -247,11 +324,15 @@ def main():
     ap.add_argument("--oi-period", default=None)
     ap.add_argument("--window", type=int, default=100, help="percentile 滚动窗口(根)")
     ap.add_argument("--validate", action="store_true", help="验证模式:标注历史突破测预测力")
+    ap.add_argument("--oos", action="store_true", help="样本外:train 定权重、test 验证是否保持")
+    ap.add_argument("--train-frac", type=float, default=0.65, help="train 占比(前 X 时序)")
     ap.add_argument("--horizon", type=float, default=4.0, help="突破前瞻小时数(验证用)")
     ap.add_argument("--atr-mult", type=float, default=2.0, help="位移 > 此倍数×ATR 算突破")
     args = ap.parse_args()
     oi_period = args.oi_period or args.interval
-    if args.validate:
+    if args.oos:
+        do_oos(args.symbol, args.interval, oi_period, args.window, args.horizon, args.atr_mult, args.train_frac)
+    elif args.validate:
         do_validate(args.symbol, args.interval, oi_period, args.window, args.horizon, args.atr_mult)
     else:
         do_latest(args.symbol, args.interval, oi_period, args.window)
