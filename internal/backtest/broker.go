@@ -38,7 +38,13 @@ type SimBroker struct {
 	portfolio   *Portfolio
 	log         *zap.Logger
 	nextID      int
+	lastPrice   float64 // current bar close; set by the engine before each OnBar (for ORG state)
 }
+
+// SetLastPrice records the current bar's close so order-time state (e.g. the ORG
+// gateway) can value orders. LastPrice returns it.
+func (b *SimBroker) SetLastPrice(p float64) { b.lastPrice = p }
+func (b *SimBroker) LastPrice() float64     { return b.lastPrice }
 
 // NewSimBroker creates a broker wired to the given portfolio.
 func NewSimBroker(feeRate, slippage float64, portfolio *Portfolio, log *zap.Logger) *SimBroker {

@@ -4,6 +4,7 @@ package backtest
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/exchange"
+	"github.com/Quantix/quantix/internal/orgateway"
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
@@ -44,6 +46,7 @@ type Engine struct {
 	strategy  strategy.Strategy
 	portfolio *Portfolio
 	broker    *SimBroker
+	org       *orgateway.Gateway
 	stratCtx  *strategy.Context
 	log       *zap.Logger
 }
@@ -52,16 +55,65 @@ type Engine struct {
 func New(cfg Config, store *data.Store, strat strategy.Strategy, log *zap.Logger) *Engine {
 	portfolio := NewPortfolio(cfg.InitialCapital)
 	broker := NewSimBroker(cfg.FeeRate, cfg.Slippage, portfolio, log)
-	stratCtx := strategy.NewContext(portfolio, broker, log)
+
+	// Order Risk Gateway in Shadow mode: measure how often each strategy's orders
+	// would trip the live Layer-1 limits across history (never blocks; a Nop logger
+	// keeps research backtests quiet — the tally surfaces in the Report). Layer-3
+	// account rules auto-skip here (no live account/day state in a backtest).
+	org := orgateway.New(
+		broker,
+		[]orgateway.Rule{
+			orgateway.MaxPositionPctRule{Max: btORGMaxPositionPct},
+			orgateway.MaxSingleTradePctRule{Max: btORGMaxSingleTradePct},
+			orgateway.MaxGrossLeverageRule{Frac: btORGGrossFrac},
+		},
+		&orgBTState{portfolio: portfolio, broker: broker},
+		orgateway.Shadow,
+		zap.NewNop(),
+	)
+	stratCtx := strategy.NewContext(portfolio, org, log)
 
 	return &Engine{
-		cfg:      cfg,
-		store:    store,
-		strategy: strat,
+		cfg:       cfg,
+		store:     store,
+		strategy:  strat,
 		portfolio: portfolio,
-		broker:   broker,
-		stratCtx: stratCtx,
-		log:      log,
+		broker:    broker,
+		org:       org,
+		stratCtx:  stratCtx,
+		log:       log,
+	}
+}
+
+// ORG backtest thresholds mirror the live risk-config defaults, so a backtest DENY
+// rate reads as "how often this strategy would trip the live limits".
+const (
+	btORGMaxPositionPct    = 0.10
+	btORGMaxSingleTradePct = 0.02
+	btORGGrossFrac         = 0.8
+)
+
+// orgBTState feeds the backtest ORG a per-order snapshot from the sim portfolio.
+// Single-symbol, spot-like (leverage 1); account-level state is left zero so the
+// Layer-3 rules auto-skip.
+type orgBTState struct {
+	portfolio *Portfolio
+	broker    *SimBroker
+}
+
+func (s *orgBTState) Snapshot(req strategy.OrderRequest) orgateway.OrderState {
+	price := s.broker.LastPrice()
+	prices := map[string]float64{req.Symbol: price}
+	var posVal float64
+	if qty, _, ok := s.portfolio.Position(req.Symbol); ok {
+		posVal = math.Abs(qty) * price
+	}
+	return orgateway.OrderState{
+		Equity:        s.portfolio.Equity(prices),
+		PositionValue: posVal,
+		GrossNotional: posVal,
+		Price:         price,
+		Leverage:      1,
 	}
 }
 
@@ -138,6 +190,7 @@ func (e *Engine) Run(ctx context.Context) (Report, error) {
 	for _, ev := range events {
 		// 1. Strategy receives the bar. Context (non-primary) bars only update the
 		//    strategy's interval buffer; they never reach the broker.
+		e.broker.SetLastPrice(ev.bar.Close) // value order-time state for the ORG gateway
 		e.strategy.OnBar(e.stratCtx, ev.bar)
 		if !ev.primary {
 			continue
@@ -169,6 +222,7 @@ func (e *Engine) Run(ctx context.Context) (Report, error) {
 		endTime,
 		len(klines),
 	)
+	report.ORGStats = e.org.Stats() // shadow-mode Layer-1 ALLOW/DENY tally
 
 	e.log.Info("backtest complete",
 		zap.Float64("total_return_pct", report.TotalReturn),

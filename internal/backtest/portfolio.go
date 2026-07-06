@@ -15,11 +15,11 @@ import (
 // SHORT cash accounting is PnL-only (no notional debit on open) so that
 // initial capital represents margin, not asset value.
 type Position struct {
-	Symbol     string
-	Qty        float64
-	AvgPrice   float64
-	Side       strategy.Side
-	OpenedAt   time.Time
+	Symbol   string
+	Qty      float64
+	AvgPrice float64
+	Side     strategy.Side
+	OpenedAt time.Time
 }
 
 // Trade records a completed round-trip (entry + exit).
@@ -100,12 +100,16 @@ func (p *Portfolio) Equity(prices map[string]float64) float64 {
 	total := p.cash
 	for sym, pos := range p.longPositions {
 		px, ok := prices[sym]
-		if !ok { px = pos.AvgPrice }
+		if !ok {
+			px = pos.AvgPrice
+		}
 		total += pos.Qty * px
 	}
 	for sym, pos := range p.shortPositions {
 		px, ok := prices[sym]
-		if !ok { px = pos.AvgPrice }
+		if !ok {
+			px = pos.AvgPrice
+		}
 		total += pos.Qty * (pos.AvgPrice - px) // unrealized SHORT pnl
 	}
 	return total

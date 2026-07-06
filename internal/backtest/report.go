@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -45,6 +46,26 @@ func PrintSummary(r Report, w io.Writer) {
 	fmt.Fprintf(tw, "  Profit Factor\t%.2f\n", r.ProfitFactor)
 	fmt.Fprintf(tw, "  Avg Duration\t%s\n", formatDuration(r.AvgTradeDuration))
 	fmt.Fprintln(tw, sep)
+
+	// ORG (Order Risk Gateway) shadow tally — how often orders would trip live limits.
+	if len(r.ORGStats) > 0 {
+		total := 0
+		keys := make([]string, 0, len(r.ORGStats))
+		for k, v := range r.ORGStats {
+			keys = append(keys, k)
+			total += v
+		}
+		sort.Strings(keys)
+		allow := r.ORGStats["ALLOW"]
+		fmt.Fprintf(tw, "  ORG (shadow)\t%d orders — %d ALLOW / %d DENY\n", total, allow, total-allow)
+		for _, k := range keys {
+			if k == "ALLOW" {
+				continue
+			}
+			fmt.Fprintf(tw, "    DENY %s\t%d\n", k, r.ORGStats[k])
+		}
+		fmt.Fprintln(tw, sep)
+	}
 
 	tw.Flush()
 }

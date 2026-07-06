@@ -39,6 +39,11 @@ type Report struct {
 	ProfitFactor     float64
 	AvgTradeDuration time.Duration
 
+	// ORG (Order Risk Gateway) shadow-mode decision tally: "ALLOW" + each reason
+	// code → count. Measures how often the strategy's orders would trip the live
+	// Layer-1 limits across this history. Empty when ORG is not wired.
+	ORGStats map[string]int
+
 	// Raw data (for charting / CSV export)
 	Trades      []Trade
 	EquityCurve []EquityPoint

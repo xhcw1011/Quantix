@@ -22,7 +22,7 @@ func TestMaxDrawdown_DownThenUp(t *testing.T) {
 	t0 := time.Now()
 	curve := []EquityPoint{
 		{Time: t0, Equity: 10_000},
-		{Time: t0.Add(time.Hour), Equity: 8_000},  // -20%
+		{Time: t0.Add(time.Hour), Equity: 8_000}, // -20%
 		{Time: t0.Add(2 * time.Hour), Equity: 12_000},
 	}
 	pct, abs := calcMaxDrawdown(curve)
