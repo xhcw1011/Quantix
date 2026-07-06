@@ -22,7 +22,9 @@ import urllib.request
 from datetime import datetime, timezone
 
 FAPI = "https://fapi.binance.com"
-WEIGHTS = {"atr": 0.25, "oi": 0.20, "funding": 0.15, "voldiv": 0.20, "duration": 0.20}
+# 权重:OOS 验证后锁定——只有 区间时长 + 量价背离 在两个币、样本内外全部保持;
+# ATR(BTC 上过拟合)、OI/Funding(没撑住/数据缺)剔除(权重 0,仍算子分供诊断)。
+WEIGHTS = {"atr": 0.0, "oi": 0.0, "funding": 0.0, "voldiv": 0.5, "duration": 0.5}
 
 
 def get(url, retries=3):
@@ -246,28 +248,22 @@ def do_oos(sym, interval, oi_period, W, horizon_h, atr_mult, train_frac):
 
     print(f"# {sym} {interval}  OOS 验证  train {len(train)} / test {len(test)} 根  "
           f"(突破: 未来{horizon_h}h > {atr_mult}×ATR,base {sum(l for _,l in labeled)/len(labeled)*100:.0f}%)")
-    print("# 权重按 TRAIN 的逐信号 lift 定(>3pp 等权、其余剔),再看 TEST 是否保持")
+    print("# 权重已锁定(区间时长+量价背离);逐信号 train/test lift 供诊断,composite 看 TEST 是否保持")
     print("=" * 66)
     print("  逐信号 lift:      train      test      稳健?")
-    useful = []
     for k in WEIGHTS:
         lt, lv = _seg_lift(sig, train, k), _seg_lift(sig, test, k)
         ts = f"{lt*100:+.1f}pp" if lt is not None else "N/A"
         vs = f"{lv*100:+.1f}pp" if lv is not None else "N/A"
-        if lt is not None and lt > 0.03:
-            useful.append(k)
-            robust = "稳 ✓" if (lv is not None and lv > 0.03) else "过拟合? ✗"
-        else:
-            robust = "—"
-        print(f"    {k:<9}     {ts:>8}   {vs:>8}    {robust}")
+        both = lt is not None and lv is not None and lt > 0.03 and lv > 0.03
+        robust = "稳 ✓" if both else ("过拟合? ✗" if (lt is not None and lt > 0.03) else "—")
+        mark = "  ←锁定" if WEIGHTS[k] > 0 else ""
+        print(f"    {k:<9}     {ts:>8}   {vs:>8}    {robust}{mark}")
     print("-" * 66)
-    if not useful:
-        print("  train 里没有 lift>3pp 的信号 → 无可用组合")
-        return
-    w = {k: (1 / len(useful) if k in useful else 0) for k in WEIGHTS}
+    locked = [k for k in WEIGHTS if WEIGHTS[k] > 0]
 
     def comp(i):
-        return sum(w[k] * sig["subs"][k][i] for k in WEIGHTS if sig["subs"][k][i] is not None)
+        return sum(WEIGHTS[k] * sig["subs"][k][i] for k in locked if sig["subs"][k][i] is not None)
 
     def clift(seg):
         bk = buckets([(comp(i), lab) for i, lab in seg])
@@ -275,8 +271,8 @@ def do_oos(sym, interval, oi_period, W, horizon_h, atr_mult, train_frac):
 
     tl, tt, tb = clift(train)
     vl, vt, vb = clift(test)
-    print(f"  选中(train useful): {useful}  各权重 {1/len(useful):.2f}")
-    print(f"  重配 composite   train {tl*100:+.1f}pp(顶{tt*100:.0f}/底{tb*100:.0f})"
+    print(f"  锁定权重: {', '.join(f'{k}={WEIGHTS[k]}' for k in locked)}")
+    print(f"  composite    train {tl*100:+.1f}pp(顶{tt*100:.0f}/底{tb*100:.0f})"
           f"   test {vl*100:+.1f}pp(顶{vt*100:.0f}/底{vb*100:.0f})")
     print("=" * 66)
     if vl > 0.05:
