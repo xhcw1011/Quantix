@@ -1,48 +1,25 @@
-// Command xsfunding-backtest feeds real Binance klines + funding into the pure
+// Command xsfunding-backtest feeds real DB klines + funding into the pure
 // internal/xsfunding core and reports performance, to validate PARITY with
 // scripts/xsmom_funding.py (target: funding factor ~35%/yr, Sharpe ~1.5) BEFORE any
-// live-runner wiring. Public endpoints only (no auth).
+// live-runner wiring. Reads from the DB data layer (klines + funding_rates), so it is
+// rate-limit free — run `go run ./cmd/ingest-funding` first to populate funding_rates.
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
 	"math"
-	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"time"
 
+	"go.uber.org/zap"
+
+	"github.com/Quantix/quantix/internal/config"
+	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/xsfunding"
 )
 
-const cacheDir = "/tmp/xsf_cache"
-
-type coinData struct {
-	Px, Qv, Fund map[string]float64
-}
-
-func loadCache(sym string) (*coinData, bool) {
-	b, err := os.ReadFile(filepath.Join(cacheDir, sym+".json"))
-	if err != nil {
-		return nil, false
-	}
-	var d coinData
-	if json.Unmarshal(b, &d) != nil || len(d.Px) == 0 {
-		return nil, false
-	}
-	return &d, true
-}
-
-func saveCache(sym string, d *coinData) {
-	b, _ := json.Marshal(d)
-	_ = os.WriteFile(filepath.Join(cacheDir, sym+".json"), b, 0644)
-}
-
-const fapi = "https://fapi.binance.com"
 const fundStart = "2024-09-01"
 
 var universe = []string{
@@ -61,108 +38,52 @@ const (
 	capital           = 10000.0
 )
 
-func daykey(ms int64) string { return time.UnixMilli(ms).UTC().Format("2006-01-02") }
+func daykey(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 func toMs(d string) int64 {
 	t, _ := time.Parse("2006-01-02", d)
 	return t.UnixMilli()
 }
 
-func get(url string) ([]byte, error) {
-	var last error
-	for i := 0; i < 4; i++ {
-		resp, err := http.Get(url)
-		if err != nil {
-			last = err
-			time.Sleep(time.Duration(300*(i+1)) * time.Millisecond)
-			continue
-		}
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode == 200 {
-			return b, nil
-		}
-		last = fmt.Errorf("http %d", resp.StatusCode)
-		time.Sleep(time.Duration(400*(i+1)) * time.Millisecond)
-	}
-	return nil, last
-}
-
-func fetchKlines(sym string) (map[string]float64, map[string]float64, error) {
-	b, err := get(fmt.Sprintf("%s/fapi/v1/klines?symbol=%s&interval=1d&limit=1500", fapi, sym))
-	if err != nil {
-		return nil, nil, err
-	}
-	var raw [][]interface{}
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return nil, nil, err
-	}
-	px, qv := map[string]float64{}, map[string]float64{}
-	for _, k := range raw {
-		d := daykey(int64(k[0].(float64)))
-		c, _ := strconv.ParseFloat(k[4].(string), 64)
-		v, _ := strconv.ParseFloat(k[7].(string), 64)
-		px[d], qv[d] = c, v
-	}
-	return px, qv, nil
-}
-
-func fetchFunding(sym string) (map[string]float64, error) {
-	fd := map[string]float64{}
-	cur := toMs(fundStart)
-	for p := 0; p < 8; p++ {
-		b, err := get(fmt.Sprintf("%s/fapi/v1/fundingRate?symbol=%s&startTime=%d&limit=1000", fapi, sym, cur))
-		if err != nil {
-			return nil, err
-		}
-		var raw []struct {
-			FundingRate string `json:"fundingRate"`
-			FundingTime int64  `json:"fundingTime"`
-		}
-		if err := json.Unmarshal(b, &raw); err != nil {
-			return nil, err
-		}
-		if len(raw) == 0 {
-			break
-		}
-		for _, x := range raw {
-			r, _ := strconv.ParseFloat(x.FundingRate, 64)
-			fd[daykey(x.FundingTime)] += r
-		}
-		if len(raw) < 1000 {
-			break
-		}
-		cur = raw[len(raw)-1].FundingTime + 1
-	}
-	return fd, nil
-}
-
 func main() {
+	log, _ := zap.NewProduction()
+	cfg, err := config.Load("config/config.yaml")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	ctx := context.Background()
+	store, err := data.New(ctx, cfg.Database.DSN(), log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "db: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	kStart, _ := time.Parse("2006-01-02", "2024-07-01")
+	kEnd, _ := time.Parse("2006-01-02", "2026-07-08")
+
 	px := map[string]map[string]float64{}
 	qv := map[string]map[string]float64{}
 	fund := map[string]map[string]float64{}
-	os.MkdirAll(cacheDir, 0755)
 	loaded := 0
 	for _, s := range universe {
-		if d, ok := loadCache(s); ok { // 缓存命中,不重复拉(跨 run 累积攒齐 universe)
-			px[s], qv[s], fund[s] = d.Px, d.Qv, d.Fund
-			loaded++
-			continue
+		kl, err := store.GetKlinesBetween(ctx, s, "1d", kStart, kEnd)
+		if err != nil || len(kl) == 0 {
+			continue // no price history → skip (factor filters these anyway)
 		}
-		p, v, err := fetchKlines(s)
-		if err != nil {
-			fmt.Printf("  skip %s klines: %v\n", s, err)
-			continue
+		p, v := map[string]float64{}, map[string]float64{}
+		for _, k := range kl {
+			d := daykey(k.OpenTime)
+			p[d], v[d] = k.Close, k.QuoteVolume
 		}
-		f, err := fetchFunding(s)
-		if err != nil {
-			fmt.Printf("  skip %s funding: %v\n", s, err)
-			continue
+		fr, _ := store.GetFunding(ctx, s)
+		f := map[string]float64{}
+		for _, r := range fr {
+			f[daykey(r.Time)] += r.Rate // daily sum (8h/4h marks collapse to the day)
 		}
-		saveCache(s, &coinData{Px: p, Qv: v, Fund: f})
 		px[s], qv[s], fund[s] = p, v, f
 		loaded++
-		time.Sleep(200 * time.Millisecond) // 温柔点,防限流
 	}
 
 	dateSet := map[string]bool{}
@@ -173,7 +94,7 @@ func main() {
 	}
 	dates := make([]string, 0, len(dateSet))
 	for d := range dateSet {
-		if d >= fundStart { // funding 只从 fundStart 有,之前的价格没有 funding 信号,截掉
+		if d >= fundStart { // funding only from fundStart; earlier prices have no signal
 			dates = append(dates, d)
 		}
 	}
@@ -187,8 +108,8 @@ func main() {
 	for s := range px {
 		mn := len(dates)
 		for d := range px[s] {
-			if idx[d] < mn {
-				mn = idx[d]
+			if i, ok := idx[d]; ok && i < mn {
+				mn = i
 			}
 		}
 		firstIdx[s] = mn
@@ -240,7 +161,7 @@ func main() {
 			if !okSi || !okSl || pSl <= 0 {
 				continue
 			}
-			if _, hasF := fund[s][dates[max(0, si-W)]]; !hasF { // 无 funding 覆盖 → 不进因子
+			if _, hasF := fund[s][dates[max(0, si-W)]]; !hasF { // no funding coverage → not in factor
 				continue
 			}
 			coins = append(coins, xsfunding.CoinState{
@@ -262,25 +183,24 @@ func main() {
 	}
 
 	if len(stepDates) < 2 {
-		fmt.Printf("\n数据不足(可能被限流):loaded=%d 币, dates=%d, periods=%d。稍等重试。\n",
+		fmt.Printf("\n数据不足:loaded=%d 币, dates=%d, periods=%d。先跑 ingest-funding + 确认 klines。\n",
 			loaded, len(dates), len(stepDates))
 		return
 	}
-	cfg := xsfunding.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, FeeRate: cost}
-	eq, steps := xsfunding.RunBacktest(periods, capital, cfg, 1.0)
+	cfg2 := xsfunding.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, FeeRate: cost}
+	eq, steps := xsfunding.RunBacktest(periods, capital, cfg2, 1.0)
 
 	cum := eq - 1
 	yrs := (toMs(stepDates[len(stepDates)-1]) - toMs(stepDates[0])) / 1000 / 86400
 	years := float64(yrs) / 365
 	ann := math.Pow(eq, 1/years) - 1
-	mean, _ := meanStd(steps)
-	_, sd := meanStd(steps)
+	mean, sd := meanStd(steps)
 	sharpe := 0.0
 	if sd > 0 {
 		sharpe = mean / sd * math.Sqrt(365.0/REB)
 	}
 
-	fmt.Printf("\n# Go parity: 截面 funding 因子  %d/%d 币  %s→%s  L%d W%d K%d REB%d 费%.0fbp\n",
+	fmt.Printf("\n# Go parity (DB): 截面 funding 因子  %d/%d 币  %s→%s  L%d W%d K%d REB%d 费%.0fbp\n",
 		loaded, len(universe), stepDates[0], stepDates[len(stepDates)-1], L, W, K, REB, cost*1e4)
 	fmt.Printf("  累计 %+.1f%%   年化 %+.1f%%   Sharpe %.2f\n", cum*100, ann*100, sharpe)
 	regimes := [][3]string{{"牛", "2024-11-01", "2025-02-15"}, {"25中", "2025-02-15", "2025-10-01"}, {"26跌", "2025-10-01", "2026-12-31"}}
