@@ -15,6 +15,14 @@ func ExecuteRotation(series map[string]Series, dates []string, asOf string, cfg 
 	}
 	current := PositionsToNotional(book.Positions())
 	plan := PlanRotation(series, dates, asOf, current, cfg, steps)
+	// Re-price trades off the BOOK (which retains a last price for every held symbol),
+	// so a close for a symbol that dropped out of the current universe — and thus has
+	// no asOf price in the eligible set — still executes instead of being dropped.
+	prices := map[string]float64{}
+	for _, o := range plan.Orders {
+		prices[o.Symbol] = book.Price(o.Symbol)
+	}
+	plan.Trades = OrdersToTrades(plan.Orders, prices, steps)
 	for _, tr := range plan.Trades {
 		side := strategy.SideBuy
 		if tr.Side == "SELL" {

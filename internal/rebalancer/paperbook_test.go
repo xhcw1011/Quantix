@@ -40,3 +40,17 @@ func TestPaperBookNetsAndClosesToFlat(t *testing.T) {
 		t.Fatalf("flat book should report no positions, got %+v", b.Positions())
 	}
 }
+
+func TestPaperBookIgnoresFPDust(t *testing.T) {
+	// 0.1+0.1+0.1 != 0.3 in float64 → closing 0.3 in three 0.1 sells leaves ~1e-17.
+	// The book must treat that as flat, not a phantom position.
+	b := NewPaperBook(0)
+	b.SetPrice("X", 1)
+	b.PlaceOrder(strategy.OrderRequest{Symbol: "X", Side: strategy.SideBuy, Type: strategy.OrderMarket, Qty: 0.3})
+	for i := 0; i < 3; i++ {
+		b.PlaceOrder(strategy.OrderRequest{Symbol: "X", Side: strategy.SideSell, Type: strategy.OrderMarket, Qty: 0.1})
+	}
+	if len(b.Positions()) != 0 {
+		t.Fatalf("FP dust must read as flat, got %+v", b.Positions())
+	}
+}

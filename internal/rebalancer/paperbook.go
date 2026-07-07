@@ -2,11 +2,16 @@ package rebalancer
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 
 	"github.com/Quantix/quantix/internal/strategy"
 )
+
+// dustQty is the position size below which a book entry is treated as flat — guards
+// against float-point residue from unrounded close quantities (e.g. 0.3−0.1−0.1−0.1).
+const dustQty = 1e-9
 
 // PaperBook is a multi-symbol paper broker for the cross-sectional rebalancer. Unlike
 // the single-symbol paper.Broker (one lastPrice), it holds a per-symbol price + signed
@@ -62,7 +67,7 @@ func (b *PaperBook) Positions() []Position {
 	defer b.mu.Unlock()
 	syms := make([]string, 0, len(b.pos))
 	for s, q := range b.pos {
-		if q != 0 {
+		if math.Abs(q) > dustQty {
 			syms = append(syms, s)
 		}
 	}
@@ -72,6 +77,13 @@ func (b *PaperBook) Positions() []Position {
 		out = append(out, Position{Symbol: s, SignedQty: b.pos[s], Price: b.prices[s]})
 	}
 	return out
+}
+
+// Price returns the last set price for a symbol (0 if unknown).
+func (b *PaperBook) Price(symbol string) float64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.prices[symbol]
 }
 
 // RealizedCost is the total fees accrued so far (paper-forward's cost meter).

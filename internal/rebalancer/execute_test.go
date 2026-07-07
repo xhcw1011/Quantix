@@ -3,7 +3,13 @@ package rebalancer
 import (
 	"math"
 	"testing"
+
+	"github.com/Quantix/quantix/internal/strategy"
 )
+
+func mkBuy(sym string, qty float64) strategy.OrderRequest {
+	return strategy.OrderRequest{Symbol: sym, Side: strategy.SideBuy, Type: strategy.OrderMarket, Qty: qty}
+}
 
 func rotSeries() map[string]Series {
 	mk := func(fund float64) Series {
@@ -32,6 +38,27 @@ func TestExecuteRotationFromFlat(t *testing.T) {
 	}
 	if math.Abs(pos["A"]-50) > 1e-9 || math.Abs(pos["D"]+50) > 1e-9 {
 		t.Fatalf("book should be long A 50 / short D -50, got %+v", pos)
+	}
+}
+
+func TestExecuteRotationClosesDroppedSymbol(t *testing.T) {
+	// A held position in a symbol NOT in the current universe (no price on asOf) must
+	// still be closed, priced off the book's last price — else it lingers forever.
+	series := rotSeries()
+	cfg := Config{K: 1, GrossFrac: 1.0, MinDaysListed: 1, MinVolume: 1e6, W: 2, VolWin: 2, MinOrder: 1, Capital: 10000}
+	book := NewPaperBook(0)
+	book.SetPrice("GHOST", 50)
+	book.PlaceOrder(mkBuy("GHOST", 10)) // book holds +10 GHOST @ 50, not in series
+	ExecuteRotation(series, []string{"d0", "d1"}, "d1", cfg, nil, book, book)
+	pos := map[string]float64{}
+	for _, p := range book.Positions() {
+		pos[p.Symbol] = p.SignedQty
+	}
+	if _, held := pos["GHOST"]; held {
+		t.Fatalf("GHOST (dropped from universe) must be closed, still held: %+v", pos)
+	}
+	if math.Abs(pos["A"]-50) > 1e-9 || math.Abs(pos["D"]+50) > 1e-9 {
+		t.Fatalf("expected long A 50 / short D -50, got %+v", pos)
 	}
 }
 
