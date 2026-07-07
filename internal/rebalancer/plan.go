@@ -1,0 +1,41 @@
+package rebalancer
+
+import "github.com/Quantix/quantix/internal/xsfunding"
+
+// Config parameterizes a rebalance plan.
+type Config struct {
+	K             int
+	GrossFrac     float64
+	MinDaysListed int
+	MinVolume     float64
+	W             int // trailing funding window (dates)
+	VolWin        int // trailing volume window (dates)
+	MinOrder      float64
+	Capital       float64
+}
+
+// Plan is one rotation's output: the target book, the notional deltas vs current, and
+// the concrete step-rounded trades.
+type Plan struct {
+	Targets []xsfunding.Target
+	Orders  []xsfunding.Order
+	Trades  []Trade
+}
+
+// PlanRotation computes the full rotation (no side effects). `current` is signed
+// notional per symbol; `steps` is each symbol's lot step. Returns an empty Plan when
+// the eligible universe is too small to form 2K positions.
+func PlanRotation(series map[string]Series, dates []string, asOf string, current map[string]float64, cfg Config, steps map[string]float64) Plan {
+	coins := BuildStates(series, dates, asOf, cfg.W, cfg.VolWin)
+	longs, shorts := xsfunding.Rank(xsfunding.Eligible(coins, cfg.MinDaysListed, cfg.MinVolume), cfg.K)
+	if longs == nil {
+		return Plan{}
+	}
+	targets := xsfunding.BuildTargets(longs, shorts, cfg.Capital, cfg.GrossFrac)
+	orders := xsfunding.Deltas(current, targets, cfg.MinOrder)
+	prices := map[string]float64{}
+	for _, c := range coins {
+		prices[c.Symbol] = c.Price
+	}
+	return Plan{Targets: targets, Orders: orders, Trades: OrdersToTrades(orders, prices, steps)}
+}
