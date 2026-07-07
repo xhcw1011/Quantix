@@ -190,7 +190,7 @@ func (m *EngineManager) poolManagerFor(userID int) *pool.Manager {
 		{Name: "Yield", NotionalCap: 10000, MaxDrawdown: 0.15, RecoverDrawdown: 0.08, RecoverBars: 5, MaxLongExp: 1.2, MaxShortExp: 0.5},
 		{Name: "Cash", NotionalCap: 0},
 		{Name: "default", NotionalCap: 10000, MaxDrawdown: 0.30, RecoverDrawdown: 0.20, RecoverBars: 5, MaxLongExp: 2.0, MaxShortExp: 2.0},
-	}, nil)
+	}, nil, m.log)
 	m.pools[userID] = pm
 	return pm
 }

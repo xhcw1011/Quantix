@@ -11,6 +11,7 @@ func TestManagerIsolatesPools(t *testing.T) {
 			{Name: "Yield", NotionalCap: 10000, MaxDrawdown: 0.10, RecoverDrawdown: 0.05},
 		},
 		map[string]string{"macross": "Growth", "spottrend": "Growth", "grid": "Yield"},
+		nil,
 	)
 	m.Update(map[string]MemberState{
 		"macross":   ms(0, -700, 0, 0),  // Growth total unrealized -1300 → equity 8700
@@ -32,7 +33,7 @@ func TestManagerIsolatesPools(t *testing.T) {
 // Per-engine Report + dynamic Assign: members report independently, the pool
 // aggregates all members' latest states.
 func TestManagerReportAndAssign(t *testing.T) {
-	m := NewManager([]Config{{Name: "Growth", NotionalCap: 10000, MaxDrawdown: 0.10, RecoverDrawdown: 0.05}}, nil)
+	m := NewManager([]Config{{Name: "Growth", NotionalCap: 10000, MaxDrawdown: 0.10, RecoverDrawdown: 0.05}}, nil, nil)
 	m.Assign("macross", "Growth")
 	m.Assign("spottrend", "Growth")
 

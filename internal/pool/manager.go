@@ -1,6 +1,10 @@
 package pool
 
-import "sync"
+import (
+	"sync"
+
+	"go.uber.org/zap"
+)
 
 // Manager owns the set of pools and the strategy→pool membership, aggregates member
 // states each update, and publishes each pool's Snapshot. It is the Capital Layer's
@@ -12,11 +16,15 @@ type Manager struct {
 	strat  map[string]string // strategyID → pool name
 	latest map[string]MemberState
 	snaps  map[string]Snapshot
+	log    *zap.Logger
 }
 
 // NewManager builds a manager from pool configs and a strategy→pool membership map
-// (membership may be empty and filled later with Assign).
-func NewManager(configs []Config, membership map[string]string) *Manager {
+// (membership may be empty and filled later with Assign). log may be nil.
+func NewManager(configs []Config, membership map[string]string, log *zap.Logger) *Manager {
+	if log == nil {
+		log = zap.NewNop()
+	}
 	pools := make(map[string]*Pool, len(configs))
 	snaps := make(map[string]Snapshot, len(configs))
 	for _, c := range configs {
@@ -26,7 +34,7 @@ func NewManager(configs []Config, membership map[string]string) *Manager {
 	if membership == nil {
 		membership = map[string]string{}
 	}
-	return &Manager{pools: pools, strat: membership, latest: map[string]MemberState{}, snaps: snaps}
+	return &Manager{pools: pools, strat: membership, latest: map[string]MemberState{}, snaps: snaps, log: log}
 }
 
 // Assign maps a strategy to a pool (dynamic membership, e.g. as engines start).
@@ -63,7 +71,19 @@ func (m *Manager) Report(strategyID string, st MemberState) {
 			}
 		}
 	}
-	m.snaps[pn] = p.Update(states)
+	old := m.snaps[pn]
+	snap := p.Update(states)
+	m.snaps[pn] = snap
+	if old.Status != snap.Status { // record the transition event for shadow observation
+		if snap.Status == Halted {
+			m.log.Warn("POOL_HALTED",
+				zap.String("pool", pn), zap.Float64("dd_pct", snap.Drawdown*100),
+				zap.Float64("long_exp", snap.LongExp), zap.Float64("short_exp", snap.ShortExp))
+		} else {
+			m.log.Info("POOL_RECOVERY",
+				zap.String("pool", pn), zap.Float64("dd_pct", snap.Drawdown*100))
+		}
+	}
 }
 
 // Update aggregates the latest per-strategy member states into their pools and
