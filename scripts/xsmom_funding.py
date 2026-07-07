@@ -130,12 +130,20 @@ def wret(eq, step_dates, a, b):
 
 def main():
     px, qv, fund = {}, {}, {}
-    for s in UNIVERSE:
-        try:
-            px[s], qv[s] = fetch_daily(s)
-            fund[s] = fetch_funding_daily(s)
-        except Exception as e:
-            print(f"  skip {s}: {e}")
+    if "--data" in sys.argv:  # identical-data parity: load the exact DB feed Go used
+        import json
+        path = sys.argv[sys.argv.index("--data") + 1]
+        with open(path) as fh:
+            d = json.load(fh)
+        px, qv, fund = d["px"], d["qv"], d["fund"]
+        print(f"# loaded {len(px)} coins from {path} (identical-data parity)")
+    else:
+        for s in UNIVERSE:
+            try:
+                px[s], qv[s] = fetch_daily(s)
+                fund[s] = fetch_funding_daily(s)
+            except Exception as e:
+                print(f"  skip {s}: {e}")
     dates = sorted({d for s in px for d in px[s]})
 
     print(f"### 基线 3 因子(全 {len(UNIVERSE)} 币,L14 W14 K5 REB3 费10bp)")

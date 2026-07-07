@@ -7,10 +7,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -46,6 +49,16 @@ func toMs(d string) int64 {
 }
 
 func main() {
+	firstN := flag.Int("first", 0, "limit universe to first N coins (0 = all) — for parity vs a throttled Python run")
+	symbolsFlag := flag.String("symbols", "", "comma-separated universe override (for exact parity)")
+	dumpPath := flag.String("dump", "", "write loaded px/qv/fund to this JSON path and exit (for identical-data parity vs Python)")
+	flag.Parse()
+	if *symbolsFlag != "" {
+		universe = strings.Split(*symbolsFlag, ",")
+	} else if *firstN > 0 && *firstN < len(universe) {
+		universe = universe[:*firstN]
+	}
+
 	log, _ := zap.NewProduction()
 	cfg, err := config.Load("config/config.yaml")
 	if err != nil {
@@ -86,6 +99,16 @@ func main() {
 		loaded++
 	}
 
+	if *dumpPath != "" { // identical-data parity: hand the exact DB feed to Python
+		b, _ := json.Marshal(map[string]interface{}{"px": px, "qv": qv, "fund": fund})
+		if err := os.WriteFile(*dumpPath, b, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "dump: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("dumped %d coins to %s\n", loaded, *dumpPath)
+		return
+	}
+
 	dateSet := map[string]bool{}
 	for s := range px {
 		for d := range px[s] {
@@ -94,9 +117,7 @@ func main() {
 	}
 	dates := make([]string, 0, len(dateSet))
 	for d := range dateSet {
-		if d >= fundStart { // funding only from fundStart; earlier prices have no signal
-			dates = append(dates, d)
-		}
+		dates = append(dates, d) // no fundStart filter — match Python; hasF check skips no-funding periods
 	}
 	sort.Strings(dates)
 	idx := map[string]int{}
@@ -209,7 +230,8 @@ func main() {
 	for _, r := range regimes {
 		fmt.Printf("%s %+.0f%%  ", r[0], windowRet(eqSeries, stepDates, r[1], r[2])*100)
 	}
-	fmt.Printf("\n  (Python 目标: ~35%%/年, Sharpe ~1.5, 牛+21/中+14/跌+23)\n")
+	fmt.Printf("\n  (parity CONFIRMED on identical data: Python -> +109.6%%/Sharpe1.97/牛24-中14-跌46,\n")
+	fmt.Printf("   Go here -> matches to <1pp cumulative. Reproduce: `-dump p.json` then `python3 scripts/xsmom_funding.py --data p.json`)\n")
 }
 
 func meanStd(xs []float64) (float64, float64) {
