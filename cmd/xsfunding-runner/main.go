@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"time"
 
 	"go.uber.org/zap"
@@ -50,8 +51,32 @@ func (s *paperState) Snapshot(req strategy.OrderRequest) orgateway.OrderState {
 	}
 }
 
+// flatSyncer reports no open positions — pure shadow (no account). Replace with
+// rebalancer.NewExchangeSyncer once a demo/live account is wired.
+type flatSyncer struct{}
+
+func (flatSyncer) Positions(context.Context) ([]rebalancer.Position, error) { return nil, nil }
+
+// splitBook returns the long and short target symbols of a plan (sorted).
+func splitBook(plan rebalancer.Plan) (longs, shorts []string) {
+	for _, tg := range plan.Targets {
+		if tg.Notional > 0 {
+			longs = append(longs, tg.Symbol)
+		} else {
+			shorts = append(shorts, tg.Symbol)
+		}
+	}
+	sort.Strings(longs)
+	sort.Strings(shorts)
+	return longs, shorts
+}
+
 func main() {
 	once := flag.Bool("once", false, "single rotation as of the latest date (live-tick shape) instead of full replay")
+	schedule := flag.Bool("schedule", false, "run the wall-clock shadow loop (rotate every REB days, log only, no orders)")
+	tickNow := flag.Bool("tick-now", false, "fire one shadow tick immediately then exit (proves the scheduled tick end-to-end)")
+	every := flag.Int("every", REB, "rebalance cadence in days (schedule mode)")
+	atHour := flag.Int("at-hour", 8, "UTC hour to rebalance at, post-funding (schedule mode)")
 	flag.Parse()
 
 	log, _ := zap.NewProduction()
@@ -93,6 +118,41 @@ func main() {
 
 	run := func(asOf string) rebalancer.Plan {
 		return rebalancer.ExecuteRotation(series, dates, asOf, rc, nil, book, gw)
+	}
+
+	// ── schedule / tick-now: wall-clock SHADOW loop (real syncer, no orders) ──
+	if *schedule || *tickNow {
+		// Pure shadow has no account → a flat syncer (no positions). Swap in
+		// rebalancer.NewExchangeSyncer(querier, priceFn) once a demo account is wired.
+		var sync rebalancer.Syncer = flatSyncer{}
+		shadowTick := func(scheduled time.Time) {
+			ser, dts := rebalancer.LoadSeries(ctx, store, rebalancer.DefaultUniverse, start, end) // refresh DB
+			if len(dts) == 0 {
+				log.Warn("shadow tick: no data")
+				return
+			}
+			asOf := dts[len(dts)-1]
+			positions, err := sync.Positions(ctx)
+			if err != nil {
+				log.Warn("shadow tick: sync failed", zap.Error(err))
+				return
+			}
+			plan := rebalancer.PlanRotation(ser, dts, asOf, rebalancer.PositionsToNotional(positions), rc, nil)
+			longs, shorts := splitBook(plan)
+			log.Info("shadow rotation (NO ORDERS)",
+				zap.Time("scheduled", scheduled), zap.String("asOf", asOf),
+				zap.Int("held", len(positions)), zap.Strings("long", longs), zap.Strings("short", shorts),
+				zap.Int("trades", len(plan.Trades)))
+		}
+		if *tickNow {
+			next := rebalancer.NextTick(time.Now(), *every, *atHour)
+			fmt.Printf("next scheduled rotation: %s UTC (every %dd @ %02d:00). Firing one tick now:\n", next.Format(time.RFC3339), *every, *atHour)
+			shadowTick(time.Now())
+			return
+		}
+		fmt.Printf("xsfunding-runner SCHEDULE (shadow): rotate every %dd @ %02d:00 UTC, log only. Ctrl-C to stop.\n", *every, *atHour)
+		rebalancer.Loop(ctx, *every, *atHour, time.Now, shadowTick, log)
+		return
 	}
 
 	if *once {
