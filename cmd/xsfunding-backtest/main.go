@@ -257,7 +257,25 @@ func main() {
 
 	fmt.Printf("\n# Go parity (DB): 截面 funding 因子  %d/%d 币  %s→%s  L%d W%d K%d REB%d 费%.0fbp\n",
 		loaded, len(universe), stepDates[0], stepDates[len(stepDates)-1], L, W, K, REB, cost*1e4)
-	fmt.Printf("  累计 %+.1f%%   年化 %+.1f%%   Sharpe %.2f\n", cum*100, ann*100, sharpe)
+	// max drawdown + worst single rebalance (the "double-loss" tail)
+	eqDD := runningEquity(steps)
+	peak, maxDD := 0.0, 0.0
+	for _, e := range eqDD {
+		if e > peak {
+			peak = e
+		}
+		if dd := (peak - e) / peak; dd > maxDD {
+			maxDD = dd
+		}
+	}
+	worst := 0.0
+	for _, s := range steps {
+		if s < worst {
+			worst = s
+		}
+	}
+	fmt.Printf("  累计 %+.1f%%   年化 %+.1f%%   Sharpe %.2f   maxDD %.1f%%   最差单期 %.1f%%\n",
+		cum*100, ann*100, sharpe, maxDD*100, worst*100)
 	regimes := [][3]string{{"牛", "2024-11-01", "2025-02-15"}, {"25中", "2025-02-15", "2025-10-01"}, {"26跌", "2025-10-01", "2026-12-31"}}
 	fmt.Printf("  regime: ")
 	eqSeries := runningEquity(steps)
