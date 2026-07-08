@@ -92,6 +92,7 @@ func main() {
 	dry := flag.Bool("dry", false, "sync + plan + log, place NO orders (preview)")
 	once := flag.Bool("once", false, "place one rotation (required to actually trade)")
 	flatten := flag.Bool("flatten", false, "close ALL open positions and exit (clean stop)")
+	hedge := flag.Bool("hedge", false, "account is in hedge (dual-side) mode; default assumes one-way")
 	capital := flag.Float64("capital", 3000, "gross exposure in USDT (each position = capital/2K)")
 	flag.Parse()
 	if !*dry && !*once && !*flatten {
@@ -217,7 +218,7 @@ func main() {
 		&orgateway.OrderRateRule{Max: 100000, Window: time.Minute},
 	}
 	gw := orgateway.New(lb, rules, &liveState{current: current, capital: *capital}, orgateway.Shadow, log)
-	rebalancer.ExecuteRotationSink(series, dates, asOf, rc, priceAt, current, gw, true /*hedge*/)
+	rebalancer.ExecuteRotationSink(series, dates, asOf, rc, priceAt, current, gw, *hedge)
 
 	fmt.Printf("\n  ORG stats: %v\n", gw.Stats())
 	if *dry {
