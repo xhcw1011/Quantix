@@ -53,7 +53,7 @@ func (l *liveBroker) PlaceOrder(req strategy.OrderRequest) string {
 		l.log.Info("DRY would place", zap.String("sym", req.Symbol), zap.String("side", string(side)), zap.Float64("qty", req.Qty))
 		return cid
 	}
-	fill, err := l.ob.PlaceMarketOrder(l.ctx, req.Symbol, side, "", req.Qty, cid)
+	fill, err := l.ob.PlaceMarketOrder(l.ctx, req.Symbol, side, string(req.PositionSide), req.Qty, cid)
 	if err != nil {
 		l.log.Warn("place FAILED", zap.String("sym", req.Symbol), zap.String("side", string(side)), zap.Float64("qty", req.Qty), zap.Error(err))
 		return ""
@@ -162,7 +162,7 @@ func main() {
 		&orgateway.OrderRateRule{Max: 100000, Window: time.Minute},
 	}
 	gw := orgateway.New(lb, rules, &liveState{current: current, capital: *capital}, orgateway.Shadow, log)
-	rebalancer.ExecuteRotationSink(series, dates, asOf, rc, priceAt, current, gw)
+	rebalancer.ExecuteRotationSink(series, dates, asOf, rc, priceAt, current, gw, true /*hedge*/)
 
 	fmt.Printf("\n  ORG stats: %v\n", gw.Stats())
 	if *dry {

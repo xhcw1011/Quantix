@@ -72,7 +72,7 @@ func TestExecuteRotationSink(t *testing.T) {
 	cfg := Config{K: 1, GrossFrac: 1.0, MinDaysListed: 1, MinVolume: 1e6, W: 2, VolWin: 2, MinOrder: 1, Capital: 10000}
 	priceFn := func(string) float64 { return 100 }
 	sink := &captureSink{}
-	plan := ExecuteRotationSink(series, []string{"d0", "d1"}, "d1", cfg, priceFn, map[string]float64{}, sink)
+	plan := ExecuteRotationSink(series, []string{"d0", "d1"}, "d1", cfg, priceFn, map[string]float64{}, sink, false)
 	if len(plan.Targets) != 2 || len(sink.placed) != 2 {
 		t.Fatalf("expected 2 targets + 2 orders placed, got %d/%d", len(plan.Targets), len(sink.placed))
 	}

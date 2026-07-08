@@ -7,19 +7,44 @@ import "github.com/Quantix/quantix/internal/strategy"
 // holds no PaperBook: trades are priced from priceFn (so a close for a symbol that left
 // the eligible set still executes), and lot-step rounding is left to the sink/broker.
 // Returns the Plan.
-func ExecuteRotationSink(series map[string]Series, dates []string, asOf string, cfg Config, priceFn func(symbol string) float64, current map[string]float64, sink strategy.Broker) Plan {
+func ExecuteRotationSink(series map[string]Series, dates []string, asOf string, cfg Config, priceFn func(symbol string) float64, current map[string]float64, sink strategy.Broker, hedge bool) Plan {
 	plan := PlanRotation(series, dates, asOf, current, cfg, nil)
 	prices := map[string]float64{}
 	for _, o := range plan.Orders {
 		prices[o.Symbol] = priceFn(o.Symbol)
 	}
 	plan.Trades = OrdersToTrades(plan.Orders, prices, nil)
+
+	// In hedge mode each order must name the position bucket it belongs to: a symbol's
+	// bucket is LONG if it's a target long (or a held long being closed), else SHORT.
+	bucket := map[string]strategy.PositionSide{}
+	if hedge {
+		for _, t := range plan.Targets {
+			if t.Notional >= 0 {
+				bucket[t.Symbol] = strategy.PositionSideLong
+			} else {
+				bucket[t.Symbol] = strategy.PositionSideShort
+			}
+		}
+		for s, n := range current {
+			if _, ok := bucket[s]; !ok {
+				if n >= 0 {
+					bucket[s] = strategy.PositionSideLong
+				} else {
+					bucket[s] = strategy.PositionSideShort
+				}
+			}
+		}
+	}
 	for _, tr := range plan.Trades {
 		side := strategy.SideBuy
 		if tr.Side == "SELL" {
 			side = strategy.SideSell
 		}
-		sink.PlaceOrder(strategy.OrderRequest{Symbol: tr.Symbol, Side: side, Type: strategy.OrderMarket, Qty: tr.Qty})
+		sink.PlaceOrder(strategy.OrderRequest{
+			Symbol: tr.Symbol, Side: side, PositionSide: bucket[tr.Symbol],
+			Type: strategy.OrderMarket, Qty: tr.Qty,
+		})
 	}
 	return plan
 }
