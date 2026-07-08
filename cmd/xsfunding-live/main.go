@@ -91,12 +91,16 @@ func (s *liveState) Snapshot(req strategy.OrderRequest) orgateway.OrderState {
 func main() {
 	dry := flag.Bool("dry", false, "sync + plan + log, place NO orders (preview)")
 	once := flag.Bool("once", false, "place one rotation (required to actually trade)")
+	schedule := flag.Bool("schedule", false, "run continuously: rotate every -every days at -at-hour UTC")
 	flatten := flag.Bool("flatten", false, "close ALL open positions and exit (clean stop)")
 	hedge := flag.Bool("hedge", false, "account is in hedge (dual-side) mode; default assumes one-way")
+	testnet := flag.Bool("testnet", true, "testnet (safe); -testnet=false hits MAINNET real money (needs QUANTIX_LIVE_CONFIRM=true)")
+	every := flag.Int("every", REB, "rebalance cadence in days (schedule mode)")
+	atHour := flag.Int("at-hour", 8, "UTC hour to rebalance at, post-funding (schedule mode)")
 	capital := flag.Float64("capital", 3000, "gross exposure in USDT (each position = capital/2K)")
 	flag.Parse()
-	if !*dry && !*once && !*flatten {
-		fmt.Println("specify -dry (preview), -once (place), or -flatten (close all). refusing to run without a mode.")
+	if !*dry && !*once && !*flatten && !*schedule {
+		fmt.Println("specify -dry (preview), -once (place), -schedule (loop), or -flatten (close all). refusing to run without a mode.")
 		return
 	}
 
@@ -121,10 +125,14 @@ func main() {
 	}
 	defer store.Close()
 
-	ob, err := binance_futures.NewOrderBroker(apiKey, secret, true /*testnet*/, log)
+	ob, err := binance_futures.NewOrderBroker(apiKey, secret, *testnet, log)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "order broker: %v\n", err)
 		os.Exit(1)
+	}
+	net := "TESTNET"
+	if !*testnet {
+		net = "MAINNET (REAL MONEY)"
 	}
 
 	if eq, err := ob.GetEquity(ctx, "USDT"); err == nil {
@@ -179,57 +187,59 @@ func main() {
 
 	start, _ := time.Parse("2006-01-02", "2024-07-01")
 	end, _ := time.Parse("2006-01-02", "2026-07-08")
-	series, dates := rebalancer.LoadSeries(ctx, store, rebalancer.DefaultUniverse, start, end)
-	if len(dates) == 0 {
-		fmt.Println("no data — run cmd/ingest-klines + ingest-funding first")
-		return
-	}
-	asOf := dates[len(dates)-1]
-	priceAt := func(sym string) float64 { return series[sym].Price[asOf] }
-
 	rc := rebalancer.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, W: W, VolWin: 30, MinOrder: 5.0, Capital: *capital, MaxPerCoinFrac: 0.15}
 
-	// current positions from the exchange (truth), valued at asOf prices
-	syncer := rebalancer.NewExchangeSyncer(ob, priceAt)
-	positions, err := syncer.Positions(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "sync positions: %v\n", err)
-		os.Exit(1)
-	}
-	current := rebalancer.PositionsToNotional(positions)
-	fmt.Printf("\n# xsfunding-live  asOf %s  testnet  synced %d open positions\n", asOf, len(positions))
-	for _, p := range positions {
-		fmt.Printf("    held %-10s qty %+.4f  ~$%.0f\n", p.Symbol, p.SignedQty, p.SignedQty*p.Price)
+	// rotate runs one full rebalance: reload DB series, sync exchange positions, plan
+	// vs current, and place the delta orders through ORG → Binance (or dry-preview).
+	rotate := func() {
+		series, dates := rebalancer.LoadSeries(ctx, store, rebalancer.DefaultUniverse, start, end)
+		if len(dates) == 0 {
+			log.Warn("rotate: no data — run ingest-klines + ingest-funding")
+			return
+		}
+		asOf := dates[len(dates)-1]
+		priceAt := func(sym string) float64 { return series[sym].Price[asOf] }
+		syncer := rebalancer.NewExchangeSyncer(ob, priceAt)
+		positions, err := syncer.Positions(ctx)
+		if err != nil {
+			log.Warn("rotate: sync failed", zap.Error(err))
+			return
+		}
+		current := rebalancer.PositionsToNotional(positions)
+		fmt.Printf("\n# xsfunding-live  %s  asOf %s  synced %d open positions\n", net, asOf, len(positions))
+		for _, p := range positions {
+			fmt.Printf("    held %-10s qty %+.4f  ~$%.0f\n", p.Symbol, p.SignedQty, p.SignedQty*p.Price)
+		}
+		plan := rebalancer.PlanRotation(series, dates, asOf, current, rc, nil)
+		if len(plan.Targets) == 0 {
+			log.Warn("rotate: universe too small to form a book")
+			return
+		}
+		fmt.Printf("  plan: %d target positions, %d delta trades\n", len(plan.Targets), len(plan.Trades))
+
+		lb := &liveBroker{ob: ob, ctx: ctx, log: log, dry: *dry}
+		rules := []orgateway.Rule{
+			orgateway.MaxGrossLeverageRule{Frac: 100},
+			orgateway.MaxNotionalPerOrderRule{Max: 1e9},
+			&orgateway.OrderRateRule{Max: 100000, Window: time.Minute},
+		}
+		gw := orgateway.New(lb, rules, &liveState{current: current, capital: *capital}, orgateway.Shadow, log)
+		rebalancer.ExecuteRotationSink(series, dates, asOf, rc, priceAt, current, gw, *hedge)
+		fmt.Printf("  ORG stats: %v\n", gw.Stats())
+		if *dry {
+			fmt.Println("  DRY — no orders sent.")
+			return
+		}
+		time.Sleep(2 * time.Second)
+		after, _ := syncer.Positions(ctx)
+		fmt.Printf("  after: %d open positions\n", len(after))
 	}
 
-	// plan the rotation vs current
-	plan := rebalancer.PlanRotation(series, dates, asOf, current, rc, nil)
-	if len(plan.Targets) == 0 {
-		fmt.Println("universe too small to form a book — abort")
+	if *schedule {
+		fmt.Printf("xsfunding-live SCHEDULE on %s: rotate every %dd @ %02d:00 UTC, cap %.0f%%/coin, $%.0f gross. Ctrl-C to stop.\n",
+			net, *every, *atHour, rc.MaxPerCoinFrac*100, *capital)
+		rebalancer.Loop(ctx, *every, *atHour, time.Now, func(t time.Time) { rotate() }, log)
 		return
 	}
-	fmt.Printf("  plan: %d target positions, %d delta trades\n", len(plan.Targets), len(plan.Trades))
-
-	// execute (or dry-preview) through ORG(shadow) → Binance
-	lb := &liveBroker{ob: ob, ctx: ctx, log: log, dry: *dry}
-	rules := []orgateway.Rule{
-		orgateway.MaxGrossLeverageRule{Frac: 100},
-		orgateway.MaxNotionalPerOrderRule{Max: 1e9},
-		&orgateway.OrderRateRule{Max: 100000, Window: time.Minute},
-	}
-	gw := orgateway.New(lb, rules, &liveState{current: current, capital: *capital}, orgateway.Shadow, log)
-	rebalancer.ExecuteRotationSink(series, dates, asOf, rc, priceAt, current, gw, *hedge)
-
-	fmt.Printf("\n  ORG stats: %v\n", gw.Stats())
-	if *dry {
-		fmt.Println("  DRY run — no orders sent. Re-run with -once to place.")
-		return
-	}
-	// confirm: re-sync and show the resulting book
-	time.Sleep(2 * time.Second)
-	after, _ := syncer.Positions(ctx)
-	fmt.Printf("  after: %d open positions on testnet\n", len(after))
-	for _, p := range after {
-		fmt.Printf("    now  %-10s qty %+.4f  ~$%.0f\n", p.Symbol, p.SignedQty, p.SignedQty*p.Price)
-	}
+	rotate() // -dry / -once
 }
