@@ -2,6 +2,28 @@ package rebalancer
 
 import "github.com/Quantix/quantix/internal/strategy"
 
+// ExecuteRotationSink plans the rotation against `current` (signed notional, from a live
+// position syncer) and places the delta trades through sink. Unlike ExecuteRotation it
+// holds no PaperBook: trades are priced from priceFn (so a close for a symbol that left
+// the eligible set still executes), and lot-step rounding is left to the sink/broker.
+// Returns the Plan.
+func ExecuteRotationSink(series map[string]Series, dates []string, asOf string, cfg Config, priceFn func(symbol string) float64, current map[string]float64, sink strategy.Broker) Plan {
+	plan := PlanRotation(series, dates, asOf, current, cfg, nil)
+	prices := map[string]float64{}
+	for _, o := range plan.Orders {
+		prices[o.Symbol] = priceFn(o.Symbol)
+	}
+	plan.Trades = OrdersToTrades(plan.Orders, prices, nil)
+	for _, tr := range plan.Trades {
+		side := strategy.SideBuy
+		if tr.Side == "SELL" {
+			side = strategy.SideSell
+		}
+		sink.PlaceOrder(strategy.OrderRequest{Symbol: tr.Symbol, Side: side, Type: strategy.OrderMarket, Qty: tr.Qty})
+	}
+	return plan
+}
+
 // ExecuteRotation runs one rebalance end-to-end: push the asOf prices into the book,
 // read current positions as the diff base, plan the rotation, and place the delta
 // trades through sink. `book` is the price/position source (a *PaperBook live, an

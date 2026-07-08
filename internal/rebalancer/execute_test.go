@@ -62,6 +62,32 @@ func TestExecuteRotationClosesDroppedSymbol(t *testing.T) {
 	}
 }
 
+type captureSink struct{ placed []strategy.OrderRequest }
+
+func (c *captureSink) PlaceOrder(r strategy.OrderRequest) string { c.placed = append(c.placed, r); return "id" }
+func (c *captureSink) CancelOrder(string) error                  { return nil }
+
+func TestExecuteRotationSink(t *testing.T) {
+	series := rotSeries()
+	cfg := Config{K: 1, GrossFrac: 1.0, MinDaysListed: 1, MinVolume: 1e6, W: 2, VolWin: 2, MinOrder: 1, Capital: 10000}
+	priceFn := func(string) float64 { return 100 }
+	sink := &captureSink{}
+	plan := ExecuteRotationSink(series, []string{"d0", "d1"}, "d1", cfg, priceFn, map[string]float64{}, sink)
+	if len(plan.Targets) != 2 || len(sink.placed) != 2 {
+		t.Fatalf("expected 2 targets + 2 orders placed, got %d/%d", len(plan.Targets), len(sink.placed))
+	}
+	got := map[string]strategy.OrderRequest{}
+	for _, r := range sink.placed {
+		got[r.Symbol] = r
+	}
+	if got["A"].Side != strategy.SideBuy || math.Abs(got["A"].Qty-50) > 1e-9 {
+		t.Fatalf("A should be buy 50, got %+v", got["A"])
+	}
+	if got["D"].Side != strategy.SideSell || math.Abs(got["D"].Qty-50) > 1e-9 {
+		t.Fatalf("D should be sell 50, got %+v", got["D"])
+	}
+}
+
 func TestExecuteRotationNoChurnWhenAtTarget(t *testing.T) {
 	series := rotSeries()
 	cfg := Config{K: 1, GrossFrac: 1.0, MinDaysListed: 1, MinVolume: 1e6, W: 2, VolWin: 2, MinOrder: 1, Capital: 10000}
