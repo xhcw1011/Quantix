@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -32,14 +33,55 @@ const (
 	L, W, K, REB = 14, 14, 5, 3
 )
 
-// liveBroker adapts a Binance OrderBroker to strategy.Broker (market orders, one-way
-// mode → positionSide ""). The broker quantizes qty to each symbol's step internally.
+// liveBroker adapts a Binance OrderBroker to strategy.Broker. In limit mode it posts a
+// maker limit at the touch (buy@bid / sell@ask) and waits limitTO for a fill, then
+// cancels and markets only the UNfilled remainder — capturing the maker fee (~2bp vs ~5bp
+// taker) + avoiding the half-spread when it fills, without ever over-filling. The broker
+// quantizes qty to each symbol's step internally.
 type liveBroker struct {
-	ob  *binance_futures.OrderBroker
-	ctx context.Context
-	log *zap.Logger
-	dry bool
-	seq int64
+	ob      *binance_futures.OrderBroker
+	ctx     context.Context
+	log     *zap.Logger
+	dry     bool
+	limit   bool
+	limitTO time.Duration
+	seq     int64
+}
+
+// tryMakerLimit posts a limit at the touch and polls up to limitTO; returns the qty
+// filled as maker (0 on any error → caller markets the whole order).
+func (l *liveBroker) tryMakerLimit(req strategy.OrderRequest, side exchange.OrderSide, cid string) float64 {
+	bid, ask, err := l.ob.GetBookTicker(l.ctx, req.Symbol)
+	if err != nil {
+		return 0
+	}
+	price := bid // buy joins the bid
+	if side == exchange.OrderSideSell {
+		price = ask // sell joins the ask
+	}
+	oid, err := l.ob.PlaceLimitOrder(l.ctx, req.Symbol, side, string(req.PositionSide), req.Qty, price, cid)
+	if err != nil {
+		return 0
+	}
+	deadline := time.Now().Add(l.limitTO)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		status, fill, err := l.ob.GetOrderStatus(l.ctx, req.Symbol, oid)
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(status, "FILLED") {
+			l.log.Info("MAKER FILLED", zap.String("sym", req.Symbol), zap.String("side", string(side)), zap.Float64("qty", fill.FilledQty), zap.Float64("px", price))
+			return fill.FilledQty
+		}
+	}
+	// timeout → cancel, then market only the unfilled remainder
+	_ = l.ob.CancelOrder(l.ctx, req.Symbol, oid)
+	_, fill, _ := l.ob.GetOrderStatus(l.ctx, req.Symbol, oid)
+	if fill.FilledQty > 0 {
+		l.log.Info("MAKER partial", zap.String("sym", req.Symbol), zap.Float64("filled", fill.FilledQty), zap.Float64("of", req.Qty))
+	}
+	return fill.FilledQty
 }
 
 func (l *liveBroker) PlaceOrder(req strategy.OrderRequest) string {
@@ -50,23 +92,32 @@ func (l *liveBroker) PlaceOrder(req strategy.OrderRequest) string {
 	l.seq++
 	cid := fmt.Sprintf("xsf-%d", l.seq)
 	if l.dry {
-		l.log.Info("DRY would place", zap.String("sym", req.Symbol), zap.String("side", string(side)), zap.Float64("qty", req.Qty))
+		l.log.Info("DRY would place", zap.String("sym", req.Symbol), zap.String("side", string(side)), zap.Float64("qty", req.Qty), zap.Bool("limit", l.limit))
 		return cid
 	}
+
+	remaining := req.Qty
+	if l.limit { // maker attempt; market only what didn't fill
+		remaining -= l.tryMakerLimit(req, side, cid)
+	}
+	if remaining <= req.Qty*5e-3 { // maker filled ≥99.5% — skip the dust (would reject on min-qty)
+		return cid
+	}
+
 	var fill exchange.OrderFill
 	var err error
 	for attempt := 0; attempt < 3; attempt++ { // testnet throws transient 502s
-		fill, err = l.ob.PlaceMarketOrder(l.ctx, req.Symbol, side, string(req.PositionSide), req.Qty, cid)
+		fill, err = l.ob.PlaceMarketOrder(l.ctx, req.Symbol, side, string(req.PositionSide), remaining, cid+"-m")
 		if err == nil {
 			break
 		}
 		time.Sleep(time.Duration(400*(attempt+1)) * time.Millisecond)
 	}
 	if err != nil {
-		l.log.Warn("place FAILED", zap.String("sym", req.Symbol), zap.String("side", string(side)), zap.Float64("qty", req.Qty), zap.Error(err))
+		l.log.Warn("place FAILED", zap.String("sym", req.Symbol), zap.String("side", string(side)), zap.Float64("qty", remaining), zap.Error(err))
 		return ""
 	}
-	l.log.Info("PLACED", zap.String("sym", req.Symbol), zap.String("side", string(side)),
+	l.log.Info("MARKET", zap.String("sym", req.Symbol), zap.String("side", string(side)),
 		zap.Float64("qty", fill.FilledQty), zap.Float64("avgPx", fill.AvgPrice))
 	return fill.ExchangeID
 }
@@ -98,6 +149,8 @@ func main() {
 	every := flag.Int("every", REB, "rebalance cadence in days (schedule mode)")
 	atHour := flag.Int("at-hour", 8, "UTC hour to rebalance at, post-funding (schedule mode)")
 	capital := flag.Float64("capital", 3000, "gross exposure in USDT (each position = capital/2K)")
+	limit := flag.Bool("limit", false, "post maker limit at the touch (buy@bid/sell@ask) then market the unfilled remainder — saves ~3bp/side")
+	limitTO := flag.Int("limit-timeout", 20, "seconds to wait for the maker limit to fill before markets fallback")
 	flag.Parse()
 	if !*dry && !*once && !*flatten && !*schedule {
 		fmt.Println("specify -dry (preview), -once (place), -schedule (loop), or -flatten (close all). refusing to run without a mode.")
@@ -217,7 +270,7 @@ func main() {
 		}
 		fmt.Printf("  plan: %d target positions, %d delta trades\n", len(plan.Targets), len(plan.Trades))
 
-		lb := &liveBroker{ob: ob, ctx: ctx, log: log, dry: *dry}
+		lb := &liveBroker{ob: ob, ctx: ctx, log: log, dry: *dry, limit: *limit, limitTO: time.Duration(*limitTO) * time.Second}
 		rules := []orgateway.Rule{
 			orgateway.MaxGrossLeverageRule{Frac: 100},
 			orgateway.MaxNotionalPerOrderRule{Max: 1e9},

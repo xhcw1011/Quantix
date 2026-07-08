@@ -573,6 +573,24 @@ func (b *OrderBroker) GetPositions(ctx context.Context) ([]exchange.PositionInfo
 	return out, nil
 }
 
+// GetBookTicker returns the current best bid/ask for a symbol — for pricing maker limit
+// orders tight to the touch.
+func (b *OrderBroker) GetBookTicker(ctx context.Context, symbol string) (bid, ask float64, err error) {
+	ts, err := b.client.NewListBookTickersService().Symbol(symbol).Do(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("binance futures book ticker: %w", err)
+	}
+	if len(ts) == 0 {
+		return 0, 0, fmt.Errorf("no book ticker for %s", symbol)
+	}
+	bid, _ = strconv.ParseFloat(ts[0].BidPrice, 64)
+	ask, _ = strconv.ParseFloat(ts[0].AskPrice, 64)
+	if bid <= 0 || ask <= 0 {
+		return 0, 0, fmt.Errorf("invalid book ticker for %s: bid=%v ask=%v", symbol, bid, ask)
+	}
+	return bid, ask, nil
+}
+
 // GetOrderStatus implements exchange.OrderStatusChecker.
 // Queries the Binance Futures order endpoint for the current status.
 // Returned status values: "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED".
