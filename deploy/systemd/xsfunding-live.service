@@ -21,7 +21,7 @@ User=ubuntu
 WorkingDirectory=/opt/quantix
 # API key/secret + optional QUANTIX_LIVE_CONFIRM live in this gitignored file (chmod 600):
 EnvironmentFile=/opt/quantix/.xsfunding.env
-ExecStart=/opt/quantix/bin/xsfunding-live -schedule -testnet -every 3 -at-hour 8 -capital 3000
+ExecStart=/opt/quantix/bin/xsfunding-live -schedule -testnet -limit -limit-timeout 20 -every 3 -at-hour 8 -capital 3000
 Restart=always
 RestartSec=30
 
