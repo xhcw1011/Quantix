@@ -1,0 +1,17 @@
+# Fires xsfunding-ingest.service daily at 07:40 UTC — 20 min before the 08:00 rebalance,
+# so the rotation reads fresh klines + funding. Persistent catches a missed run after
+# downtime.
+#
+# Install:
+#   cp deploy/systemd/xsfunding-ingest.{service,timer} /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now xsfunding-ingest.timer
+#   systemctl list-timers xsfunding-ingest.timer
+[Unit]
+Description=Daily xsfunding data ingest (07:40 UTC, pre-rebalance)
+
+[Timer]
+OnCalendar=*-*-* 07:40:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

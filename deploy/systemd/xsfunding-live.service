@@ -1,0 +1,29 @@
+# xsfunding-live — cross-sectional funding rebalancer, scheduled rotation.
+# Method A: a long-lived systemd service running the -schedule loop (NextTick handles the
+# every-REB-days cadence). systemd auto-starts on boot + restarts on crash — the robust,
+# isolated way (a bug here can NOT crash the main quantix-api service running aistrat).
+#
+# Install (on the server, as root):
+#   cp deploy/systemd/xsfunding-live.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now xsfunding-live
+#   journalctl -u xsfunding-live -f        # watch it
+#
+# TESTNET by default. To go MAINNET real money: add -testnet=false to ExecStart AND
+# set QUANTIX_LIVE_CONFIRM=true in the EnvironmentFile.
+[Unit]
+Description=xsfunding cross-sectional funding rebalancer (scheduled rotation)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/quantix
+# API key/secret + optional QUANTIX_LIVE_CONFIRM live in this gitignored file (chmod 600):
+EnvironmentFile=/opt/quantix/.xsfunding.env
+ExecStart=/opt/quantix/bin/xsfunding-live -schedule -testnet -every 3 -at-hour 8 -capital 3000
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

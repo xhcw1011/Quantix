@@ -1,0 +1,13 @@
+# xsfunding-ingest — daily refresh of klines + funding into the DB so the rebalancer's
+# signal stays current. Oneshot, fired by xsfunding-ingest.timer.
+[Unit]
+Description=xsfunding daily data ingest (klines + funding)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/quantix
+ExecStart=/opt/quantix/bin/ingest-klines -days 5
+ExecStart=/opt/quantix/bin/ingest-funding
