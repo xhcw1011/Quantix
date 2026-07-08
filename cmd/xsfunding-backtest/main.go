@@ -36,9 +36,9 @@ var universe = []string{
 }
 
 const (
-	L, W, K, REB, LAG = 14, 14, 5, 3, 1
-	cost              = 0.0010
-	capital           = 10000.0
+	L, W, K, LAG = 14, 14, 5, 1
+	cost         = 0.0010
+	capital      = 10000.0
 )
 
 func daykey(t time.Time) string { return t.UTC().Format("2006-01-02") }
@@ -54,7 +54,9 @@ func main() {
 	dumpPath := flag.String("dump", "", "write loaded px/qv/fund to this JSON path and exit (for identical-data parity vs Python)")
 	capFrac := flag.Float64("cap", 0, "per-coin cap as fraction of gross (0 = no cap; e.g. 0.15)")
 	eqweight := flag.Bool("eqweight", false, "force equal weight (ignore inverse-vol) to compare vs risk-parity")
+	rebFlag := flag.Int("reb", 3, "rebalance cadence in days (how often to re-rank/rotate; NOT funding frequency)")
 	flag.Parse()
+	REB := *rebFlag
 	if *symbolsFlag != "" {
 		universe = strings.Split(*symbolsFlag, ",")
 	} else if *firstN > 0 && *firstN < len(universe) {
@@ -252,7 +254,7 @@ func main() {
 	mean, sd := meanStd(steps)
 	sharpe := 0.0
 	if sd > 0 {
-		sharpe = mean / sd * math.Sqrt(365.0/REB)
+		sharpe = mean / sd * math.Sqrt(365.0/float64(REB))
 	}
 
 	fmt.Printf("\n# Go parity (DB): 截面 funding 因子  %d/%d 币  %s→%s  L%d W%d K%d REB%d 费%.0fbp\n",
