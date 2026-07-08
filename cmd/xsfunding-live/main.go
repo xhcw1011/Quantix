@@ -53,7 +53,15 @@ func (l *liveBroker) PlaceOrder(req strategy.OrderRequest) string {
 		l.log.Info("DRY would place", zap.String("sym", req.Symbol), zap.String("side", string(side)), zap.Float64("qty", req.Qty))
 		return cid
 	}
-	fill, err := l.ob.PlaceMarketOrder(l.ctx, req.Symbol, side, string(req.PositionSide), req.Qty, cid)
+	var fill exchange.OrderFill
+	var err error
+	for attempt := 0; attempt < 3; attempt++ { // testnet throws transient 502s
+		fill, err = l.ob.PlaceMarketOrder(l.ctx, req.Symbol, side, string(req.PositionSide), req.Qty, cid)
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Duration(400*(attempt+1)) * time.Millisecond)
+	}
 	if err != nil {
 		l.log.Warn("place FAILED", zap.String("sym", req.Symbol), zap.String("side", string(side)), zap.Float64("qty", req.Qty), zap.Error(err))
 		return ""
@@ -83,10 +91,11 @@ func (s *liveState) Snapshot(req strategy.OrderRequest) orgateway.OrderState {
 func main() {
 	dry := flag.Bool("dry", false, "sync + plan + log, place NO orders (preview)")
 	once := flag.Bool("once", false, "place one rotation (required to actually trade)")
+	flatten := flag.Bool("flatten", false, "close ALL open positions and exit (clean stop)")
 	capital := flag.Float64("capital", 3000, "gross exposure in USDT (each position = capital/2K)")
 	flag.Parse()
-	if !*dry && !*once {
-		fmt.Println("specify -dry (preview) or -once (place). refusing to run without an explicit mode.")
+	if !*dry && !*once && !*flatten {
+		fmt.Println("specify -dry (preview), -once (place), or -flatten (close all). refusing to run without a mode.")
 		return
 	}
 
@@ -119,6 +128,52 @@ func main() {
 
 	if eq, err := ob.GetEquity(ctx, "USDT"); err == nil {
 		fmt.Printf("# testnet account equity: %.2f USDT\n", eq)
+	}
+
+	if os.Getenv("XSF_INSPECT") != "" {
+		ratios, err := ob.GetMarginRatios(ctx)
+		fmt.Printf("raw GetMarginRatios (err=%v):\n", err)
+		for _, r := range ratios {
+			fmt.Printf("  %-10s posSide=%-6q size=%+.4f\n", r.Symbol, r.PositionSide, r.Size)
+		}
+		return
+	}
+
+	if *flatten {
+		sy := rebalancer.NewExchangeSyncer(ob, func(string) float64 { return 0 })
+		pos, err := sy.Positions(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sync: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("flattening %d positions...\n", len(pos))
+		for _, p := range pos {
+			side, ps := exchange.OrderSideSell, "LONG"
+			if p.SignedQty < 0 {
+				side, ps = exchange.OrderSideBuy, "SHORT"
+			}
+			qty := math.Abs(p.SignedQty)
+			var e error
+			for attempt := 0; attempt < 3; attempt++ {
+				_, e = ob.PlaceMarketOrder(ctx, p.Symbol, side, ps, qty, fmt.Sprintf("flat-%s-%d", p.Symbol, attempt))
+				if e == nil {
+					break
+				}
+				time.Sleep(time.Duration(400*(attempt+1)) * time.Millisecond)
+			}
+			if e != nil {
+				fmt.Printf("  %-10s close FAILED: %v\n", p.Symbol, e)
+			} else {
+				fmt.Printf("  %-10s closed (%s %s %.4f)\n", p.Symbol, side, ps, qty)
+			}
+		}
+		time.Sleep(2 * time.Second)
+		after, _ := sy.Positions(ctx)
+		fmt.Printf("after flatten: %d open positions\n", len(after))
+		for _, p := range after {
+			fmt.Printf("    still %-10s qty %+.4f\n", p.Symbol, p.SignedQty)
+		}
+		return
 	}
 
 	start, _ := time.Parse("2006-01-02", "2024-07-01")
