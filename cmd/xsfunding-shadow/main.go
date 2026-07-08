@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"sort"
@@ -19,7 +20,38 @@ import (
 	"github.com/Quantix/quantix/internal/rebalancer"
 )
 
+func bookAt(series map[string]rebalancer.Series, dates []string, asOf string, rc rebalancer.Config) (longs, shorts []string) {
+	plan := rebalancer.PlanRotation(series, dates, asOf, map[string]float64{}, rc, nil)
+	for _, tg := range plan.Targets {
+		if tg.Notional > 0 {
+			longs = append(longs, tg.Symbol)
+		} else {
+			shorts = append(shorts, tg.Symbol)
+		}
+	}
+	sort.Strings(longs)
+	sort.Strings(shorts)
+	return
+}
+
+func changed(prev, cur []string) int {
+	set := map[string]bool{}
+	for _, s := range prev {
+		set[s] = true
+	}
+	var kept int
+	for _, s := range cur {
+		if set[s] {
+			kept++
+		}
+	}
+	return len(cur) - kept // how many are NEW vs prior book
+}
+
 func main() {
+	history := flag.Bool("history", false, "sample the target book every ~30 days to show rotation over time")
+	flag.Parse()
+
 	log, _ := zap.NewProduction()
 	cfg, err := config.Load("config/config.yaml")
 	if err != nil {
@@ -47,6 +79,34 @@ func main() {
 		K: 5, GrossFrac: 1.0, MinDaysListed: 14, MinVolume: 1.0,
 		W: 14, VolWin: 30, MinOrder: 1.0, Capital: 10000,
 	}
+
+	if *history { // show the book rotating over the whole history
+		fmt.Printf("\n# xsfunding target book over time (每 ~30 天采样, K5 → 5 多 / 5 空)\n")
+		fmt.Printf("  %-12s %-38s %-38s %s\n", "date", "LONG (低费率/收)", "SHORT (高费率/收)", "换手")
+		var pl, ps []string
+		for i := 30; i < len(dates); i += 30 {
+			d := dates[i]
+			l, s := bookAt(series, dates, d, rc)
+			if len(l) == 0 {
+				continue
+			}
+			ch := ""
+			if pl != nil {
+				ch = fmt.Sprintf("多换%d 空换%d", changed(pl, l), changed(ps, s))
+			}
+			short := func(xs []string) string {
+				out := ""
+				for _, x := range xs {
+					out += x[:len(x)-4] + " " // strip USDT
+				}
+				return out
+			}
+			fmt.Printf("  %-12s %-38s %-38s %s\n", d, short(l), short(s), ch)
+			pl, ps = l, s
+		}
+		return
+	}
+
 	// funding lookup for display
 	states := rebalancer.BuildStates(series, dates, asOf, rc.W, rc.VolWin)
 	fundBy := map[string]float64{}
