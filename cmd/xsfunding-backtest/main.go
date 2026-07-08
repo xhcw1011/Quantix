@@ -52,6 +52,8 @@ func main() {
 	firstN := flag.Int("first", 0, "limit universe to first N coins (0 = all) — for parity vs a throttled Python run")
 	symbolsFlag := flag.String("symbols", "", "comma-separated universe override (for exact parity)")
 	dumpPath := flag.String("dump", "", "write loaded px/qv/fund to this JSON path and exit (for identical-data parity vs Python)")
+	capFrac := flag.Float64("cap", 0, "per-coin cap as fraction of gross (0 = no cap; e.g. 0.15)")
+	eqweight := flag.Bool("eqweight", false, "force equal weight (ignore inverse-vol) to compare vs risk-parity")
 	flag.Parse()
 	if *symbolsFlag != "" {
 		universe = strings.Split(*symbolsFlag, ",")
@@ -168,6 +170,37 @@ func main() {
 		}
 		return t / float64(c)
 	}
+	retVol := func(s string, i int) float64 {
+		var rs []float64
+		for j := i - 29; j <= i; j++ {
+			if j >= 1 {
+				if p0, ok0 := px[s][dates[j-1]]; ok0 && p0 > 0 {
+					if p1, ok1 := px[s][dates[j]]; ok1 {
+						rs = append(rs, p1/p0-1)
+					}
+				}
+			}
+		}
+		if len(rs) < 5 {
+			return 0
+		}
+		var m float64
+		for _, r := range rs {
+			m += r
+		}
+		m /= float64(len(rs))
+		var v float64
+		for _, r := range rs {
+			v += (r - m) * (r - m)
+		}
+		return math.Sqrt(v / float64(len(rs)))
+	}
+	rvOf := func(s string, i int) float64 {
+		if *eqweight {
+			return 0 // Vol 0 → BuildTargetsRP falls back to equal weight
+		}
+		return retVol(s, i)
+	}
 
 	var periods []xsfunding.Period
 	var stepDates []string
@@ -191,6 +224,7 @@ func main() {
 				Price:        pSi,
 				TrailVolume:  trailVol(s, si),
 				DaysListed:   si - firstIdx[s],
+				Vol:          rvOf(s, si),
 			})
 			if pNow, ok := px[s][dates[i]]; ok && pNow > 0 {
 				if pFwd, ok2 := px[s][dates[i+REB]]; ok2 {
@@ -208,7 +242,7 @@ func main() {
 			loaded, len(dates), len(stepDates))
 		return
 	}
-	cfg2 := xsfunding.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, FeeRate: cost}
+	cfg2 := xsfunding.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, FeeRate: cost, MaxPerCoinFrac: *capFrac}
 	eq, steps := xsfunding.RunBacktest(periods, capital, cfg2, 1.0)
 
 	cum := eq - 1

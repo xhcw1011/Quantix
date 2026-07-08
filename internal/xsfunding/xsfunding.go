@@ -14,15 +14,17 @@ type CoinState struct {
 	Price        float64
 	TrailVolume  float64 // avg daily $ volume (liquidity filter)
 	DaysListed   int     // for the point-in-time universe
+	Vol          float64 // trailing return volatility (for inverse-vol sizing; 0 = equal weight)
 }
 
 // Config holds the strategy parameters.
 type Config struct {
-	K             int     // positions per side
-	GrossFrac     float64 // gross exposure = capital × GrossFrac
-	MinDaysListed int     // point-in-time listing filter
-	MinVolume     float64 // liquidity floor ($ avg daily volume)
-	FeeRate       float64 // per-side fee (backtest)
+	K              int     // positions per side
+	GrossFrac      float64 // gross exposure = capital × GrossFrac
+	MinDaysListed  int     // point-in-time listing filter
+	MinVolume      float64 // liquidity floor ($ avg daily volume)
+	FeeRate        float64 // per-side fee (backtest)
+	MaxPerCoinFrac float64 // cap per-coin |notional| at this fraction of gross (0 = no cap)
 }
 
 // Target is a per-symbol target position (signed notional; + long, − short).

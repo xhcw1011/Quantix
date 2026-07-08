@@ -60,6 +60,57 @@ func TestBuildTargets(t *testing.T) {
 	}
 }
 
+func TestBuildTargetsRPInverseVol(t *testing.T) {
+	// A vol 0.02, B vol 0.04 (2x) → A gets 2x B; leg sums to gross/2 = 5000; no cap.
+	vol := map[string]float64{"A": 0.02, "B": 0.04, "C": 0.02, "D": 0.04}
+	ts := BuildTargetsRP([]string{"A", "B"}, []string{"C", "D"}, 10000, 1.0, vol, 0)
+	byS := map[string]float64{}
+	var lt, st float64
+	for _, tg := range ts {
+		byS[tg.Symbol] = tg.Notional
+		if tg.Notional > 0 {
+			lt += tg.Notional
+		} else {
+			st += -tg.Notional
+		}
+	}
+	if math.Abs(byS["A"]-3333.333) > 1 || math.Abs(byS["B"]-1666.667) > 1 {
+		t.Fatalf("inverse-vol: A should be 2x B, got A=%v B=%v", byS["A"], byS["B"])
+	}
+	if math.Abs(lt-5000) > 1 || math.Abs(st-5000) > 1 {
+		t.Fatalf("each leg should sum to 5000, got long=%v short=%v", lt, st)
+	}
+}
+
+func TestBuildTargetsRPCap(t *testing.T) {
+	// A very low vol would get ~3571 (>25% of 10000 gross); cap 0.25 clamps it to 2500,
+	// excess redistributed to B,C. Leg still ~5000, dollar-neutral.
+	vol := map[string]float64{"A": 0.01, "B": 0.05, "C": 0.05, "X": 0.03, "Y": 0.03, "Z": 0.03}
+	ts := BuildTargetsRP([]string{"A", "B", "C"}, []string{"X", "Y", "Z"}, 10000, 1.0, vol, 0.25)
+	byS := map[string]float64{}
+	for _, tg := range ts {
+		byS[tg.Symbol] = tg.Notional
+	}
+	if byS["A"] > 2500.5 {
+		t.Fatalf("A must be capped at 2500 (25%% of gross), got %v", byS["A"])
+	}
+	if math.Abs(byS["B"]-byS["C"]) > 1 || byS["B"] <= 714 {
+		t.Fatalf("cap excess must redistribute to B,C (>714 each, equal), got B=%v C=%v", byS["B"], byS["C"])
+	}
+}
+
+func TestBuildTargetsRPEqualFallback(t *testing.T) {
+	// vol all 0 → equal weight (degenerates to BuildTargets). K=1 → A +5000 / D -5000.
+	ts := BuildTargetsRP([]string{"A"}, []string{"D"}, 10000, 1.0, map[string]float64{}, 0)
+	byS := map[string]float64{}
+	for _, tg := range ts {
+		byS[tg.Symbol] = tg.Notional
+	}
+	if byS["A"] != 5000 || byS["D"] != -5000 {
+		t.Fatalf("vol=0 must fall back to equal weight ±5000, got %+v", byS)
+	}
+}
+
 func TestDeltas(t *testing.T) {
 	current := map[string]float64{"A": 2500, "B": -2500, "C": 1000}
 	targets := []Target{{Symbol: "A", Notional: 2500}, {Symbol: "D", Notional: -2500}}

@@ -77,7 +77,7 @@ func main() {
 
 	rc := rebalancer.Config{
 		K: 5, GrossFrac: 1.0, MinDaysListed: 14, MinVolume: 1.0,
-		W: 14, VolWin: 30, MinOrder: 1.0, Capital: 10000,
+		W: 14, VolWin: 30, MinOrder: 1.0, Capital: 10000, MaxPerCoinFrac: 0.15,
 	}
 
 	if *history { // show the book rotating over the whole history

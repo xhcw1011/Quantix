@@ -19,8 +19,8 @@ func (f *fakeQuerier) GetPositions(context.Context) ([]exchange.PositionInfo, er
 
 func TestExchangeSyncer(t *testing.T) {
 	q := &fakeQuerier{positions: []exchange.PositionInfo{
-		{Symbol: "BTCUSDT", PositionSide: "", Amt: 0.5},   // one-way long: signed +
-		{Symbol: "SOLUSDT", PositionSide: "", Amt: -10},   // one-way short: signed −
+		{Symbol: "BTCUSDT", PositionSide: "", Amt: 0.5},       // one-way long: signed +
+		{Symbol: "SOLUSDT", PositionSide: "", Amt: -10},       // one-way short: signed −
 		{Symbol: "ADAUSDT", PositionSide: "SHORT", Amt: -100}, // hedge short: also signed −
 	}}
 	prices := func(s string) float64 {

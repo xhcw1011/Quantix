@@ -4,10 +4,40 @@
 package rebalancer
 
 import (
+	"math"
 	"sort"
 
 	"github.com/Quantix/quantix/internal/xsfunding"
 )
+
+// retVol is the stdev of daily simple returns over the last n dates ending at index ai
+// (0 if too few points) — the inverse-vol sizing input.
+func retVol(price map[string]float64, dates []string, ai, n int) float64 {
+	var rs []float64
+	for j := ai - n + 1; j <= ai; j++ {
+		if j < 1 {
+			continue
+		}
+		p0, ok0 := price[dates[j-1]]
+		p1, ok1 := price[dates[j]]
+		if ok0 && ok1 && p0 > 0 {
+			rs = append(rs, p1/p0-1)
+		}
+	}
+	if len(rs) < 5 {
+		return 0
+	}
+	var m float64
+	for _, r := range rs {
+		m += r
+	}
+	m /= float64(len(rs))
+	var v float64
+	for _, r := range rs {
+		v += (r - m) * (r - m)
+	}
+	return math.Sqrt(v / float64(len(rs)))
+}
 
 // Series is one coin's daily history (date string -> value) plus its first listed date.
 type Series struct {
@@ -67,6 +97,7 @@ func BuildStates(series map[string]Series, dates []string, asOf string, W, volWi
 		}
 		out = append(out, xsfunding.CoinState{
 			Symbol: s, TrailFunding: tf, Price: price, TrailVolume: tv, DaysListed: days,
+			Vol: retVol(sr.Price, dates, ai, volWin),
 		})
 	}
 	return out

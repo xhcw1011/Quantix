@@ -44,12 +44,17 @@ func RunBacktest(periods []Period, capital float64, cfg Config, minOrder float64
 	equity = 1.0
 	prev := map[string]float64{}
 	for _, p := range periods {
-		longs, shorts := Rank(Eligible(p.Coins, cfg.MinDaysListed, cfg.MinVolume), cfg.K)
+		elig := Eligible(p.Coins, cfg.MinDaysListed, cfg.MinVolume)
+		longs, shorts := Rank(elig, cfg.K)
 		if longs == nil {
 			steps = append(steps, 0)
 			continue
 		}
-		targets := BuildTargets(longs, shorts, capital, cfg.GrossFrac)
+		vol := make(map[string]float64, len(elig))
+		for _, c := range elig {
+			vol[c.Symbol] = c.Vol
+		}
+		targets := BuildTargetsRP(longs, shorts, capital, cfg.GrossFrac, vol, cfg.MaxPerCoinFrac)
 		pnl := StepPnL(targets, prev, p.FwdRet, p.FwdFunding, capital, cfg.FeeRate)
 		equity *= 1 + pnl
 		steps = append(steps, pnl)

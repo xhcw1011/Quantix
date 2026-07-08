@@ -64,8 +64,11 @@ func TestExecuteRotationClosesDroppedSymbol(t *testing.T) {
 
 type captureSink struct{ placed []strategy.OrderRequest }
 
-func (c *captureSink) PlaceOrder(r strategy.OrderRequest) string { c.placed = append(c.placed, r); return "id" }
-func (c *captureSink) CancelOrder(string) error                  { return nil }
+func (c *captureSink) PlaceOrder(r strategy.OrderRequest) string {
+	c.placed = append(c.placed, r)
+	return "id"
+}
+func (c *captureSink) CancelOrder(string) error { return nil }
 
 func TestExecuteRotationSink(t *testing.T) {
 	series := rotSeries()

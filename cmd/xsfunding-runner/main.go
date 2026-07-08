@@ -103,7 +103,7 @@ func main() {
 
 	rc := rebalancer.Config{
 		K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0,
-		W: W, VolWin: 30, MinOrder: 1.0, Capital: capital,
+		W: W, VolWin: 30, MinOrder: 1.0, Capital: capital, MaxPerCoinFrac: 0.15,
 	}
 
 	book := rebalancer.NewPaperBook(cost)

@@ -187,7 +187,7 @@ func main() {
 	asOf := dates[len(dates)-1]
 	priceAt := func(sym string) float64 { return series[sym].Price[asOf] }
 
-	rc := rebalancer.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, W: W, VolWin: 30, MinOrder: 5.0, Capital: *capital}
+	rc := rebalancer.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, W: W, VolWin: 30, MinOrder: 5.0, Capital: *capital, MaxPerCoinFrac: 0.15}
 
 	// current positions from the exchange (truth), valued at asOf prices
 	syncer := rebalancer.NewExchangeSyncer(ob, priceAt)

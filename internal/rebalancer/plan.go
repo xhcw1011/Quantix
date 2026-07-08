@@ -4,14 +4,15 @@ import "github.com/Quantix/quantix/internal/xsfunding"
 
 // Config parameterizes a rebalance plan.
 type Config struct {
-	K             int
-	GrossFrac     float64
-	MinDaysListed int
-	MinVolume     float64
-	W             int // trailing funding window (dates)
-	VolWin        int // trailing volume window (dates)
-	MinOrder      float64
-	Capital       float64
+	K              int
+	GrossFrac      float64
+	MinDaysListed  int
+	MinVolume      float64
+	W              int // trailing funding window (dates)
+	VolWin         int // trailing volume window (dates)
+	MinOrder       float64
+	Capital        float64
+	MaxPerCoinFrac float64 // cap per-coin |notional| at this fraction of gross (0 = no cap)
 }
 
 // Plan is one rotation's output: the target book, the notional deltas vs current, and
@@ -31,7 +32,11 @@ func PlanRotation(series map[string]Series, dates []string, asOf string, current
 	if longs == nil {
 		return Plan{}
 	}
-	targets := xsfunding.BuildTargets(longs, shorts, cfg.Capital, cfg.GrossFrac)
+	vol := map[string]float64{}
+	for _, c := range coins {
+		vol[c.Symbol] = c.Vol
+	}
+	targets := xsfunding.BuildTargetsRP(longs, shorts, cfg.Capital, cfg.GrossFrac, vol, cfg.MaxPerCoinFrac)
 	orders := xsfunding.Deltas(current, targets, cfg.MinOrder)
 	prices := map[string]float64{}
 	for _, c := range coins {
