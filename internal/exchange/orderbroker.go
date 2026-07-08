@@ -17,6 +17,22 @@ type MarginQuerier interface {
 	GetMarginRatios(ctx context.Context) ([]PositionMarginInfo, error)
 }
 
+// PositionInfo is one open position with a SIGNED amount — positive long, negative
+// short — so direction survives in one-way (net) mode where PositionSide is "" and
+// GetMarginRatios' abs'd Size would lose it.
+type PositionInfo struct {
+	Symbol       string
+	PositionSide string  // "LONG", "SHORT", or "" (net/one-way)
+	Amt          float64 // signed position size in base asset (+ long, − short)
+	MarkPrice    float64
+}
+
+// PositionQuerier retrieves signed open positions. Needed by the cross-sectional
+// rebalancer, whose one-way long/short book requires the position sign.
+type PositionQuerier interface {
+	GetPositions(ctx context.Context) ([]PositionInfo, error)
+}
+
 // EquityQuerier returns the true account equity from the exchange.
 // This accounts for margin lock, unrealized PnL — the exchange's view of your wealth.
 type EquityQuerier interface {
@@ -67,10 +83,10 @@ type OpenOrderInfo struct {
 	ExchangeID    string
 	ClientOrderID string
 	Symbol        string
-	Side          string  // "BUY" / "SELL"
-	PositionSide  string  // "LONG" / "SHORT" / ""
-	Type          string  // e.g. "LIMIT", "STOP_MARKET", "TAKE_PROFIT_MARKET"
-	Status        string  // exchange-native status string
+	Side          string // "BUY" / "SELL"
+	PositionSide  string // "LONG" / "SHORT" / ""
+	Type          string // e.g. "LIMIT", "STOP_MARKET", "TAKE_PROFIT_MARKET"
+	Status        string // exchange-native status string
 	Qty           float64
 	FilledQty     float64
 	Price         float64

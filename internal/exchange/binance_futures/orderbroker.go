@@ -547,6 +547,32 @@ func (b *OrderBroker) GetMarginRatios(ctx context.Context) ([]exchange.PositionM
 	return result, nil
 }
 
+// GetPositions returns open positions with SIGNED amounts (+ long / − short), so the
+// direction survives in one-way mode (where PositionSide is "" and GetMarginRatios'
+// abs'd Size would lose it). Used by the cross-sectional rebalancer's position syncer.
+func (b *OrderBroker) GetPositions(ctx context.Context) ([]exchange.PositionInfo, error) {
+	risks, err := b.client.NewGetPositionRiskService().Do(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("binance futures position risk: %w", err)
+	}
+	var out []exchange.PositionInfo
+	for _, r := range risks {
+		posAmt, err := strconv.ParseFloat(r.PositionAmt, 64)
+		if err != nil || posAmt == 0 {
+			continue
+		}
+		markPrice, _ := strconv.ParseFloat(r.MarkPrice, 64)
+		posSide := string(r.PositionSide)
+		if posSide == "BOTH" {
+			posSide = ""
+		}
+		out = append(out, exchange.PositionInfo{
+			Symbol: r.Symbol, PositionSide: posSide, Amt: posAmt, MarkPrice: markPrice,
+		})
+	}
+	return out, nil
+}
+
 // GetOrderStatus implements exchange.OrderStatusChecker.
 // Queries the Binance Futures order endpoint for the current status.
 // Returned status values: "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED".
@@ -686,7 +712,9 @@ func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill e
 			qty, _ := strconv.ParseFloat(o.LastFilledQty, 64)
 			lastPrice, _ := strconv.ParseFloat(o.LastFilledPrice, 64)
 			avgPrice, _ := strconv.ParseFloat(o.AveragePrice, 64)
-			if lastPrice > 0 { avgPrice = lastPrice } // prefer exact fill price for this event
+			if lastPrice > 0 {
+				avgPrice = lastPrice
+			} // prefer exact fill price for this event
 			commission, _ := strconv.ParseFloat(o.Commission, 64)
 			if commission < 0 {
 				commission = -commission

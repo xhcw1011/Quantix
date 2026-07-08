@@ -132,10 +132,10 @@ func main() {
 	}
 
 	if os.Getenv("XSF_INSPECT") != "" {
-		ratios, err := ob.GetMarginRatios(ctx)
-		fmt.Printf("raw GetMarginRatios (err=%v):\n", err)
-		for _, r := range ratios {
-			fmt.Printf("  %-10s posSide=%-6q size=%+.4f\n", r.Symbol, r.PositionSide, r.Size)
+		ps, err := ob.GetPositions(ctx)
+		fmt.Printf("raw GetPositions signed (err=%v):\n", err)
+		for _, r := range ps {
+			fmt.Printf("  %-10s posSide=%-6q amt=%+.4f\n", r.Symbol, r.PositionSide, r.Amt)
 		}
 		return
 	}
