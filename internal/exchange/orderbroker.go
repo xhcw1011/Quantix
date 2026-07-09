@@ -21,10 +21,12 @@ type MarginQuerier interface {
 // short — so direction survives in one-way (net) mode where PositionSide is "" and
 // GetMarginRatios' abs'd Size would lose it.
 type PositionInfo struct {
-	Symbol       string
-	PositionSide string  // "LONG", "SHORT", or "" (net/one-way)
-	Amt          float64 // signed position size in base asset (+ long, − short)
-	MarkPrice    float64
+	Symbol        string
+	PositionSide  string  // "LONG", "SHORT", or "" (net/one-way)
+	Amt           float64 // signed position size in base asset (+ long, − short)
+	MarkPrice     float64
+	EntryPrice    float64
+	UnrealizedPnl float64 // in quote (USDT)
 }
 
 // PositionQuerier retrieves signed open positions. Needed by the cross-sectional

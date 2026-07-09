@@ -194,10 +194,26 @@ func main() {
 
 	if os.Getenv("XSF_INSPECT") != "" {
 		ps, err := ob.GetPositions(ctx)
-		fmt.Printf("raw GetPositions signed (err=%v):\n", err)
-		for _, r := range ps {
-			fmt.Printf("  %-10s posSide=%-6q amt=%+.4f\n", r.Symbol, r.PositionSide, r.Amt)
+		if err != nil {
+			fmt.Printf("GetPositions err: %v\n", err)
+			return
 		}
+		eq, _ := ob.GetEquity(ctx, "USDT")
+		fmt.Printf("\n# %s 账户盈亏  equity %.2f USDT\n", net, eq)
+		fmt.Printf("  %-10s %-6s %10s %10s %10s %10s\n", "币", "方向", "名义$", "开仓价", "标记价", "浮动盈亏$")
+		var gross, totPnl float64
+		for _, r := range ps {
+			dir := "多"
+			if r.Amt < 0 {
+				dir = "空"
+			}
+			notl := math.Abs(r.Amt) * r.MarkPrice
+			gross += notl
+			totPnl += r.UnrealizedPnl
+			fmt.Printf("  %-10s %-6s %10.0f %10.4g %10.4g %+10.2f\n", r.Symbol, dir, notl, r.EntryPrice, r.MarkPrice, r.UnrealizedPnl)
+		}
+		fmt.Printf("  ── 合计:%d 仓,gross $%.0f,浮动盈亏 %+.2f USDT(%.2f%%/gross)\n",
+			len(ps), gross, totPnl, totPnl/gross*100)
 		return
 	}
 

@@ -562,12 +562,15 @@ func (b *OrderBroker) GetPositions(ctx context.Context) ([]exchange.PositionInfo
 			continue
 		}
 		markPrice, _ := strconv.ParseFloat(r.MarkPrice, 64)
+		entry, _ := strconv.ParseFloat(r.EntryPrice, 64)
+		upnl, _ := strconv.ParseFloat(r.UnRealizedProfit, 64)
 		posSide := string(r.PositionSide)
 		if posSide == "BOTH" {
 			posSide = ""
 		}
 		out = append(out, exchange.PositionInfo{
 			Symbol: r.Symbol, PositionSide: posSide, Amt: posAmt, MarkPrice: markPrice,
+			EntryPrice: entry, UnrealizedPnl: upnl,
 		})
 	}
 	return out, nil
