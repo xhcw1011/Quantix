@@ -255,7 +255,7 @@ func main() {
 	}
 
 	start, _ := time.Parse("2006-01-02", "2024-07-01")
-	end, _ := time.Parse("2006-01-02", "2026-07-08")
+	end := time.Now().UTC().AddDate(0, 0, 2) // dynamic: always include the latest klines/funding
 	rc := rebalancer.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, W: W, VolWin: 30, MinOrder: 5.0, Capital: *capital, MaxPerCoinFrac: 0.15}
 
 	// rotate runs one full rebalance: reload DB series, sync exchange positions, plan

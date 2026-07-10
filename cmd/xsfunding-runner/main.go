@@ -94,7 +94,7 @@ func main() {
 	defer store.Close()
 
 	start, _ := time.Parse("2006-01-02", "2024-07-01")
-	end, _ := time.Parse("2006-01-02", "2026-07-08")
+	end := time.Now().UTC().AddDate(0, 0, 2) // dynamic: latest data
 	series, dates := rebalancer.LoadSeries(ctx, store, rebalancer.DefaultUniverse, start, end)
 	if len(dates) == 0 {
 		fmt.Println("no data — run cmd/ingest-funding + backfill first")
