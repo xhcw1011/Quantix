@@ -19,9 +19,10 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/opt/quantix
-# API key/secret + optional QUANTIX_LIVE_CONFIRM live in this gitignored file (chmod 600):
-EnvironmentFile=/opt/quantix/.xsfunding.env
-ExecStart=/opt/quantix/bin/xsfunding-live -schedule -testnet -limit -limit-timeout 20 -every 3 -at-hour 8 -capital 3000
+# The .xsfunding.env (chmod 600) holds `export KEY=val` lines (API key/secret + QUANTIX_LIVE_CONFIRM).
+# NOTE: systemd EnvironmentFile does NOT support `export`, so we source it via a bash wrapper.
+# LIVE example (mainnet, hedge account, \$1000): drop -testnet, add -testnet=false -hedge -capital 1000.
+ExecStart=/bin/bash -c "set -a; . /opt/quantix/.xsfunding.env; set +a; exec /opt/quantix/bin/xsfunding-live -schedule -testnet -limit -limit-timeout 20 -every 3 -at-hour 8 -capital 3000"
 Restart=always
 RestartSec=30
 
