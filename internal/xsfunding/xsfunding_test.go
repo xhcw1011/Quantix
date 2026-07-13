@@ -60,6 +60,41 @@ func TestBuildTargets(t *testing.T) {
 	}
 }
 
+func TestRankHysteresis(t *testing.T) {
+	// funding ascending: A(-3) B(-2) C(-1) D(0) E(+2) F(+3). K=2, buffer=1.
+	coins := []CoinState{
+		cs("A", -0.03, 100, 5e6, 30), cs("B", -0.02, 100, 5e6, 30), cs("C", -0.01, 100, 5e6, 30),
+		cs("D", 0.00, 100, 5e6, 30), cs("E", 0.02, 100, 5e6, 30), cs("F", 0.03, 100, 5e6, 30),
+	}
+	// no holdings → ideal top-K: longs A,B (lowest) / shorts F,E (highest)
+	l, s := RankHysteresis(coins, 2, 1, nil, nil)
+	if !has(l, "A") || !has(l, "B") || len(l) != 2 {
+		t.Fatalf("longs should be A,B, got %v", l)
+	}
+	if !has(s, "F") || !has(s, "E") || len(s) != 2 {
+		t.Fatalf("shorts should be F,E, got %v", s)
+	}
+	// hold C as a long: C is rank 3 = within top-(K+buffer=3) → kept, displacing new-entry B
+	l2, _ := RankHysteresis(coins, 2, 1, []string{"C"}, nil)
+	if !has(l2, "C") || !has(l2, "A") || has(l2, "B") || len(l2) != 2 {
+		t.Fatalf("held C (in buffer) should stay + A fills; B displaced. got %v", l2)
+	}
+	// hold C but buffer 0 → C (rank 3) is outside top-2 → dropped, back to A,B
+	l3, _ := RankHysteresis(coins, 2, 0, []string{"C"}, nil)
+	if has(l3, "C") || !has(l3, "A") || !has(l3, "B") {
+		t.Fatalf("buffer 0: C outside top-K dropped → A,B. got %v", l3)
+	}
+}
+
+func has(xs []string, v string) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildTargetsRPInverseVol(t *testing.T) {
 	// A vol 0.02, B vol 0.04 (2x) → A gets 2x B; leg sums to gross/2 = 5000; no cap.
 	vol := map[string]float64{"A": 0.02, "B": 0.04, "C": 0.02, "D": 0.04}
