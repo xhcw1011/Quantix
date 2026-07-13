@@ -232,6 +232,13 @@ func main() {
 			if ok0 && ok1 && p0 > 0 {
 				v = p1/p0 - 1
 			}
+		case "volume":
+			// volume surge = today's quote-volume vs 30d trailing avg. High = attention/crowding.
+			// Rank longs lowest surge (ignored) / shorts highest (piled-in). A crowding factor
+			// measured by turnover instead of funding.
+			if tv := trailVol(s, si); tv > 0 {
+				v = qv[s][dates[si]] / tv
+			}
 		default: // level
 			v = trailFund(s, si, W)
 		}
