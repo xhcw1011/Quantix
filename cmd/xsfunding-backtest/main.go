@@ -36,9 +36,9 @@ var universe = []string{
 }
 
 const (
-	L, K, LAG = 14, 5, 1
-	cost      = 0.0010
-	capital   = 10000.0
+	L, LAG  = 14, 1
+	cost    = 0.0010
+	capital = 10000.0
 )
 
 func daykey(t time.Time) string { return t.UTC().Format("2006-01-02") }
@@ -62,9 +62,11 @@ func main() {
 	flip := flag.Bool("flip", false, "negate the ranking signal (test the opposite direction)")
 	revLB := flag.Int("rev-lb", 3, "reversal lookback in days (signal=reversal ranks by return over this window)")
 	stepsPath := flag.String("steps", "", "write per-step (date,ret) CSV to this path (to combine independent books)")
+	kFlag := flag.Int("k", 5, "positions per side (K long + K short); more breadth may support larger K")
 	flag.Parse()
 	REB := *rebFlag
 	W := *wFlag
+	K := *kFlag
 	if *symbolsFlag != "" {
 		universe = strings.Split(*symbolsFlag, ",")
 	} else if *firstN > 0 && *firstN < len(universe) {
