@@ -153,6 +153,7 @@ func main() {
 	wWin := flag.Int("w", 7, "trailing funding window in days (signal responsiveness)")
 	minOrder := flag.Float64("min-order", 10, "skip trades smaller than this USDT (avoids micro-churn on 8h drift)")
 	hyst := flag.Int("hyst", 2, "hysteresis buffer: keep held coins within top-(K+buffer) to damp flicker (0=off)")
+	kFlag := flag.Int("k", K, "positions per side (K long + K short = 2K coins); more breadth = lower single-coin concentration")
 	capital := flag.Float64("capital", 3000, "gross exposure in USDT (each position = capital/2K)")
 	limit := flag.Bool("limit", false, "post maker limit at the touch (buy@bid/sell@ask) then market the unfilled remainder — saves ~3bp/side")
 	limitTO := flag.Int("limit-timeout", 20, "seconds to wait for the maker limit to fill before markets fallback")
@@ -298,7 +299,7 @@ func main() {
 
 	start, _ := time.Parse("2006-01-02", "2024-07-01")
 	end := time.Now().UTC().AddDate(0, 0, 2) // dynamic: always include the latest klines/funding
-	rc := rebalancer.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, W: *wWin, VolWin: 30, MinOrder: *minOrder, Capital: *capital, MaxPerCoinFrac: 0.15, HysteresisBuffer: *hyst}
+	rc := rebalancer.Config{K: *kFlag, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, W: *wWin, VolWin: 30, MinOrder: *minOrder, Capital: *capital, MaxPerCoinFrac: 0.15, HysteresisBuffer: *hyst}
 
 	// rotate runs one full rebalance: reload DB series, sync exchange positions, plan
 	// vs current, and place the delta orders through ORG → Binance (or dry-preview).
