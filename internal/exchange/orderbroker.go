@@ -35,6 +35,15 @@ type PositionQuerier interface {
 	GetPositions(ctx context.Context) ([]PositionInfo, error)
 }
 
+// IncomeItem is one account income record (signed, in quote asset). IncomeType is e.g.
+// COMMISSION (fees, negative), FUNDING_FEE (funding paid−/received+), REALIZED_PNL.
+type IncomeItem struct {
+	Type   string
+	Symbol string
+	Amount float64
+	TimeMs int64
+}
+
 // EquityQuerier returns the true account equity from the exchange.
 // This accounts for margin lock, unrealized PnL — the exchange's view of your wealth.
 type EquityQuerier interface {

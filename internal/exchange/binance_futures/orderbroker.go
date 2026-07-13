@@ -576,6 +576,21 @@ func (b *OrderBroker) GetPositions(ctx context.Context) ([]exchange.PositionInfo
 	return out, nil
 }
 
+// GetIncome returns account income records since sinceMs (fees / funding / realized PnL)
+// — for attributing the live P&L into its real components.
+func (b *OrderBroker) GetIncome(ctx context.Context, sinceMs int64) ([]exchange.IncomeItem, error) {
+	hist, err := b.client.NewGetIncomeHistoryService().StartTime(sinceMs).Limit(1000).Do(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("binance income history: %w", err)
+	}
+	out := make([]exchange.IncomeItem, 0, len(hist))
+	for _, h := range hist {
+		amt, _ := strconv.ParseFloat(h.Income, 64)
+		out = append(out, exchange.IncomeItem{Type: h.IncomeType, Symbol: h.Symbol, Amount: amt, TimeMs: h.Time})
+	}
+	return out, nil
+}
+
 // GetBookTicker returns the current best bid/ask for a symbol — for pricing maker limit
 // orders tight to the touch.
 func (b *OrderBroker) GetBookTicker(ctx context.Context, symbol string) (bid, ask float64, err error) {

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -214,6 +215,43 @@ func main() {
 		}
 		fmt.Printf("  ── 合计:%d 仓,gross $%.0f,浮动盈亏 %+.2f USDT(%.2f%%/gross)\n",
 			len(ps), gross, totPnl, totPnl/gross*100)
+		return
+	}
+
+	if d := os.Getenv("XSF_INCOME"); d != "" {
+		days := 7
+		if n, e := strconv.Atoi(d); e == nil && n > 0 {
+			days = n
+		}
+		items, err := ob.GetIncome(ctx, time.Now().AddDate(0, 0, -days).UnixMilli())
+		if err != nil {
+			fmt.Printf("income err: %v\n", err)
+			return
+		}
+		byType := map[string]float64{}
+		fundBySym := map[string]float64{}
+		var total float64
+		for _, it := range items {
+			byType[it.Type] += it.Amount
+			total += it.Amount
+			if it.Type == "FUNDING_FEE" {
+				fundBySym[it.Symbol] += it.Amount
+			}
+		}
+		fmt.Printf("\n# %s 收支明细(近 %d 天,%d 条)\n", net, days, len(items))
+		for _, t := range []string{"COMMISSION", "FUNDING_FEE", "REALIZED_PNL"} {
+			fmt.Printf("  %-14s %+9.4f USDT\n", t, byType[t])
+		}
+		for t, v := range byType {
+			if t != "COMMISSION" && t != "FUNDING_FEE" && t != "REALIZED_PNL" {
+				fmt.Printf("  %-14s %+9.4f USDT\n", t, v)
+			}
+		}
+		fmt.Printf("  ── 合计已实现现金流 %+.4f USDT\n", total)
+		fmt.Printf("  funding 分币种:\n")
+		for s, v := range fundBySym {
+			fmt.Printf("    %-10s %+.4f\n", s, v)
+		}
 		return
 	}
 
