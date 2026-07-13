@@ -63,6 +63,8 @@ func main() {
 	revLB := flag.Int("rev-lb", 3, "reversal lookback in days (signal=reversal ranks by return over this window)")
 	stepsPath := flag.String("steps", "", "write per-step (date,ret) CSV to this path (to combine independent books)")
 	kFlag := flag.Int("k", 5, "positions per side (K long + K short); more breadth may support larger K")
+	fromFlag := flag.String("from", "", "restrict analysis to rebalance dates >= this (YYYY-MM-DD; for out-of-sample split)")
+	toFlag := flag.String("to", "", "restrict analysis to rebalance dates < this (YYYY-MM-DD)")
 	flag.Parse()
 	REB := *rebFlag
 	W := *wFlag
@@ -253,6 +255,9 @@ func main() {
 	var periods []xsfunding.Period
 	var stepDates []string
 	for i := L + LAG; i+REB < len(dates); i += REB {
+		if (*fromFlag != "" && dates[i] < *fromFlag) || (*toFlag != "" && dates[i] >= *toFlag) {
+			continue // out-of-sample window filter
+		}
 		si := i - LAG
 		var coins []xsfunding.CoinState
 		fwdRet := map[string]float64{}
