@@ -162,8 +162,8 @@ func (c *capturingOrderClient) PlaceTakeProfitMarketOrder(context.Context, strin
 func (c *capturingOrderClient) PlaceReduceOnlyLimitOrder(context.Context, string, exchange.OrderSide, string, float64, float64, string) (string, error) {
 	return "", nil
 }
-func (c *capturingOrderClient) SetLeverage(context.Context, string, int) error { return nil }
-func (c *capturingOrderClient) CancelOrder(context.Context, string, string) error { return nil }
+func (c *capturingOrderClient) SetLeverage(context.Context, string, int) error      { return nil }
+func (c *capturingOrderClient) CancelOrder(context.Context, string, string) error   { return nil }
 func (c *capturingOrderClient) GetBalance(context.Context, string) (float64, error) { return 0, nil }
 
 // ---------------------------------------------------------------------------

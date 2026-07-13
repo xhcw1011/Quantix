@@ -8,9 +8,9 @@ import (
 
 func TestExceedsGrossExposure(t *testing.T) {
 	tests := []struct {
-		name                                     string
-		equity, lev, frac, gross, newQty, price  float64
-		want                                     bool
+		name                                    string
+		equity, lev, frac, gross, newQty, price float64
+		want                                    bool
 	}{
 		// equity 3600, 10x, 0.8 → cap notional = 28,800
 		{"runaway blocked (31 ETH on $3.6k 10x)", 3600, 10, 0.8, 31, 0.1, 1700, true},

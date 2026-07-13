@@ -4,9 +4,9 @@ import "testing"
 
 func TestFillForOtherSymbol(t *testing.T) {
 	cases := []struct {
-		name             string
-		fillSym, engSym  string
-		want             bool
+		name            string
+		fillSym, engSym string
+		want            bool
 	}{
 		{"other engine's fill on shared account -> ignore", "ETHUSDT", "BTCUSDT", true},
 		{"own symbol -> process", "BTCUSDT", "BTCUSDT", false},

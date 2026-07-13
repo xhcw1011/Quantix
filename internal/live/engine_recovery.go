@@ -104,7 +104,7 @@ func (e *Engine) recoverFromDB(ctx context.Context, symbol string) bool {
 				zap.Float64("filled_qty", fill.FilledQty))
 			e.omsInst.Restore(ord) //nolint:errcheck
 			// Transition to OPEN first so Fill() is valid
-			e.omsInst.Accept(ord.ID)  //nolint:errcheck
+			e.omsInst.Accept(ord.ID) //nolint:errcheck
 			stratFill := strategy.Fill{
 				ID:           ord.ID + "-recovered",
 				Symbol:       ord.Symbol,
@@ -121,8 +121,8 @@ func (e *Engine) recoverFromDB(ctx context.Context, symbol string) bool {
 			e.log.Info("DB recovery: order was CANCELLED/EXPIRED on exchange",
 				zap.String("order_id", ord.ID),
 				zap.String("status", status))
-			e.omsInst.Restore(ord)    //nolint:errcheck
-			e.omsInst.Cancel(ord.ID)  //nolint:errcheck
+			e.omsInst.Restore(ord)   //nolint:errcheck
+			e.omsInst.Cancel(ord.ID) //nolint:errcheck
 
 		default:
 			// OPEN / PARTIALLY_FILLED / NEW — restore and restart poller
