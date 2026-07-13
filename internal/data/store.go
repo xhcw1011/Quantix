@@ -181,6 +181,24 @@ func (s *Store) GetKlinesBetween(
 	return klines, rows.Err()
 }
 
+// ListSymbols returns all distinct symbols that have klines at the given interval.
+func (s *Store) ListSymbols(ctx context.Context, interval string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT symbol FROM klines WHERE interval = $1 ORDER BY symbol`, interval)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // GetLatestKlines retrieves the most recent `limit` closed klines for a symbol/interval.
 func (s *Store) GetLatestKlines(ctx context.Context, symbol, interval string, limit int) ([]exchange.Kline, error) {
 	const q = `
@@ -217,7 +235,7 @@ type TradeEvent struct {
 	UserID     int
 	EngineID   string
 	Symbol     string
-	EventType  string  // signal, open, close, mtf_score, reversal, grid
+	EventType  string // signal, open, close, mtf_score, reversal, grid
 	Side       string
 	Price      float64
 	EntryPrice float64
