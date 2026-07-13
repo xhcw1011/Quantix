@@ -47,32 +47,54 @@ func get(url string) ([]byte, error) {
 	return nil, last
 }
 
-func fetchDaily(sym string, days int) ([]exchange.Kline, error) {
-	b, err := get(fmt.Sprintf("%s/fapi/v1/klines?symbol=%s&interval=1d&limit=%d", fapi, sym, days))
-	if err != nil {
-		return nil, err
-	}
-	var raw [][]interface{}
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return nil, err
-	}
-	out := make([]exchange.Kline, 0, len(raw))
-	for _, k := range raw {
-		f := func(i int) float64 { v, _ := strconv.ParseFloat(k[i].(string), 64); return v }
-		nt, _ := k[8].(float64)
-		out = append(out, exchange.Kline{
-			Symbol: sym, Interval: "1d",
-			OpenTime:  time.UnixMilli(int64(k[0].(float64))).UTC(),
-			CloseTime: time.UnixMilli(int64(k[6].(float64))).UTC(),
-			Open:      f(1), High: f(2), Low: f(3), Close: f(4),
-			Volume: f(5), QuoteVolume: f(7), NumTrades: int64(nt), IsClosed: true,
-		})
+// fetchKlines pulls up to `bars` klines at `interval`, paginating backward (limit 1500/req).
+func fetchKlines(sym, interval string, bars int) ([]exchange.Kline, error) {
+	var out []exchange.Kline
+	endTime := int64(0)
+	for len(out) < bars {
+		want := bars - len(out)
+		if want > 1500 {
+			want = 1500
+		}
+		url := fmt.Sprintf("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", fapi, sym, interval, want)
+		if endTime > 0 {
+			url += fmt.Sprintf("&endTime=%d", endTime)
+		}
+		b, err := get(url)
+		if err != nil {
+			return out, err
+		}
+		var raw [][]interface{}
+		if err := json.Unmarshal(b, &raw); err != nil {
+			return out, err
+		}
+		if len(raw) == 0 {
+			break
+		}
+		batch := make([]exchange.Kline, 0, len(raw))
+		for _, k := range raw {
+			f := func(i int) float64 { v, _ := strconv.ParseFloat(k[i].(string), 64); return v }
+			nt, _ := k[8].(float64)
+			batch = append(batch, exchange.Kline{
+				Symbol: sym, Interval: interval,
+				OpenTime:  time.UnixMilli(int64(k[0].(float64))).UTC(),
+				CloseTime: time.UnixMilli(int64(k[6].(float64))).UTC(),
+				Open:      f(1), High: f(2), Low: f(3), Close: f(4),
+				Volume: f(5), QuoteVolume: f(7), NumTrades: int64(nt), IsClosed: true,
+			})
+		}
+		out = append(batch, out...) // prepend (older batch)
+		endTime = int64(raw[0][0].(float64)) - 1
+		if len(raw) < want {
+			break
+		}
 	}
 	return out, nil
 }
 
 func main() {
-	days := flag.Int("days", 60, "how many recent daily bars to fetch/upsert per symbol")
+	days := flag.Int("days", 60, "how many recent bars to fetch/upsert per symbol")
+	interval := flag.String("interval", "1d", "kline interval (1d, 4h, 1h, ...)")
 	flag.Parse()
 
 	log, _ := zap.NewProduction()
@@ -91,7 +113,7 @@ func main() {
 
 	var okN, rows int
 	for i, sym := range rebalancer.DefaultUniverse {
-		kl, err := fetchDaily(sym, *days)
+		kl, err := fetchKlines(sym, *interval, *days)
 		if err != nil {
 			fmt.Printf("  [%2d/%d] %-10s fetch err: %v\n", i+1, len(rebalancer.DefaultUniverse), sym, err)
 			continue
