@@ -57,6 +57,10 @@ func main() {
 	rebFlag := flag.Int("reb", 3, "rebalance cadence in days (how often to re-rank/rotate; NOT funding frequency)")
 	wFlag := flag.Int("w", 14, "trailing funding window in days (signal responsiveness)")
 	costFlag := flag.Float64("cost", 0.0010, "per-side cost")
+	signalFlag := flag.String("signal", "level", "ranking signal: level (funding level) | change (funding momentum: recent W minus prior W) | combo (level - k*change)")
+	comboK := flag.Float64("combo-k", 1.0, "combo weight: rank key = level - k*change")
+	flip := flag.Bool("flip", false, "negate the ranking signal (test the opposite direction)")
+	stepsPath := flag.String("steps", "", "write per-step (date,ret) CSV to this path (to combine independent books)")
 	flag.Parse()
 	REB := *rebFlag
 	W := *wFlag
@@ -207,6 +211,27 @@ func main() {
 		return retVol(s, i)
 	}
 
+	// sig is the RANKING key only (what we sort coins by to pick longs/shorts). The funding
+	// P&L collected downstream stays actual (futFund), regardless of selection signal — so
+	// this cleanly tests "rank by momentum, collect real funding". level=current factor;
+	// change=funding momentum (recent W minus prior W, positive=crowding building);
+	// combo=level minus k*change (fade coins whose crowding is already unwinding).
+	sig := func(s string, si int) float64 {
+		var v float64
+		switch *signalFlag {
+		case "change":
+			v = trailFund(s, si, W) - trailFund(s, si-W, W)
+		case "combo":
+			v = trailFund(s, si, W) - *comboK*(trailFund(s, si, W)-trailFund(s, si-W, W))
+		default: // level
+			v = trailFund(s, si, W)
+		}
+		if *flip {
+			v = -v
+		}
+		return v
+	}
+
 	var periods []xsfunding.Period
 	var stepDates []string
 	for i := L + LAG; i+REB < len(dates); i += REB {
@@ -225,7 +250,7 @@ func main() {
 			}
 			coins = append(coins, xsfunding.CoinState{
 				Symbol:       s,
-				TrailFunding: trailFund(s, si, W),
+				TrailFunding: sig(s, si),
 				Price:        pSi,
 				TrailVolume:  trailVol(s, si),
 				DaysListed:   si - firstIdx[s],
@@ -249,6 +274,19 @@ func main() {
 	}
 	cfg2 := xsfunding.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, FeeRate: *costFlag, MaxPerCoinFrac: *capFrac}
 	eq, steps := xsfunding.RunBacktest(periods, capital, cfg2, 1.0)
+
+	if *stepsPath != "" {
+		var b strings.Builder
+		b.WriteString("date,ret\n")
+		for i, s := range steps {
+			fmt.Fprintf(&b, "%s,%.8f\n", stepDates[i], s)
+		}
+		if err := os.WriteFile(*stepsPath, []byte(b.String()), 0644); err != nil {
+			fmt.Printf("steps dump failed: %v\n", err)
+		} else {
+			fmt.Printf("steps -> %s (%d rows)\n", *stepsPath, len(steps))
+		}
+	}
 
 	cum := eq - 1
 	yrs := (toMs(stepDates[len(stepDates)-1]) - toMs(stepDates[0])) / 1000 / 86400
