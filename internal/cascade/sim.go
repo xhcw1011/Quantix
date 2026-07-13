@@ -26,6 +26,7 @@ type Config struct {
 	MaxConcurrent int     // hard cap on simultaneous open positions
 	CostRT        float64 // round-trip cost (entry+exit), fractional
 	StopLoss      float64 // exit early if price falls this fraction below entry (0 = off)
+	WickMin       float64 // entry confirmation: require intrabar recovery >= this (paper Step only)
 }
 
 // Trade is one realized round trip.

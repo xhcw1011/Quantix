@@ -1,0 +1,12 @@
+[Unit]
+Description=Quantix crash-fade PAPER-forward validator (one tick per 4h bar)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/quantix
+# Recommended config from the backtest: k=3 / hold=72h / wick=0.4 / small frac.
+# PAPER ONLY — fetches public Binance klines, places no orders, writes a JSON state file.
+ExecStart=/opt/quantix/bin/cascade-paper -k 3 -hold 18 -wick 0.4 -frac 0.10 -max-concurrent 8 -cost 0.0030 -state /opt/quantix/cascade_paper_state.json

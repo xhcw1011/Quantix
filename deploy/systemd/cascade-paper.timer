@@ -1,0 +1,10 @@
+[Unit]
+Description=Fire the crash-fade paper validator 2min past each 4h bar close (UTC)
+
+[Timer]
+# 4h bars close at 00/04/08/12/16/20 UTC; +2min lets the bar finalize on the exchange.
+OnCalendar=*-*-* 00,04,08,12,16,20:02:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
