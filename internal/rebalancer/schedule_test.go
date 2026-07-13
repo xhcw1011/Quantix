@@ -44,3 +44,23 @@ func TestNextTickEveryNDaysProperties(t *testing.T) {
 		t.Fatalf("consecutive ticks must be 3 days apart, got %v", next.Sub(got))
 	}
 }
+
+func TestNextTickHours(t *testing.T) {
+	// every 8h → fires at 00:00 / 08:00 / 16:00 UTC.
+	now := time.Date(2026, 3, 10, 9, 30, 0, 0, time.UTC) // 09:30 → next is 16:00
+	got := NextTickHours(now, 8)
+	want := time.Date(2026, 3, 10, 16, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	// at exactly 16:00 → next is 00:00 the next day (strictly after)
+	got2 := NextTickHours(want, 8)
+	want2 := time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC)
+	if !got2.Equal(want2) {
+		t.Fatalf("got %v, want %v", got2, want2)
+	}
+	// consecutive ticks are exactly 8h apart
+	if NextTickHours(want.Add(time.Second), 8).Sub(want) != 8*time.Hour {
+		t.Fatalf("consecutive 8h ticks must be 8h apart")
+	}
+}

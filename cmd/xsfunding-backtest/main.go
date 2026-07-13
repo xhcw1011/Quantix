@@ -36,9 +36,9 @@ var universe = []string{
 }
 
 const (
-	L, W, K, LAG = 14, 14, 5, 1
-	cost         = 0.0010
-	capital      = 10000.0
+	L, K, LAG = 14, 5, 1
+	cost      = 0.0010
+	capital   = 10000.0
 )
 
 func daykey(t time.Time) string { return t.UTC().Format("2006-01-02") }
@@ -55,8 +55,11 @@ func main() {
 	capFrac := flag.Float64("cap", 0, "per-coin cap as fraction of gross (0 = no cap; e.g. 0.15)")
 	eqweight := flag.Bool("eqweight", false, "force equal weight (ignore inverse-vol) to compare vs risk-parity")
 	rebFlag := flag.Int("reb", 3, "rebalance cadence in days (how often to re-rank/rotate; NOT funding frequency)")
+	wFlag := flag.Int("w", 14, "trailing funding window in days (signal responsiveness)")
+	costFlag := flag.Float64("cost", 0.0010, "per-side cost")
 	flag.Parse()
 	REB := *rebFlag
+	W := *wFlag
 	if *symbolsFlag != "" {
 		universe = strings.Split(*symbolsFlag, ",")
 	} else if *firstN > 0 && *firstN < len(universe) {
@@ -244,7 +247,7 @@ func main() {
 			loaded, len(dates), len(stepDates))
 		return
 	}
-	cfg2 := xsfunding.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, FeeRate: cost, MaxPerCoinFrac: *capFrac}
+	cfg2 := xsfunding.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, FeeRate: *costFlag, MaxPerCoinFrac: *capFrac}
 	eq, steps := xsfunding.RunBacktest(periods, capital, cfg2, 1.0)
 
 	cum := eq - 1

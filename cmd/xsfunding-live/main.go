@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	L, W, K, REB = 14, 14, 5, 3
+	L, K = 14, 5
 )
 
 // liveBroker adapts a Binance OrderBroker to strategy.Broker. In limit mode it posts a
@@ -147,8 +147,11 @@ func main() {
 	flatten := flag.Bool("flatten", false, "close ALL open positions and exit (clean stop)")
 	hedge := flag.Bool("hedge", false, "account is in hedge (dual-side) mode; default assumes one-way")
 	testnet := flag.Bool("testnet", true, "testnet (safe); -testnet=false hits MAINNET real money (needs QUANTIX_LIVE_CONFIRM=true)")
-	every := flag.Int("every", REB, "rebalance cadence in days (schedule mode)")
-	atHour := flag.Int("at-hour", 8, "UTC hour to rebalance at, post-funding (schedule mode)")
+	every := flag.Int("every", 3, "rebalance cadence in DAYS (only if -every-hours=0)")
+	atHour := flag.Int("at-hour", 8, "UTC hour for days-mode rebalance")
+	everyHours := flag.Int("every-hours", 8, "rebalance every N HOURS (0=use days mode); 8 aligns to funding settlement")
+	wWin := flag.Int("w", 7, "trailing funding window in days (signal responsiveness)")
+	minOrder := flag.Float64("min-order", 10, "skip trades smaller than this USDT (avoids micro-churn on 8h drift)")
 	capital := flag.Float64("capital", 3000, "gross exposure in USDT (each position = capital/2K)")
 	limit := flag.Bool("limit", false, "post maker limit at the touch (buy@bid/sell@ask) then market the unfilled remainder — saves ~3bp/side")
 	limitTO := flag.Int("limit-timeout", 20, "seconds to wait for the maker limit to fill before markets fallback")
@@ -294,7 +297,7 @@ func main() {
 
 	start, _ := time.Parse("2006-01-02", "2024-07-01")
 	end := time.Now().UTC().AddDate(0, 0, 2) // dynamic: always include the latest klines/funding
-	rc := rebalancer.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, W: W, VolWin: 30, MinOrder: 5.0, Capital: *capital, MaxPerCoinFrac: 0.15}
+	rc := rebalancer.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, W: *wWin, VolWin: 30, MinOrder: *minOrder, Capital: *capital, MaxPerCoinFrac: 0.15}
 
 	// rotate runs one full rebalance: reload DB series, sync exchange positions, plan
 	// vs current, and place the delta orders through ORG → Binance (or dry-preview).
@@ -343,9 +346,17 @@ func main() {
 	}
 
 	if *schedule {
-		fmt.Printf("xsfunding-live SCHEDULE on %s: rotate every %dd @ %02d:00 UTC, cap %.0f%%/coin, $%.0f gross. Ctrl-C to stop.\n",
-			net, *every, *atHour, rc.MaxPerCoinFrac*100, *capital)
-		rebalancer.Loop(ctx, *every, *atHour, time.Now, func(t time.Time) { rotate() }, log)
+		cad := fmt.Sprintf("every %dd @ %02d:00 UTC", *every, *atHour)
+		if *everyHours > 0 {
+			cad = fmt.Sprintf("every %dh (00/08/16 UTC)", *everyHours)
+		}
+		fmt.Printf("xsfunding-live SCHEDULE on %s: rotate %s, W=%dd, cap %.0f%%/coin, minOrder $%.0f, $%.0f gross. Ctrl-C to stop.\n",
+			net, cad, rc.W, rc.MaxPerCoinFrac*100, rc.MinOrder, *capital)
+		if *everyHours > 0 {
+			rebalancer.LoopHours(ctx, *everyHours, time.Now, func(t time.Time) { rotate() }, log)
+		} else {
+			rebalancer.Loop(ctx, *every, *atHour, time.Now, func(t time.Time) { rotate() }, log)
+		}
 		return
 	}
 	rotate() // -dry / -once

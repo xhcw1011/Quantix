@@ -23,6 +23,40 @@ func NextTick(now time.Time, everyDays, atHourUTC int) time.Time {
 	return c
 }
 
+// NextTickHours returns the next instant strictly after now that lands on an
+// every-N-hours boundary (hour-of-day % everyHours == 0), at :00:00 UTC. For
+// everyHours=8 that's 00:00 / 08:00 / 16:00 UTC — aligned to Binance funding
+// settlements (8h and 4h coins both settle at these hours).
+func NextTickHours(now time.Time, everyHours int) time.Time {
+	if everyHours < 1 {
+		everyHours = 1
+	}
+	now = now.UTC()
+	h := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, time.UTC)
+	for !h.After(now) || h.Hour()%everyHours != 0 {
+		h = h.Add(time.Hour)
+	}
+	return h
+}
+
+// LoopHours runs tick at every N-hour boundary until ctx is cancelled (the 8h-cadence
+// driver). Re-ranking is cheap; the tick only trades the delta, so unchanged rankings
+// cost nothing.
+func LoopHours(ctx context.Context, everyHours int, now func() time.Time, tick func(scheduled time.Time), log *zap.Logger) {
+	for {
+		next := NextTickHours(now(), everyHours)
+		if log != nil {
+			log.Info("rebalancer: next rotation scheduled", zap.Time("at_utc", next), zap.Duration("in", next.Sub(now())))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(next.Sub(now())):
+			tick(next)
+		}
+	}
+}
+
 // Loop runs tick at every scheduled rebalance until ctx is cancelled. It sleeps until
 // the next tick (NextTick), logging when the next one is due; tick receives the
 // scheduled instant. Blocking — run in its own goroutine.
