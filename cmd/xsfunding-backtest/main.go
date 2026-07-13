@@ -65,6 +65,8 @@ func main() {
 	kFlag := flag.Int("k", 5, "positions per side (K long + K short); more breadth may support larger K")
 	fromFlag := flag.String("from", "", "restrict analysis to rebalance dates >= this (YYYY-MM-DD; for out-of-sample split)")
 	toFlag := flag.String("to", "", "restrict analysis to rebalance dates < this (YYYY-MM-DD)")
+	tpFlag := flag.Float64("tp", 0, "per-position take-profit: close a leg once it gains this fraction (0 = off, hold to rebalance)")
+	slFlag := flag.Float64("sl", 0, "per-position stop-loss: close a leg once it loses this fraction (0 = off)")
 	flag.Parse()
 	REB := *rebFlag
 	W := *wFlag
@@ -296,6 +298,107 @@ func main() {
 		return
 	}
 	cfg2 := xsfunding.Config{K: K, GrossFrac: 1.0, MinDaysListed: L, MinVolume: 1.0, FeeRate: *costFlag, MaxPerCoinFrac: *capFrac}
+
+	if *tpFlag > 0 || *slFlag > 0 {
+		// Daily TP/SL simulation: same funding-rank selection, but each leg can close early on
+		// take-profit / stop-loss. Compares base (hold to rebalance) vs capped on IDENTICAL picks.
+		sim := func(tp, sl float64) []float64 {
+			var stps []float64
+			for p := range periods {
+				i := idx[stepDates[p]]
+				longs, shorts := xsfunding.Rank(xsfunding.Eligible(periods[p].Coins, L, 1.0), K)
+				if longs == nil {
+					stps = append(stps, 0)
+					continue
+				}
+				vol := map[string]float64{}
+				for _, c := range periods[p].Coins {
+					vol[c.Symbol] = c.Vol
+				}
+				tgts := xsfunding.BuildTargetsRP(longs, shorts, capital, 1.0, vol, *capFrac)
+				var pnl, traded float64
+				for _, tg := range tgts {
+					wfrac := math.Abs(tg.Notional) / capital
+					long := tg.Notional > 0
+					entry := px[tg.Symbol][dates[i]]
+					if entry <= 0 {
+						continue
+					}
+					realized := 0.0
+					hit := false
+					for d := i + 1; d <= i+REB && d < len(dates); d++ {
+						cur, ok := px[tg.Symbol][dates[d]]
+						if !ok || cur <= 0 {
+							continue
+						}
+						sret := cur/entry - 1 // signed to the position
+						if !long {
+							sret = -sret
+						}
+						if tp > 0 && sret >= tp {
+							realized, hit = tp, true
+							break
+						}
+						if sl > 0 && sret <= -sl {
+							realized, hit = -sl, true
+							break
+						}
+						realized = sret
+					}
+					pnl += wfrac * realized
+					fund := periods[p].FwdFunding[tg.Symbol] // long receives when funding<0, short when >0
+					if long {
+						pnl += wfrac * (-fund)
+					} else {
+						pnl += wfrac * fund
+					}
+					traded += wfrac // entry turnover
+					if hit {
+						traded += wfrac // extra exit for an early close
+					}
+				}
+				pnl -= traded * *costFlag
+				stps = append(stps, pnl)
+			}
+			return stps
+		}
+		report := func(name string, stps []float64) {
+			e := 1.0
+			for _, s := range stps {
+				e *= 1 + s
+			}
+			m, sd := meanStd(stps)
+			sh := 0.0
+			if sd > 0 {
+				sh = m / sd * math.Sqrt(365.0/float64(REB))
+			}
+			dd := runningEquity(stps)
+			peak, mdd := 0.0, 0.0
+			for _, x := range dd {
+				if x > peak {
+					peak = x
+				}
+				if v := (peak - x) / peak; v > mdd {
+					mdd = v
+				}
+			}
+			fmt.Printf("  %-22s 累计 %+.1f%%   Sharpe %.2f   maxDD %.1f%%\n", name, (e-1)*100, sh, mdd*100)
+		}
+		fmt.Printf("\n# TP/SL 测试 (%d 币 K%d W%d REB%d 费%.0fbp) — 同样选币,只改离场:\n",
+			loaded, K, W, REB, *costFlag*1e4)
+		report("死等调仓(基准)", sim(0, 0))
+		if *tpFlag > 0 && *slFlag > 0 {
+			report(fmt.Sprintf("TP+%.0f%% / SL-%.0f%%", *tpFlag*100, *slFlag*100), sim(*tpFlag, *slFlag))
+		}
+		if *tpFlag > 0 {
+			report(fmt.Sprintf("只止盈 TP+%.0f%%", *tpFlag*100), sim(*tpFlag, 0))
+		}
+		if *slFlag > 0 {
+			report(fmt.Sprintf("只止损 SL-%.0f%%", *slFlag*100), sim(0, *slFlag))
+		}
+		return
+	}
+
 	eq, steps := xsfunding.RunBacktest(periods, capital, cfg2, 1.0)
 
 	if *stepsPath != "" {
