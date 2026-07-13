@@ -26,6 +26,8 @@ func main() {
 	maxSetup := flag.Int("max-setup", 60, "only look for the breakdown within this many days of listing")
 	cost := flag.Float64("cost", 0.004, "round-trip short cost (new coins = wide spreads; 40bp default)")
 	stop := flag.Float64("stop", 0, "short stop-loss: exit if price rises this fraction above entry (0 = off)")
+	target := flag.Float64("target", 0, "PATIENCE mode: hold (no stop) until short profit hits this; 0 = fixed-hold mode")
+	lev := flag.Float64("lev", 0, "leverage for patience mode; liquidation when price rises ~1/lev above entry (0 = never liquidate)")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -79,7 +81,9 @@ func main() {
 		coin     string
 		date     string
 		pumpMult float64
-		shortRet float64 // gross: 1 - exit/entry
+		shortRet float64 // net of cost
+		outcome  string  // hold | win | liq | open
+		days     int     // bars held to resolution
 	}
 	var trades []trade
 	var nNew int
@@ -99,9 +103,33 @@ func main() {
 				continue
 			}
 			if ck.close[i] < runMax*(1-*drop) { // breakdown confirmed → short here
-				if i+*hold < len(ck.close) {
-					entry := ck.close[i]
+				entry := ck.close[i]
+				if *target > 0 { // PATIENCE: hold (no stop) to profit target OR liquidation OR end
+					targetPx := entry * (1 - *target)
+					liqPx := 1e18
+					if *lev > 0 {
+						liqPx = entry * (1 + 1/(*lev))
+					}
+					outcome, ret, dayN := "open", 0.0, len(ck.close)-1-i
+					for j := i + 1; j < len(ck.close); j++ {
+						if ck.close[j] <= targetPx {
+							outcome, ret, dayN = "win", *target, j-i
+							break
+						}
+						if ck.close[j] >= liqPx {
+							outcome, ret, dayN = "liq", -1/(*lev), j-i // notional loss = -1/lev (= -100% margin)
+							break
+						}
+					}
+					if outcome == "open" {
+						ret = 1 - ck.close[len(ck.close)-1]/entry // MTM to end (capital still locked)
+					}
+					trades = append(trades, trade{s, ck.dates[i], runMax / first, ret, outcome, dayN})
+				} else {
 					exit := ck.close[i+*hold]
+					if i+*hold >= len(ck.close) {
+						break
+					}
 					if *stop > 0 { // short stop: exit first day close rises stop above entry
 						for j := i + 1; j <= i+*hold; j++ {
 							if ck.close[j] >= entry*(1+*stop) {
@@ -110,7 +138,7 @@ func main() {
 							}
 						}
 					}
-					trades = append(trades, trade{s, ck.dates[i], runMax / first, 1 - exit/entry})
+					trades = append(trades, trade{s, ck.dates[i], runMax / first, 1 - exit/entry, "hold", *hold})
 				}
 				break // one entry per coin
 			}
@@ -146,4 +174,30 @@ func main() {
 		pm += t.pumpMult
 	}
 	fmt.Printf("  平均 pump 倍数(高点/上市价): %.2fx\n", pm/n)
+	// patience-mode outcome breakdown
+	if *target > 0 {
+		oc := map[string]int{}
+		for _, t := range trades {
+			oc[t.outcome]++
+		}
+		fmt.Printf("  📊 patience 结局: 到目标 %d(%.0f%%)  爆仓 %d(%.0f%%)  卡住未到目标 %d(%.0f%%)\n",
+			oc["win"], float64(oc["win"])/n*100, oc["liq"], float64(oc["liq"])/n*100, oc["open"], float64(oc["open"])/n*100)
+		var wd []int
+		for _, t := range trades {
+			if t.outcome == "win" {
+				wd = append(wd, t.days)
+			}
+		}
+		sort.Ints(wd)
+		if len(wd) > 0 {
+			var sd int
+			for _, d := range wd {
+				sd += d
+			}
+			fmt.Printf("  ⏳ 到目标的持有天数: 中位 %d 天, 均值 %d 天, 最长 %d 天 (资金锁定期; 一次只开一个=吞吐低)\n",
+				wd[len(wd)/2], sd/len(wd), wd[len(wd)-1])
+		}
+		fmt.Printf("  → 目标 +%.0f%%/单, 杠杆 %.0fx (爆仓=价格涨 %.0f%% 触发, 单笔 -%.0f%% 名义)\n",
+			*target*100, *lev, 100/(*lev), 100/(*lev))
+	}
 }
