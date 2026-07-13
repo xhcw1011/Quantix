@@ -168,7 +168,7 @@ func main() {
 			evt := close[dates[ei+1]]/close[dates[ei-1]] - 1       // [t-1 .. t+1]
 			post := close[dates[ei+1+*win]]/close[dates[ei+1]] - 1 // [t+1 .. t+1+win]
 			events = append(events, ev{sym, ud, pct, pre, evt, post, baseline})
-			perCoin[sym] = append(perCoin[sym], post-baseline)
+			perCoin[sym] = append(perCoin[sym], pre-baseline) // front-run focus: pre-unlock abnormal
 		}
 	}
 
@@ -178,30 +178,34 @@ func main() {
 	}
 	fmt.Printf("=== 大解锁事件 (>=%.1f%% max supply), %d coins, %d cliffs total, %d qualifying+priced ===\n",
 		*minPct*100, nCoins, nCliffs, len(events))
-	// aggregate: RAW vs ABNORMAL (post minus coin baseline) — the trend control is decisive
-	var mPre, mEvt, mPost, mAbn float64
-	var nPostNeg, nAbnNeg int
+	// aggregate: RAW vs ABNORMAL (minus coin baseline) — the trend control is decisive.
+	// PRE (short ahead of the unlock, front-run thesis) AND POST get symmetric treatment.
+	var mPre, mEvt, mPost, mAbnPre, mAbnPost float64
+	var nAbnPreNeg, nAbnPostNeg int
 	for _, e := range events {
 		mPre += e.pre
 		mEvt += e.evt
 		mPost += e.post
-		mAbn += e.post - e.baseline
-		if e.post < 0 {
-			nPostNeg++
+		mAbnPre += e.pre - e.baseline
+		mAbnPost += e.post - e.baseline
+		if e.pre-e.baseline < 0 {
+			nAbnPreNeg++
 		}
 		if e.post-e.baseline < 0 {
-			nAbnNeg++
+			nAbnPostNeg++
 		}
 	}
 	n := float64(len(events))
-	fmt.Printf("\n=== 汇总 (thesis: 解锁后应为负 ABNORMAL 漂移) ===\n")
-	fmt.Printf("  RAW      mean pre%dd=%+.2f%%  evt±1=%+.2f%%  post%dd=%+.2f%% (%.0f%% neg)\n",
-		*win, mPre/n*100, mEvt/n*100, *win, mPost/n*100, float64(nPostNeg)/n*100)
-	fmt.Printf("  ABNORMAL post%dd (post - coin baseline) = %+.2f%%  (%.0f%% neg)  <-- 控制趋势后的真信号\n",
-		*win, mAbn/n*100, float64(nAbnNeg)/n*100)
+	fmt.Printf("\n=== 汇总 (front-run thesis: 解锁 *前* 应为负 ABNORMAL 漂移) ===\n")
+	fmt.Printf("  RAW           pre%dd=%+.2f%%   evt±1=%+.2f%%   post%dd=%+.2f%%\n",
+		*win, mPre/n*100, mEvt/n*100, *win, mPost/n*100)
+	fmt.Printf("  ABNORMAL PRE%dd  (pre - baseline)  = %+.2f%%  (%.0f%% neg)  <-- front-run 信号(短在解锁前)\n",
+		*win, mAbnPre/n*100, float64(nAbnPreNeg)/n*100)
+	fmt.Printf("  ABNORMAL POST%dd (post - baseline) = %+.2f%%  (%.0f%% neg)\n",
+		*win, mAbnPost/n*100, float64(nAbnPostNeg)/n*100)
 	fmt.Printf("  round-trip cost to short: ~0.10%% (2 legs @5bp).\n")
-	// per-coin: is the effect broad or driven by one downtrending alt?
-	fmt.Printf("\n=== 按币拆解 (abnormal post drift = 事件后%dd收益 − 该币基线) ===\n", *win)
+	// per-coin: is the front-run effect broad or driven by one downtrending alt?
+	fmt.Printf("\n=== 按币拆解 (abnormal PRE drift = 解锁前%dd收益 − 该币基线) ===\n", *win)
 	fmt.Printf("%-8s %5s %12s %12s\n", "coin", "n", "mean abn", "% neg")
 	coins := make([]string, 0, len(perCoin))
 	for c := range perCoin {
