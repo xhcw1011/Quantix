@@ -60,6 +60,7 @@ func main() {
 	signalFlag := flag.String("signal", "level", "ranking signal: level (funding level) | change (funding momentum: recent W minus prior W) | combo (level - k*change)")
 	comboK := flag.Float64("combo-k", 1.0, "combo weight: rank key = level - k*change")
 	flip := flag.Bool("flip", false, "negate the ranking signal (test the opposite direction)")
+	revLB := flag.Int("rev-lb", 3, "reversal lookback in days (signal=reversal ranks by return over this window)")
 	stepsPath := flag.String("steps", "", "write per-step (date,ret) CSV to this path (to combine independent books)")
 	flag.Parse()
 	REB := *rebFlag
@@ -223,6 +224,14 @@ func main() {
 			v = trailFund(s, si, W) - trailFund(s, si-W, W)
 		case "combo":
 			v = trailFund(s, si, W) - *comboK*(trailFund(s, si, W)-trailFund(s, si-W, W))
+		case "reversal":
+			// rank by trailing return over rev-lb days; Rank longs lowest = biggest LOSERS
+			// (short-term reversal), shorts biggest winners. Different mechanism from funding.
+			p0, ok0 := px[s][dates[max(0, si-*revLB)]]
+			p1, ok1 := px[s][dates[si]]
+			if ok0 && ok1 && p0 > 0 {
+				v = p1/p0 - 1
+			}
 		default: // level
 			v = trailFund(s, si, W)
 		}
