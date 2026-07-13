@@ -40,6 +40,8 @@ func main() {
 	frac := flag.Float64("frac", 0.10, "capital fraction per position")
 	maxc := flag.Int("max-concurrent", 8, "hard cap on simultaneous positions")
 	cost := flag.Float64("cost", 0.0030, "round-trip cost (cascade slippage; 30bp default)")
+	stop := flag.Float64("stop", 0, "per-position stop-loss fraction (0 = off)")
+	wick := flag.Float64("wick", 0, "entry confirmation: require intrabar recovery (close-low)/(high-low) >= this (0 = off)")
 	stepsPath := flag.String("steps", "", "dump daily returns CSV (to correlate vs funding)")
 	flag.Parse()
 
@@ -61,7 +63,7 @@ func main() {
 
 	// 1. load 4h klines; collect the global time grid (union of all bar timestamps)
 	type kbar struct {
-		close, shock float64
+		close, shock, wick float64
 	}
 	perSym := map[string]map[int64]kbar{}
 	tsSet := map[int64]bool{}
@@ -94,8 +96,12 @@ func main() {
 					sh = ret[i] / sd
 				}
 			}
+			wk := 1.0 // intrabar recovery: 1 = closed at high, 0 = closed at low
+			if rng := kl[i].High - kl[i].Low; rng > 0 {
+				wk = (kl[i].Close - kl[i].Low) / rng
+			}
 			ts := kl[i].OpenTime.UTC().UnixMilli()
-			m[ts] = kbar{kl[i].Close, sh}
+			m[ts] = kbar{kl[i].Close, sh, wk}
 			tsSet[ts] = true
 		}
 		perSym[sym] = m
@@ -119,14 +125,18 @@ func main() {
 	for sym, m := range perSym {
 		s := make(cascade.Series, len(times))
 		for ts, kb := range m {
-			s[gi[ts]] = cascade.Bar{Close: kb.close, Shock: kb.shock, Has: true}
+			sh := kb.shock
+			if *wick > 0 && kb.wick < *wick {
+				sh = 0 // failed entry confirmation (still a falling knife) → no trigger
+			}
+			s[gi[ts]] = cascade.Bar{Close: kb.close, Shock: sh, Has: true}
 		}
 		data0[sym] = s
 	}
 
 	// 3. run the sim
 	r := cascade.Simulate(times, data0, cascade.Config{
-		K: *k, HoldBars: *hold, FracPerTrade: *frac, MaxConcurrent: *maxc, CostRT: *cost,
+		K: *k, HoldBars: *hold, FracPerTrade: *frac, MaxConcurrent: *maxc, CostRT: *cost, StopLoss: *stop,
 	})
 
 	// 4. stats

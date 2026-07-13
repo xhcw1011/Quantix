@@ -25,6 +25,7 @@ type Config struct {
 	FracPerTrade  float64 // capital fraction committed per position
 	MaxConcurrent int     // hard cap on simultaneous open positions
 	CostRT        float64 // round-trip cost (entry+exit), fractional
+	StopLoss      float64 // exit early if price falls this fraction below entry (0 = off)
 }
 
 // Trade is one realized round trip.
@@ -86,14 +87,15 @@ func Simulate(times []int64, data map[string]Series, cfg Config) Result {
 		}
 		costDrag := 0.0
 
-		// 2. exits: close positions whose hold has elapsed (or at the final bar)
+		// 2. exits: hold elapsed, final bar, or stop-loss hit
 		stillOpen := open[:0]
 		for _, p := range open {
-			if p.exitGi == gi || gi == nBars-1 {
-				px := p.entryPx
-				if s := data[p.sym]; gi < len(s) && s[gi].Has && s[gi].Close > 0 {
-					px = s[gi].Close
-				}
+			px := p.entryPx
+			if s := data[p.sym]; gi < len(s) && s[gi].Has && s[gi].Close > 0 {
+				px = s[gi].Close
+			}
+			stopHit := cfg.StopLoss > 0 && px <= p.entryPx*(1-cfg.StopLoss)
+			if p.exitGi == gi || gi == nBars-1 || stopHit {
 				trades = append(trades, Trade{p.sym, p.entryGi, gi, px/p.entryPx - 1 - cfg.CostRT})
 				costDrag += p.w * cfg.CostRT / 2 // exit leg
 			} else {

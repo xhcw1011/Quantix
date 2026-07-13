@@ -46,6 +46,26 @@ func TestSimulateConcurrencyCap(t *testing.T) {
 	}
 }
 
+// A per-position stop exits early when price falls StopLoss below entry, before HoldBars.
+func TestSimulateStopLoss(t *testing.T) {
+	times := []int64{0, 1, 2, 3, 4}
+	data := map[string]Series{
+		// shock at gi1 (enter @100); drops to 85 (>10% stop) at gi3 before recovering to 120
+		"A": {b(100, 0), b(100, -2), b(95, 0), b(85, 0), b(120, 0)},
+	}
+	cfg := Config{K: 1, HoldBars: 3, FracPerTrade: 1.0, MaxConcurrent: 1, CostRT: 0, StopLoss: 0.10}
+	r := Simulate(times, data, cfg)
+	if len(r.Trades) != 1 {
+		t.Fatalf("expected 1 trade, got %d", len(r.Trades))
+	}
+	if r.Trades[0].ExitGi != 3 {
+		t.Fatalf("stop should exit at gi3 (price 85 < 90), got exitGi=%d", r.Trades[0].ExitGi)
+	}
+	if math.Abs(r.Trades[0].Ret-(-0.15)) > 1e-9 { // 85/100 - 1
+		t.Fatalf("stop exit ret = %v, want -0.15", r.Trades[0].Ret)
+	}
+}
+
 // Round-trip cost is deducted from the realized trade return.
 func TestSimulateCost(t *testing.T) {
 	times := []int64{0, 1, 2, 3, 4}
