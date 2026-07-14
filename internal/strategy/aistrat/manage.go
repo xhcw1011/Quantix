@@ -137,7 +137,9 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	// per-layer TPs handle profit-taking individually; SL is the safety floor.
 	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
 		mode := "trend"
-		if p.mode == modeRange { mode = "grid" }
+		if p.mode == modeRange {
+			mode = "grid"
+		}
 		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.String("mode", mode), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
 		closedSide := p.side
 		s.closePos(ctx, p, pptr, "stop_loss")
@@ -344,7 +346,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	// Maker-only LIMIT (GTX) — if it would cross the book the exchange rejects it, so
 	// we never accidentally pay taker fee. Rejection = skip this layer, retry next bar
 	// (position stays as-is). (grid-sl)
-	omsID := s.placeOrderEx(ctx, p.side, gridEntry, gridQty, true, true)
+	omsID := s.placeOrderEx(ctx, p.side, gridEntry, gridQty, true, true, p.stopLoss)
 	if omsID == "" {
 		return
 	}

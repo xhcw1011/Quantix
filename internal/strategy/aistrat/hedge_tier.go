@@ -143,7 +143,7 @@ func (s *AIStrategy) manageTieredHedge(ctx *strategy.Context, bar exchange.Kline
 			delta := math.Floor((targetQty-p.hedgeQty)*1000) / 1000
 			if delta > 0 {
 				hedgeSide := oppositeSide(p.side)
-				orderID := s.placeOrder(ctx, hedgeSide, price, delta, false) // market
+				orderID := s.placeOrder(ctx, hedgeSide, price, delta, false, 0) // market; hedge has no tracked stop
 				if orderID == "" {
 					s.log.Warn("AI: hedge open failed",
 						zap.String("main_side", p.side), zap.Float64("delta", delta))
