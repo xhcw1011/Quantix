@@ -53,6 +53,7 @@ type OrderRequest struct {
 	Type         OrderType
 	Qty          float64 // 0 = max
 	Price        float64 // LIMIT / STOP_LIMIT: limit price
+	MakerOnly    bool    // LIMIT only: reject (don't fill as taker) if would cross book. Binance GTX/POST_ONLY semantics.
 	StopPrice    float64 // STOP_MARKET / STOP_LIMIT: trigger price
 	// Protective orders auto-placed by the live broker after a fill.
 	StopLoss   float64 // trigger price for stop-loss order (0 = disabled)

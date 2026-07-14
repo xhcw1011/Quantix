@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { listEngines, getRecentLogs } from '../api/trading'
 
 interface EngineInfo {
@@ -18,6 +18,10 @@ export default function Logs() {
   const [autoRefresh, setAutoRefresh] = useState(false)
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  // Sticky tail: true when user is at the bottom; we then auto-scroll on
+  // new content. Toggles to false if they scroll up to read history.
+  const stickyRef = useRef<boolean>(true)
 
   useEffect(() => {
     listEngines().then(r => {
@@ -46,6 +50,20 @@ export default function Logs() {
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh, selectedID, tailN, grep])
+
+  // After lines change, if user was at the bottom, scroll to bottom.
+  useEffect(() => {
+    if (stickyRef.current && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [lines])
+
+  const onScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    // Within 8px of bottom counts as "at bottom" — small slack for sub-pixel.
+    stickyRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8
+  }
 
   // Color-code zap log levels for quick scanning.
   const rendered = useMemo(() => lines.map((l, i) => {
@@ -108,7 +126,11 @@ export default function Logs() {
 
       {err && <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-3 py-2 text-red-400 text-sm">{err}</div>}
 
-      <div className="bg-slate-900 rounded-xl p-3 max-h-[70vh] overflow-y-auto border border-slate-800">
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="bg-slate-900 rounded-xl p-3 max-h-[70vh] overflow-y-auto border border-slate-800"
+      >
         {lines.length === 0 ? (
           <p className="text-slate-500 text-sm">No log lines{grep ? ` matching "${grep}"` : ''}.</p>
         ) : (
@@ -116,7 +138,9 @@ export default function Logs() {
         )}
       </div>
       <p className="text-xs text-slate-600 text-right">
-        Showing last {lines.length} line(s) of today's process log.
+        Showing last {lines.length} line(s) of today's process log
+        {autoRefresh && stickyRef.current && ' · auto-scroll on'}
+        {autoRefresh && !stickyRef.current && ' · scrolled up (auto-scroll paused)'}.
       </p>
     </div>
   )

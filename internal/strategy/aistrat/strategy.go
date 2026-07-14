@@ -292,8 +292,21 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		return
 	}
 
-	// ── Range/grid mode: only check TP on tick (no SL, no trailing) ──
+	// ── Range/grid mode: tick-level SL + TP ──
 	if p.mode == modeRange {
+		// SL check first (was previously gated out; grid now has a real safety floor)
+		if p.stopLoss > 0 && ((p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss)) {
+			closedSide := p.side
+			s.log.Warn("TICK STOP-LOSS (grid)", zap.String("side", closedSide),
+				zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+			s.closePos(ctx, p, pptr, "stop_loss")
+			s.consecLoss++
+			s.stopBar = s.barCount
+			s.postSLReeval = true
+			s.postSLSide = closedSide
+			s.postSLPrice = price
+			return
+		}
 		if p.takeProfit > 0 {
 			if (p.side == "LONG" && price >= p.takeProfit) || (p.side == "SHORT" && price <= p.takeProfit) {
 				s.log.Info("TICK GRID TP", zap.String("side", p.side),

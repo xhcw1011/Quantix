@@ -1,6 +1,16 @@
 import { useEffect, useState } from 'react'
 import { getPositions, closeEnginePosition } from '../api/trading'
 import { useTradeSocket } from '../hooks/useTradeSocket'
+import { toast } from '../store/toastStore'
+
+// LiveSnap tracks the most recent strategy status snapshot per engine_id so the
+// Positions page can compute pnlR + show SL without a second API call.
+interface LiveSnap {
+  strat_long_entry?: number
+  strat_long_sl?: number
+  strat_short_entry?: number
+  strat_short_sl?: number
+}
 
 interface PositionView {
   symbol: string
@@ -27,6 +37,7 @@ export default function Positions() {
   const [loading, setLoading] = useState(true)
   const [apiError, setApiError] = useState<string | null>(null)
   const [closingKey, setClosingKey] = useState<string | null>(null)
+  const [liveSnaps, setLiveSnaps] = useState<Record<string, LiveSnap>>({})
 
   const handleClose = async (engineID: string, symbol: string, side: 'LONG' | 'SHORT', qty: number) => {
     const ok = window.confirm(
@@ -39,10 +50,10 @@ export default function Positions() {
     setClosingKey(key)
     try {
       const r = await closeEnginePosition(engineID, side)
-      alert(`Closed: ${r.data.qty} ${r.data.symbol} @ $${r.data.fill_price}`)
+      toast.success(`Closed ${side}: ${r.data.qty} ${r.data.symbol} @ $${r.data.fill_price.toFixed(2)}`)
       refresh()
     } catch (e: any) {
-      alert(`Close failed: ${e.response?.data?.error || e.message}`)
+      toast.error(`Close failed: ${e.response?.data?.error || e.message}`)
     } finally {
       setClosingKey(null)
     }
@@ -62,10 +73,21 @@ export default function Positions() {
     return () => clearInterval(id)
   }, [])
 
-  // Refresh positions on any fill event (position sizes change after fills)
+  // Refresh positions on fill events; cache strategy snapshots for pnlR/SL.
   useTradeSocket((msg: any) => {
     if (msg?.type === 'fill') {
       refresh()
+    } else if (msg?.type === 'status' && msg?.data?.engine_id) {
+      const d = msg.data
+      setLiveSnaps((prev) => ({
+        ...prev,
+        [d.engine_id]: {
+          strat_long_entry:  d.strat_long_entry,
+          strat_long_sl:     d.strat_long_sl,
+          strat_short_entry: d.strat_short_entry,
+          strat_short_sl:    d.strat_short_sl,
+        },
+      }))
     }
   })
 
@@ -133,6 +155,8 @@ export default function Positions() {
                       <th className="pb-2 text-right">Avg Entry</th>
                       <th className="pb-2 text-right">Last Price</th>
                       <th className="pb-2 text-right">Unrealized P&L</th>
+                      <th className="pb-2 text-right" title="P&L in units of risk (R = entry-to-SL distance). >0 = profit, <0 = loss.">pnlR</th>
+                      <th className="pb-2 text-right">SL</th>
                       <th className="pb-2 text-right">Realized P&L</th>
                       <th className="pb-2 text-right">Action</th>
                     </tr>
@@ -142,6 +166,19 @@ export default function Positions() {
                       const side = p.position_side === 'LONG' || p.position_side === 'SHORT' ? p.position_side : null
                       const key = `${eng.engine_id}-${side}`
                       const isClosing = closingKey === key
+                      // pnlR + SL come from strategy snapshot (WS push), join by engine_id + side
+                      const snap = liveSnaps[eng.engine_id]
+                      const entry = side === 'LONG' ? snap?.strat_long_entry : side === 'SHORT' ? snap?.strat_short_entry : undefined
+                      const sl    = side === 'LONG' ? snap?.strat_long_sl    : side === 'SHORT' ? snap?.strat_short_sl    : undefined
+                      let pnlR: number | null = null
+                      if (entry && sl && eng.last_price > 0) {
+                        const r = Math.abs(entry - sl)
+                        if (r > 0) {
+                          pnlR = side === 'LONG'
+                            ? (eng.last_price - entry) / r
+                            : (entry - eng.last_price) / r
+                        }
+                      }
                       return (
                       <tr key={i} className="border-b border-slate-700/50 hover:bg-slate-700/30">
                         <td className="py-2 font-medium">{p.symbol}</td>
@@ -159,6 +196,12 @@ export default function Positions() {
                         <td className="py-2 text-right font-mono">${eng.last_price.toLocaleString()}</td>
                         <td className={`py-2 text-right font-mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                           {p.unrealized_pnl >= 0 ? '+' : ''}${p.unrealized_pnl.toFixed(4)}
+                        </td>
+                        <td className={`py-2 text-right font-mono font-semibold ${pnlR === null ? 'text-slate-500' : pnlR >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {pnlR === null ? '—' : `${pnlR >= 0 ? '+' : ''}${pnlR.toFixed(2)}R`}
+                        </td>
+                        <td className="py-2 text-right font-mono text-slate-300">
+                          {sl ? `$${sl.toFixed(2)}` : '—'}
                         </td>
                         <td className={`py-2 text-right font-mono ${p.realized_pnl > 0 ? 'text-green-400' : p.realized_pnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
                           {p.realized_pnl === 0 ? '—' : `$${p.realized_pnl.toFixed(4)}`}

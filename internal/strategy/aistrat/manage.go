@@ -131,19 +131,22 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 		}
 	}
 
-	// ── Stop-loss (trend only — grid positions have no SL, ride the range) ──
-	if p.mode != modeRange {
-		if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
-			s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
-			closedSide := p.side
-			s.closePos(ctx, p, pptr, "stop_loss")
-			s.consecLoss++
-			s.stopBar = s.barCount
-			s.postSLReeval = true
-			s.postSLSide = closedSide
-			s.postSLPrice = price
-			return
-		}
+	// ── Stop-loss — fires for both trend AND grid (modeRange).
+	// Grid base SL set in openGrid (BB lower/upper ± ATR/2 buffer). Hitting it
+	// closes the WHOLE grid bundle (base + filled layers), not per-layer — the
+	// per-layer TPs handle profit-taking individually; SL is the safety floor.
+	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
+		mode := "trend"
+		if p.mode == modeRange { mode = "grid" }
+		s.log.Warn("STOP-LOSS", zap.String("side", p.side), zap.String("mode", mode), zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
+		closedSide := p.side
+		s.closePos(ctx, p, pptr, "stop_loss")
+		s.consecLoss++
+		s.stopBar = s.barCount
+		s.postSLReeval = true
+		s.postSLSide = closedSide
+		s.postSLPrice = price
+		return
 	}
 
 	if p.barsHeld < s.cfg.MinHoldBars {
@@ -310,24 +313,18 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	shouldAdd := false
 	var gridEntry, gridTP float64
 
-	// Pyramid (add only on the WINNING side) — never average into a loser.
-	// LONG: add when price has risen a step ABOVE the last entry (thesis confirming).
-	// SHORT: add when price has fallen a step BELOW the last entry.
+	// Pyramid + per-layer TP (hybrid): add ONLY on the winning side — never average
+	// into a loser (the diagnostic flagged DCA-into-losers as the #1 loss source) —
+	// but TP each layer independently at entry±spacing (grid-sl) so layers round-trip
+	// in chop instead of waiting for the shared BB-middle base TP.
 	if p.side == "LONG" && price >= refPrice+spacing {
 		gridEntry = math.Round(price*100) / 100
-		// Grid layer TP: base position's TP (BB middle), not fixed percentage
-		gridTP = p.takeProfit
-		if gridTP <= gridEntry {
-			gridTP = math.Round((gridEntry+spacing)*100) / 100
-		}
+		gridTP = math.Round((gridEntry+spacing)*100) / 100
 		shouldAdd = true
 	}
 	if p.side == "SHORT" && price <= refPrice-spacing {
 		gridEntry = math.Round(price*100) / 100
-		gridTP = p.takeProfit
-		if gridTP >= gridEntry {
-			gridTP = math.Round((gridEntry-spacing)*100) / 100
-		}
+		gridTP = math.Round((gridEntry-spacing)*100) / 100
 		shouldAdd = true
 	}
 
@@ -344,8 +341,10 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 		return
 	}
 
-	// Use limit order for grid layers (maker fee, 60% cheaper than market)
-	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, true)
+	// Maker-only LIMIT (GTX) — if it would cross the book the exchange rejects it, so
+	// we never accidentally pay taker fee. Rejection = skip this layer, retry next bar
+	// (position stays as-is). (grid-sl)
+	omsID := s.placeOrderEx(ctx, p.side, gridEntry, gridQty, true, true)
 	if omsID == "" {
 		return
 	}

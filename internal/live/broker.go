@@ -419,16 +419,26 @@ func (b *Broker) placeLimitOrderAsync(ctx context.Context, ordID string, req str
 		clientOrderID = ord.ClientOrderID
 	}
 
+	// Maker-only (GTX/post-only) when caller sets MakerOnly AND broker supports it.
+	// Falls back to regular GTC limit for brokers without the optional interface.
+	makerPlacer, makerOnlySupported := b.orderClient.(exchange.LimitOrderMakerPlacer)
+	useMakerOnly := req.MakerOnly && makerOnlySupported
+
 	var exchangeID string
 	retryBackoffs := []time.Duration{500 * time.Millisecond, 1500 * time.Millisecond}
 	for attempt := 0; attempt < 2; attempt++ {
-		exchangeID, err = b.orderClient.PlaceLimitOrder(ctx, req.Symbol, exchange.OrderSide(req.Side), posSide, qty, req.Price, clientOrderID)
+		if useMakerOnly {
+			exchangeID, err = makerPlacer.PlaceLimitOrderMakerOnly(ctx, req.Symbol, exchange.OrderSide(req.Side), posSide, qty, req.Price, clientOrderID)
+		} else {
+			exchangeID, err = b.orderClient.PlaceLimitOrder(ctx, req.Symbol, exchange.OrderSide(req.Side), posSide, qty, req.Price, clientOrderID)
+		}
 		if err == nil || !isTransientError(err) {
 			break
 		}
 		b.log.Warn("limit order transient error, retrying with same clientOrderID",
 			zap.Int("attempt", attempt+1),
 			zap.String("client_order_id", clientOrderID),
+			zap.Bool("maker_only", useMakerOnly),
 			zap.Error(err))
 		time.Sleep(retryBackoffs[attempt])
 	}

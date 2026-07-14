@@ -13,6 +13,7 @@ import Admin from './pages/Admin'
 import Positions from './pages/Positions'
 import Logs from './pages/Logs'
 import Settings from './pages/Settings'
+import Toasts from './components/Toasts'
 
 // ─── Error Boundary ───────────────────────────────────────────────────────────
 
@@ -86,6 +87,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <BrowserRouter>
+        <Toasts />
         <AuthLogoutListener />
         <Routes>
           <Route path="/login" element={<Login />} />
