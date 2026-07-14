@@ -56,6 +56,10 @@ export const STRATEGY_FIELDS: Record<string, FieldDef[]> = {
     { key: 'StopLossPct', label: '止损', type: 'number', default: 0, unit: '%', pctOf1: true, min: 0, help: '0 = 不设' },
     { key: 'TakeProfitPct', label: '止盈', type: 'number', default: 0, unit: '%', pctOf1: true, min: 0, help: '0 = 不设' },
   ],
+  guardian: [
+    { key: 'StopValue', label: '亏多少就自动平仓', type: 'number', default: 3, unit: '%', step: 0.5, pctOf1: true, min: 0.5, help: '亏到这个幅度就帮你平掉,保住本金。赚了之后它会自动把这条线往上抬,锁住利润。' },
+    { key: 'TPValue', label: '赚多少就落袋', type: 'number', default: 0, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '0 = 不设,让利润继续跑(靠自动上移的止损收尾)' },
+  ],
 }
 
 export function fieldsForStrategy(id: string): FieldDef[] {

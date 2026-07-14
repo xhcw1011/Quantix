@@ -20,6 +20,9 @@ export const STRATEGIES: StrategyMeta[] = [
   { id: 'rebalance', name: '再平衡', desc: '固定比例持仓,定期机械高抛低吸', market: 'spot' },
   { id: 'spottrend', name: '长仓趋势', desc: '均线金叉买入、死叉离场(不做空)', market: 'spot' },
 
+  // ── 帮你守仓(不猜涨跌,只帮你守住已经开的单)──
+  { id: 'guardian', name: '自动守仓', desc: '帮你盯着已开的单:亏到设定就自动平掉,赚了自动把止损往上抬锁住利润,有情况发消息提醒', market: 'futures' },
+
   // ── 合约(降级 · 进阶用户)──
   { id: 'ai', name: '智能网格', desc: '震荡里低买高卖 + 趋势腿(合约)', market: 'futures', advanced: true },
   { id: 'macross', name: '趋势跟随', desc: '均线交叉,追涨杀跌(合约)', market: 'futures', advanced: true },
