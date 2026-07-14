@@ -17,6 +17,7 @@ import (
 	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/exchange"
 	xfactory "github.com/Quantix/quantix/internal/exchange/factory"
+	"github.com/Quantix/quantix/internal/guardian"
 	"github.com/Quantix/quantix/internal/live"
 	"github.com/Quantix/quantix/internal/monitor"
 	"github.com/Quantix/quantix/internal/notify"
@@ -459,6 +460,11 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 
 	// Build notifier: load user's per-user Telegram config from DB, then optionally add email.
 	notifier := m.buildNotifier(context.Background(), userID)
+
+	// Guardian strategies deliver their alerts through the same notifier; wire it in.
+	if gs, ok := strat.(interface{ SetDispatcher(guardian.Dispatcher) }); ok {
+		gs.SetDispatcher(guardian.NewNotifyDispatcher(notifier))
+	}
 
 	if req.Mode == "paper" {
 		// Paper mode — no real order placement.

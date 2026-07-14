@@ -42,6 +42,7 @@ import (
 	"github.com/Quantix/quantix/internal/logger"
 
 	// Strategy side-effect registrations
+	_ "github.com/Quantix/quantix/internal/guardian"
 	_ "github.com/Quantix/quantix/internal/strategy/aistrat"
 	_ "github.com/Quantix/quantix/internal/strategy/aistrat_v4"
 	_ "github.com/Quantix/quantix/internal/strategy/composite"
