@@ -61,7 +61,7 @@ func atrSeries(kl []exchange.Kline, win int) []float64 {
 	return out
 }
 
-func runBacktest(kl []exchange.Kline, n, exitN, atrWin int, stopK, feeFrac, slipFrac float64, timeCap int) []trade {
+func runBacktest(kl []exchange.Kline, n, exitN, atrWin int, stopK, feeFrac, slipFrac float64, timeCap, delay int) []trade {
 	atr := atrSeries(kl, atrWin)
 	var trades []trade
 
@@ -145,25 +145,36 @@ func runBacktest(kl []exchange.Kline, n, exitN, atrWin int, stopK, feeFrac, slip
 		if atr[i] <= 0 {
 			continue
 		}
+		dir := 0
 		if c > hiN {
-			pos, entryPx, entryIdx = 1, c, i
-			stopDist = stopK * atr[i]
-			stopPx = c - stopDist
+			dir = 1
 		} else if c < loN {
-			pos, entryPx, entryIdx = -1, c, i
-			stopDist = stopK * atr[i]
-			stopPx = c + stopDist
+			dir = -1
+		}
+		if dir != 0 {
+			ei := i + delay // realistic-fill: enter `delay` bars after the signal close
+			if ei >= len(kl) {
+				continue
+			}
+			stopDist = stopK * atr[i] // stop sized at the signal bar (known then)
+			entryPx, entryIdx, pos = kl[ei].Close, ei, dir
+			if dir == 1 {
+				stopPx = entryPx - stopDist
+			} else {
+				stopPx = entryPx + stopDist
+			}
+			i = ei // advance loop past the fill bar
 		}
 	}
 	return trades
 }
 
 type stats struct {
-	n            int
-	totalR       float64
-	expectancy   float64
-	winRate      float64
-	pf           float64
+	n          int
+	totalR     float64
+	expectancy float64
+	winRate    float64
+	pf         float64
 }
 
 func summarize(ts []trade) stats {
@@ -207,6 +218,7 @@ func main() {
 	atrWin := flag.Int("atr", 14, "ATR window")
 	stopK := flag.Float64("stopk", 2.0, "trailing stop = stopK * ATR")
 	timeCap := flag.Int("timecap", 300, "max holding bars")
+	delay := flag.Int("delay", 0, "bars to delay entry after signal (execution realism)")
 	fee := flag.Float64("fee", 0.0005, "per-leg fee fraction (taker ~5bp)")
 	slip := flag.Float64("slip", 0.0, "per-leg slippage fraction")
 	from := flag.String("from", "2026-01-21", "start date")
@@ -240,7 +252,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	ts := runBacktest(kl, *n, *exitN, *atrWin, *stopK, *fee, *slip, *timeCap)
+	ts := runBacktest(kl, *n, *exitN, *atrWin, *stopK, *fee, *slip, *timeCap, *delay)
 	fmt.Printf("%s %s  bars=%d  N=%d exitN=%d ATR=%d stopK=%.1f fee=%.4f slip=%.4f\n",
 		*symbol, *interval, len(kl), *n, *exitN, *atrWin, *stopK, *fee, *slip)
 	fmt.Printf("  ALL   %s\n", summarize(ts).line())
@@ -257,4 +269,70 @@ func main() {
 		fmt.Printf("  IS    %s\n", summarize(ins).line())
 		fmt.Printf("  OOS   %s\n", summarize(oos).line())
 	}
+
+	// ─── robustness diagnostics (single-asset honesty checks) ───
+	var longs, shorts []trade
+	for _, t := range ts {
+		if t.side == 1 {
+			longs = append(longs, t)
+		} else {
+			shorts = append(shorts, t)
+		}
+	}
+	fmt.Printf("  LONG  %s\n", summarize(longs).line())
+	fmt.Printf("  SHORT %s\n", summarize(shorts).line())
+
+	// equity curve (cumulative R) max drawdown, in R
+	var cum, peak, maxDD float64
+	for _, t := range ts {
+		cum += t.r
+		if cum > peak {
+			peak = cum
+		}
+		if peak-cum > maxDD {
+			maxDD = peak - cum
+		}
+	}
+	total := summarize(ts).totalR
+
+	// top-K trade concentration: how much of total R comes from the best 5 trades
+	rs := make([]float64, len(ts))
+	for i, t := range ts {
+		rs[i] = t.r
+	}
+	sortDesc(rs)
+	var top5 float64
+	for i := 0; i < 5 && i < len(rs); i++ {
+		top5 += rs[i]
+	}
+	exclTop5 := total - top5
+	nRest := len(ts) - 5
+	restExp := 0.0
+	if nRest > 0 {
+		restExp = exclTop5 / float64(nRest)
+	}
+	fmt.Printf("  ROBUST  maxDD=%.1fR  DD/total=%.2fx  |  top5=%+.1fR (=%.0f%% of total)  |  excl-top5: %+.1fR over %d trades (exp %+.3fR)\n",
+		maxDD, ddRatio(maxDD, total), top5, pct(top5, total), exclTop5, nRest, restExp)
+}
+
+func sortDesc(x []float64) {
+	for i := 1; i < len(x); i++ {
+		for j := i; j > 0 && x[j] > x[j-1]; j-- {
+			x[j], x[j-1] = x[j-1], x[j]
+		}
+	}
+}
+
+func ddRatio(dd, total float64) float64 {
+	if total <= 0 {
+		return math.Inf(1)
+	}
+	return dd / total
+}
+
+func pct(part, total float64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return part / total * 100
 }
