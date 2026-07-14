@@ -59,6 +59,24 @@ func NewSimBroker(feeRate, slippage float64, portfolio *Portfolio, log *zap.Logg
 	}
 }
 
+// openMeta returns the entry-context Meta for an opening fill, augmenting any
+// strategy-supplied Meta with the entry stop price ("entry_stop") so the engine
+// can express MFE/MAE in R multiples. Returns nil when there is nothing to
+// record (no strategy Meta and no stop).
+func openMeta(req strategy.OrderRequest) map[string]float64 {
+	if req.Meta == nil && req.StopLoss == 0 {
+		return nil
+	}
+	m := make(map[string]float64, len(req.Meta)+1)
+	for k, v := range req.Meta {
+		m[k] = v
+	}
+	if req.StopLoss != 0 {
+		m["entry_stop"] = req.StopLoss
+	}
+	return m
+}
+
 // PlaceOrder queues an order for execution on the next bar and returns its ID.
 // Implements strategy.Broker.
 func (b *SimBroker) PlaceOrder(req strategy.OrderRequest) string {
@@ -200,6 +218,8 @@ func (b *SimBroker) executeLong(req strategy.OrderRequest, bar exchange.Kline) (
 			Price:        execPrice,
 			Fee:          fee,
 			Timestamp:    bar.CloseTime,
+			Reason:       req.Reason,
+			Meta:         openMeta(req), // long open: capture entry context + stop
 		}, nil
 
 	case strategy.SideSell:
@@ -222,6 +242,8 @@ func (b *SimBroker) executeLong(req strategy.OrderRequest, bar exchange.Kline) (
 			Price:        execPrice,
 			Fee:          fee,
 			Timestamp:    bar.CloseTime,
+			Reason:       req.Reason,
+			Meta:         req.Meta, // long close
 		}, nil
 	}
 	return strategy.Fill{}, fmt.Errorf("unknown side: %s", req.Side)
@@ -254,6 +276,8 @@ func (b *SimBroker) executeShort(req strategy.OrderRequest, bar exchange.Kline) 
 			Price:        execPrice,
 			Fee:          fee,
 			Timestamp:    bar.CloseTime,
+			Reason:       req.Reason,
+			Meta:         openMeta(req), // short open: capture entry context + stop
 		}, nil
 
 	case strategy.SideBuy:
@@ -275,6 +299,8 @@ func (b *SimBroker) executeShort(req strategy.OrderRequest, bar exchange.Kline) 
 			Price:        execPrice,
 			Fee:          fee,
 			Timestamp:    bar.CloseTime,
+			Reason:       req.Reason,
+			Meta:         req.Meta, // short close (cover)
 		}, nil
 	}
 	return strategy.Fill{}, fmt.Errorf("unknown side: %s", req.Side)
@@ -335,6 +361,7 @@ func (b *SimBroker) checkStops(bar exchange.Kline) []strategy.Fill {
 			Price:        execPrice,
 			Fee:          fee,
 			Timestamp:    bar.CloseTime,
+			Reason:       "stop_loss", // triggered protective stop
 		}
 		fills = append(fills, fill)
 		if trade := b.portfolio.applyFill(fill, bar.CloseTime); trade != nil {

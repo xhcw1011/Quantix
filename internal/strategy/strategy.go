@@ -57,6 +57,16 @@ type OrderRequest struct {
 	// Protective orders auto-placed by the live broker after a fill.
 	StopLoss   float64 // trigger price for stop-loss order (0 = disabled)
 	TakeProfit float64 // trigger price for take-profit order (0 = disabled)
+	// Reason tags why this order was placed. On exits it records the trigger
+	// ("stop_loss", "take_profit", "trailing", "signal_reversal", "time_exit",
+	// …); it is propagated to the resulting Fill and the recorded Trade for
+	// post-trade attribution. Optional; empty when unset.
+	Reason string
+	// Meta carries optional numeric context captured at order time — typically
+	// the entry regime snapshot, e.g. {"adx":18,"atr":0.4,"funding":0.0003,
+	// "regime":1}. It is propagated onto the Fill and, for opening orders, onto
+	// the Trade's EntryMeta for scenario bucketing. Optional; nil when unused.
+	Meta map[string]float64
 }
 
 // Fill is returned after an order is matched by the broker.
@@ -69,6 +79,11 @@ type Fill struct {
 	Price        float64 // actual execution price (after slippage)
 	Fee          float64 // commission deducted
 	Timestamp    time.Time
+	// Reason / Meta are propagated from the originating OrderRequest so the
+	// backtest portfolio (and the live trade_events log) can record why an
+	// order fired and the context it fired in. Optional.
+	Reason string
+	Meta   map[string]float64
 }
 
 // ─────────────────────────────────────────────

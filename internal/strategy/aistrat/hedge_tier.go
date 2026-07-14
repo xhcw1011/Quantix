@@ -210,7 +210,7 @@ func (s *AIStrategy) manageTieredHedge(ctx *strategy.Context, bar exchange.Kline
 			return
 		}
 		hedgeSide := oppositeSide(p.side)
-		if !s.placeCloseOrder(ctx, hedgeSide, qty, true) {
+		if !s.placeCloseOrder(ctx, hedgeSide, qty, true, "hedge_"+closeReason) {
 			s.log.Warn("AI: hedge close failed",
 				zap.String("reason", closeReason), zap.Float64("qty", qty))
 			return
@@ -247,7 +247,7 @@ func (s *AIStrategy) closeHedgeAll(ctx *strategy.Context, p *posState, price flo
 	if qty <= 0 {
 		return
 	}
-	if !s.placeCloseOrder(ctx, hedgeSide, qty, true) {
+	if !s.placeCloseOrder(ctx, hedgeSide, qty, true, "hedge_on_main_close") {
 		s.log.Warn("AI: hedge final close failed",
 			zap.String("hedge_side", hedgeSide), zap.Float64("qty", qty))
 		return

@@ -262,7 +262,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 				zap.String("side", p.side), zap.Float64("entry", g.entryPrice),
 				zap.Float64("tp", g.tp), zap.Float64("price", price),
 				zap.Float64("qty", g.qty), zap.Int("layer", i+1))
-			if !s.placeCloseOrder(ctx, p.side, g.qty, false) {
+			if !s.placeCloseOrder(ctx, p.side, g.qty, false, "grid_layer_tp") {
 				s.log.Warn("AI: grid close order failed", zap.Int("layer", i+1))
 				continue // skip removal, retry next bar
 			}

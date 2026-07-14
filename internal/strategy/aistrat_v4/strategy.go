@@ -130,6 +130,17 @@ func (s *Strategy) placeOpenOrder(ctx *strategy.Context, side string, price, z f
 		PositionSide: posSide,
 		Type:         strategy.OrderMarket,
 		Qty:          qty,
+		// Entry-context snapshot for post-trade attribution. entry_stop lets the
+		// backtest engine express MFE/MAE in R without registering a broker stop
+		// (this strategy manages its own exits). regime is a look-ahead-safe
+		// volatility bucket: 0=low_vol, 1=mid_vol, 2=high_vol.
+		Meta: map[string]float64{
+			"regime":     volRegime(s.highs, s.lows, s.closes),
+			"zscore":     z,
+			"atr":        a,
+			"atr_pct":    a / price * 100,
+			"entry_stop": slPrice,
+		},
 	}
 	id := ctx.PlaceOrder(req)
 	if id == "" {
@@ -176,6 +187,7 @@ func (s *Strategy) placeCloseOrder(ctx *strategy.Context, pos *positionState, pr
 		PositionSide: posSide,
 		Type:         strategy.OrderMarket,
 		Qty:          pos.Qty,
+		Reason:       normalizeExitReason(reason), // sl/tp/time → canonical attribution tags
 	}
 	id := ctx.PlaceOrder(req)
 	if id == "" {
@@ -202,3 +214,43 @@ func (s *Strategy) placeCloseOrder(ctx *strategy.Context, pos *positionState, pr
 // OnFill is called when our orders fill on the exchange. v4 keeps state purely
 // from bar events for MVP.
 func (s *Strategy) OnFill(_ *strategy.Context, _ strategy.Fill) {}
+
+// volRegime classifies the current volatility regime from the ratio of a short
+// (14-bar) ATR to a longer (50-bar) baseline, using only closed bars — no
+// look-ahead. Returns a code for OrderRequest.Meta["regime"]:
+//
+//	0 = low_vol  (contracting, ratio ≤ 0.8)
+//	1 = mid_vol  (normal)
+//	2 = high_vol (expanding, ratio ≥ 1.3)
+//
+// A missing/zero baseline falls back to mid_vol.
+func volRegime(highs, lows, closes []float64) float64 {
+	short := atr(highs, lows, closes, 14)
+	long := atr(highs, lows, closes, 50)
+	if short == 0 || long == 0 {
+		return 1
+	}
+	switch r := short / long; {
+	case r >= 1.3:
+		return 2
+	case r <= 0.8:
+		return 0
+	default:
+		return 1
+	}
+}
+
+// normalizeExitReason maps this strategy's terse exit codes to the canonical
+// attribution vocabulary shared with the backtest broker and analyzer.
+func normalizeExitReason(reason string) string {
+	switch reason {
+	case "sl":
+		return "stop_loss"
+	case "tp":
+		return "take_profit"
+	case "time":
+		return "time_exit"
+	default:
+		return reason
+	}
+}

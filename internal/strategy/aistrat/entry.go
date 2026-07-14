@@ -269,6 +269,8 @@ func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty f
 	}
 	req := strategy.OrderRequest{
 		Symbol: s.cfg.Symbol, Side: orderSide, PositionSide: psSide, Qty: qty,
+		// Entry-context snapshot for post-trade scenario attribution (regime × exit_reason).
+		Meta: map[string]float64{"regime": regimeCode(s.lastRegime), "atr": s.calcATR()},
 	}
 	if useLimit {
 		req.Type = strategy.OrderLimit
@@ -277,9 +279,28 @@ func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty f
 	return ctx.PlaceOrder(req)
 }
 
+// regimeCode maps the aistrat regime enum to a numeric code for OrderRequest.Meta["regime"],
+// so post-trade attribution can bucket trades by the regime at entry.
+//
+//	0=range  1=slow_trend  2=strong_trend  3=expansion  -1=unknown
+func regimeCode(r Regime) float64 {
+	switch r {
+	case RegimeRange:
+		return 0
+	case RegimeSlowTrend:
+		return 1
+	case RegimeStrongTrend:
+		return 2
+	case RegimeExpansion:
+		return 3
+	}
+	return -1
+}
+
 // placeCloseOrder places a close order. Returns true if order was submitted.
-// Uses limit order (maker fee) unless useMarket is true.
-func (s *AIStrategy) placeCloseOrder(ctx *strategy.Context, side string, qty float64, useMarket bool) bool {
+// Uses limit order (maker fee) unless useMarket is true. `reason` tags the exit on
+// the OrderRequest → Trade.exit_reason, for post-trade scenario attribution.
+func (s *AIStrategy) placeCloseOrder(ctx *strategy.Context, side string, qty float64, useMarket bool, reason string) bool {
 	closeSide := strategy.SideSell
 	psSide := strategy.PositionSideLong
 	if side == "SHORT" {
@@ -287,7 +308,7 @@ func (s *AIStrategy) placeCloseOrder(ctx *strategy.Context, side string, qty flo
 		psSide = strategy.PositionSideShort
 	}
 	req := strategy.OrderRequest{
-		Symbol: s.cfg.Symbol, Side: closeSide, PositionSide: psSide, Qty: qty,
+		Symbol: s.cfg.Symbol, Side: closeSide, PositionSide: psSide, Qty: qty, Reason: reason,
 	}
 	if !useMarket {
 		// Close with Maker limit: SELL above current price, BUY below current price.
