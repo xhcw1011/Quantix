@@ -15,6 +15,8 @@ import (
 type Guardian struct {
 	symbol string
 	prot   *Protection
+	cfg    ProtectionConfig // used to arm when adopting
+	adopt  bool             // arm from the live account position on first bar
 	atr    *ATR
 	log    *zap.Logger
 
@@ -42,6 +44,39 @@ func NewGuardian(symbol string, prot *Protection, atrWindow int, log *zap.Logger
 	return &Guardian{symbol: symbol, prot: prot, atr: NewATR(atrWindow), log: log, avgAlpha: alpha}
 }
 
+// NewAdoptGuardian builds a Guardian that arms itself from the live account
+// position on the first bar (for "I already opened on the exchange, guard it").
+func NewAdoptGuardian(symbol string, cfg ProtectionConfig, atrWindow int, log *zap.Logger) *Guardian {
+	g := NewGuardian(symbol, nil, atrWindow, log)
+	g.cfg = cfg
+	g.adopt = true
+	return g
+}
+
+// tryArm initialises Protection from the live account position; returns whether armed.
+func (g *Guardian) tryArm(ctx *strategy.Context, atr float64) bool {
+	if !g.adopt || ctx.Portfolio == nil {
+		return false
+	}
+	qty, avg, ok := ctx.Portfolio.Position(g.symbol)
+	if !ok || qty == 0 || avg <= 0 {
+		return false
+	}
+	if g.cfg.StopMode == StopATR && !g.atr.Ready() {
+		return false // need a valid ATR before an ATR-based stop
+	}
+	side := SideLong
+	if qty < 0 {
+		side = SideShort
+	}
+	g.prot = NewProtection(side, avg, math.Abs(qty), g.cfg, atr)
+	g.log.Info("guardian: adopted position",
+		zap.String("symbol", g.symbol), zap.String("side", side),
+		zap.Float64("entry", avg), zap.Float64("qty", math.Abs(qty)),
+		zap.Float64("stop", g.prot.Stop))
+	return true
+}
+
 // SetAlerts attaches an alert engine and dispatcher. maPeriod>0 enables the MA
 // reference used by MAState (0 = no MA rules). Safe to call once before running.
 func (g *Guardian) SetAlerts(engine *AlertEngine, d Dispatcher) {
@@ -55,6 +90,10 @@ func (g *Guardian) SetMAPeriod(period int) {
 		g.sma = NewSMA(period)
 	}
 }
+
+// SetDispatcher injects the live alert dispatcher (the engine layer wires the
+// notifier here after constructing the strategy from the registry).
+func (g *Guardian) SetDispatcher(d Dispatcher) { g.dispatch = d }
 
 // Name identifies the strategy type.
 func (g *Guardian) Name() string { return "guardian" }
@@ -76,8 +115,13 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	g.prevClose = bar.Close
 	g.lastPrice = bar.Close
-	g.barsHeld++
 
+	if g.prot == nil {
+		if !g.tryArm(ctx, atr) {
+			return
+		}
+	}
+	g.barsHeld++
 	g.evalAlerts(bar.Close)
 
 	// Exit check first, using the stop as it stood during the bar.
@@ -90,7 +134,7 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 
 // OnTick enforces the stop/TP precisely between bars and trails on favourable ticks.
 func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
-	if g.inactive() {
+	if g.inactive() || g.prot == nil {
 		return
 	}
 	g.lastPrice = price
@@ -157,6 +201,9 @@ func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
 
 // Status exposes live state for the operator dashboard.
 func (g *Guardian) Status() map[string]any {
+	if g.prot == nil {
+		return map[string]any{"state": "arming", "symbol": g.symbol}
+	}
 	state := "watching"
 	if g.done {
 		state = "closed"
