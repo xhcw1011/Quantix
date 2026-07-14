@@ -93,17 +93,18 @@ func parseGuardianConfig(p map[string]any) (guardianConfig, error) {
 		ATRWindow: intOr(p, "ATRWindow", 14),
 		MAPeriod:  intOr(p, "MAPeriod", 0),
 		Prot: ProtectionConfig{
-			StopMode:     parseStopMode(strOr(p, "StopMode", "atr")),
-			StopValue:    floatOr(p, "StopValue", 2),
+			// Plain-percentage defaults (intuitive for non-technical users); ATR
+			// mode stays available to API callers via StopMode="atr".
+			StopMode:     parseStopMode(strOr(p, "StopMode", "pct")),
+			StopValue:    floatOr(p, "StopValue", 0.03),
 			TrailEnabled: boolOr(p, "TrailEnabled", true),
 			ActivateR:    floatOr(p, "ActivateR", 1),
-			TrailMode:    parseTrailMode(strOr(p, "TrailMode", "atr")),
-			TrailValue:   floatOr(p, "TrailValue", 2),
-			TPMode:       parseTPMode(strOr(p, "TPMode", "none")),
-			TPValue:      floatOr(p, "TPValue", 0),
+			TrailMode:    parseTrailMode(strOr(p, "TrailMode", "r")),
+			TrailValue:   floatOr(p, "TrailValue", 1),
 		},
-		AlertMilestoneStep: floatOr(p, "AlertProfitMilestone", 0),
-		AlertStopProxR:     floatOr(p, "AlertStopProximityR", 0),
+		// Sensible alerts on by default; user need not configure them.
+		AlertMilestoneStep: floatOr(p, "AlertProfitMilestone", 1),
+		AlertStopProxR:     floatOr(p, "AlertStopProximityR", 0.3),
 		AlertStagBars:      intOr(p, "AlertStagnationBars", 0),
 		AlertStagBandR:     floatOr(p, "AlertStagnationBandR", 0),
 		AlertVolSpikeMult:  floatOr(p, "AlertVolSpikeMult", 0),
@@ -111,6 +112,16 @@ func parseGuardianConfig(p map[string]any) (guardianConfig, error) {
 	gc.Symbol = strOr(p, "Symbol", "")
 	if gc.Symbol == "" {
 		return gc, fmt.Errorf("guardian: Symbol is required")
+	}
+	// Take-profit: the UI sends only a value; a positive value means percent-of-
+	// entry unless an explicit mode is given, and 0 (or missing) means "no target".
+	gc.Prot.TPValue = floatOr(p, "TPValue", 0)
+	gc.Prot.TPMode = parseTPMode(strOr(p, "TPMode", ""))
+	if gc.Prot.TPValue > 0 && gc.Prot.TPMode == TPNone {
+		gc.Prot.TPMode = TPPct
+	}
+	if gc.Prot.TPValue <= 0 {
+		gc.Prot.TPMode = TPNone
 	}
 	for _, v := range sliceOr(p, "AlertLevels") {
 		if f, ok := asFloat(v); ok {

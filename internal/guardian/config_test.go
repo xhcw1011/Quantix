@@ -15,11 +15,17 @@ func TestParseConfig_Defaults(t *testing.T) {
 	if gc.Symbol != "ETHUSDT" || !gc.Adopt {
 		t.Fatalf("symbol/adopt defaults wrong: %+v", gc)
 	}
-	if gc.Prot.StopMode != StopATR || gc.Prot.StopValue != 2 {
-		t.Fatalf("default stop should be ATR k=2, got %+v", gc.Prot)
+	if gc.Prot.StopMode != StopPct || gc.Prot.StopValue != 0.03 {
+		t.Fatalf("default stop should be plain 3%%, got %+v", gc.Prot)
 	}
-	if !gc.Prot.TrailEnabled || gc.Prot.ActivateR != 1 || gc.Prot.TrailMode != TrailATR {
+	if !gc.Prot.TrailEnabled || gc.Prot.ActivateR != 1 || gc.Prot.TrailMode != TrailR {
 		t.Fatalf("default trail wrong: %+v", gc.Prot)
+	}
+	if gc.Prot.TPMode != TPNone {
+		t.Fatalf("default TP should be off, got %v", gc.Prot.TPMode)
+	}
+	if gc.AlertMilestoneStep != 1 || gc.AlertStopProxR != 0.3 {
+		t.Fatalf("default alerts should be on: %+v", gc)
 	}
 	if gc.ATRWindow != 14 {
 		t.Fatalf("default ATRWindow = %d", gc.ATRWindow)
