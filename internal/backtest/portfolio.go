@@ -37,6 +37,24 @@ type Trade struct {
 	Fee          float64
 	NetPnL       float64
 	PnLPct       float64
+
+	// ── Post-trade attribution (populated by the broker / engine) ──
+	// ExitReason is why the position closed, sourced from the closing Fill's
+	// Reason: "stop_loss", "take_profit", "trailing", "signal", "reversal",
+	// "time_exit", "backtest_end", … Empty when the strategy did not tag it.
+	ExitReason string
+	// MFEPct / MAEPct: maximum favourable / adverse excursion over the life of
+	// the trade, as a percent of entry price. MFE is signed in the trade's
+	// favour (≥ 0); MAE is signed against it (≤ 0).
+	MFEPct float64
+	MAEPct float64
+	// MFER / MAER: the same excursions in R multiples (relative to the entry
+	// stop distance). Zero when no entry stop was recorded.
+	MFER float64
+	MAER float64
+	// EntryMeta is the entry-context snapshot captured on the opening order
+	// (e.g. adx/atr/funding/regime) for scenario bucketing. Nil when unset.
+	EntryMeta map[string]float64
 }
 
 // EquityPoint records portfolio value at a point in time.
@@ -91,6 +109,22 @@ func (p *Portfolio) Position(symbol string) (qty, avgPrice float64, ok bool) {
 		return 0, 0, false
 	}
 	return pos.Qty, pos.AvgPrice, true
+}
+
+// OpenQty returns the currently-open quantity for the given symbol and side.
+// PositionSideShort inspects short positions; anything else inspects long.
+// Used by the engine to distinguish a full close from a partial/staged exit.
+func (p *Portfolio) OpenQty(symbol string, posSide strategy.PositionSide) float64 {
+	if posSide == strategy.PositionSideShort {
+		if pos, ok := p.shortPositions[symbol]; ok {
+			return pos.Qty
+		}
+		return 0
+	}
+	if pos, ok := p.longPositions[symbol]; ok {
+		return pos.Qty
+	}
+	return 0
 }
 
 // Equity returns total portfolio value: cash + LONG market value + SHORT
@@ -178,6 +212,7 @@ func (p *Portfolio) applyLongFill(fill strategy.Fill, barTime time.Time) *Trade 
 			Fee:          fill.Fee,
 			NetPnL:       gross - fill.Fee,
 			PnLPct:       pnlPct,
+			ExitReason:   fill.Reason,
 		}
 
 		pos.Qty -= fill.Qty
@@ -237,6 +272,7 @@ func (p *Portfolio) applyShortFill(fill strategy.Fill, barTime time.Time) *Trade
 			Fee:          fill.Fee,
 			NetPnL:       gross - fill.Fee,
 			PnLPct:       pnlPct,
+			ExitReason:   fill.Reason,
 		}
 
 		pos.Qty -= fill.Qty

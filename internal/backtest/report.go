@@ -90,9 +90,16 @@ func WriteTradesCSV(r Report, path string) error {
 		"symbol", "side", "entry_time", "exit_time",
 		"entry_price", "exit_price", "qty",
 		"gross_pnl", "fee", "net_pnl", "pnl_pct",
+		"exit_reason", "mfe_pct", "mae_pct", "mfe_r", "mae_r", "entry_meta",
 	})
 
 	for _, t := range r.Trades {
+		entryMeta := ""
+		if len(t.EntryMeta) > 0 {
+			if b, err := json.Marshal(t.EntryMeta); err == nil {
+				entryMeta = string(b)
+			}
+		}
 		cw.Write([]string{ //nolint:errcheck
 			t.Symbol,
 			string(t.Side),
@@ -105,6 +112,12 @@ func WriteTradesCSV(r Report, path string) error {
 			strconv.FormatFloat(t.Fee, 'f', 4, 64),
 			strconv.FormatFloat(t.NetPnL, 'f', 4, 64),
 			strconv.FormatFloat(t.PnLPct, 'f', 4, 64),
+			t.ExitReason,
+			strconv.FormatFloat(t.MFEPct, 'f', 4, 64),
+			strconv.FormatFloat(t.MAEPct, 'f', 4, 64),
+			strconv.FormatFloat(t.MFER, 'f', 4, 64),
+			strconv.FormatFloat(t.MAER, 'f', 4, 64),
+			entryMeta,
 		})
 	}
 	cw.Flush()
