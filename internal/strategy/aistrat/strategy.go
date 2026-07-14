@@ -38,54 +38,55 @@ type AIStrategy struct {
 
 	barsByInterval map[string][]exchange.Kline // key = interval ("1m","5m","15m")
 	warmedUp       bool
-	liveReady      bool // true after first real-time primary bar (skip backfill GPT calls)
+	liveReady      bool      // true after first real-time primary bar (skip backfill GPT calls)
 	backtest       bool      // set from ctx.Extra["backtest"]; drives the sim clock + bypasses the real-time bar guard
 	simClock       time.Time // bar.CloseTime of the bar currently being processed (only read when backtest)
-	barCount       int  // primary interval bar count
+	barCount       int       // primary interval bar count
 	lastCallBar    int
 	totalCall      int
 
 	longPos  *posState
 	shortPos *posState
-	syncer    *position.Syncer          // Redis-backed, set at warmup from ctx.Extra
-	stagedEP  strategy.StagedExitPlacer // cached from ctx.Extra on first use
-	rdb       *redis.Client             // for signal caching
-	store     *data.Store               // for trade event logging
+	syncer   *position.Syncer          // Redis-backed, set at warmup from ctx.Extra
+	stagedEP strategy.StagedExitPlacer // cached from ctx.Extra on first use
+	rdb      *redis.Client             // for signal caching
+	store    *data.Store               // for trade event logging
 	userID   int
 	engineID string
 
-	dayStart       time.Time
-	dayStartEquity float64
-	consecLoss     int
-	dayHalted      bool
-	stopBar        int // bar index when last stop-loss fired — skip opening same bar
-	expansionBar   int // bar index when last EXPANSION detected — cooldown before entry
-	lastMTFScore    int     // multi-timeframe score from latest signal check
-	mtfLongScale    float64 // position size multiplier for LONG (0.7-1.0)
-	mtfShortScale   float64 // position size multiplier for SHORT (0.7-1.0)
-	lastHedgeClose  time.Time // when the last hedge position was closed (for cooldown)
-	lastConf        float64   // confidence of the signal that triggered current entry
-	lastRegime      Regime    // current detected regime (updated every signal check)
-	lastHourlyDir   int       // 1h EMA trend direction (sticky, used by entry filter): +1 bull, -1 bear, 0 neutral
-	hourlyDirCooldown int     // hysteresis cooldown (primary bars) for lastHourlyDir; see stickyHourlyDir
-	trendScore         float64 // signed 5m trend-accumulation score; see trendscore.go
-	trendEntryCooldown int     // primary bars remaining before another trend-score entry
-	lastBBMiddle    float64   // BB middle band from last reversion signal (for TP)
-	lastBBLower     float64   // BB lower band (for grid SL)
-	lastBBUpper     float64   // BB upper band (for grid SL)
-	cachedHourlyLong  hourlyMode // cached 1h mode for LONG positions
-	cachedHourlyShort hourlyMode // cached 1h mode for SHORT positions
-	hourlyModeBars    int        // 15m bar count when cache was last updated
-	lastTrendDir    int       // +1 = bullish, -1 = bearish, 0 = neutral (from detectRegime)
-	lastSLReplace   time.Time // throttle ReplaceSLOrder calls (max 1 per 3s)
+	dayStart           time.Time
+	dayStartEquity     float64
+	consecLoss         int
+	dayHalted          bool
+	stopBar            int        // bar index when last stop-loss fired — skip opening same bar
+	expansionBar       int        // bar index when last EXPANSION detected — cooldown before entry
+	lastMTFScore       int        // multi-timeframe score from latest signal check
+	mtfLongScale       float64    // position size multiplier for LONG (0.7-1.0)
+	mtfShortScale      float64    // position size multiplier for SHORT (0.7-1.0)
+	lastHedgeClose     time.Time  // when the last hedge position was closed (for cooldown)
+	lastConf           float64    // confidence of the signal that triggered current entry
+	lastRegime         Regime     // current detected regime (updated every signal check)
+	lastHourlyDir      int        // 1h EMA trend direction (sticky, used by entry filter): +1 bull, -1 bear, 0 neutral
+	hourlyDirCooldown  int        // hysteresis cooldown (primary bars) for lastHourlyDir; see stickyHourlyDir
+	trendScore         float64    // signed 5m trend-accumulation score; see trendscore.go
+	trendEntryCooldown int        // primary bars remaining before another trend-score entry
+	lastBBMiddle       float64    // BB middle band from last reversion signal (for TP)
+	lastBBLower        float64    // BB lower band (for grid SL)
+	lastBBUpper        float64    // BB upper band (for grid SL)
+	cachedHourlyLong   hourlyMode // cached 1h mode for LONG positions
+	cachedHourlyShort  hourlyMode // cached 1h mode for SHORT positions
+	hourlyModeBars     int        // 15m bar count when cache was last updated
+	lastTrendDir       int        // +1 = bullish, -1 = bearish, 0 = neutral (from detectRegime)
+	lastSLReplace      time.Time  // throttle ReplaceSLOrder calls (max 1 per 3s)
 	// Signal accumulation: tracks rolling GPT confidence across bars
-	accumLong       float64   // accumulated long signal strength (decays each bar)
-	accumShort      float64   // accumulated short signal strength (decays each bar)
-	replaySignals   []gptSignal // cached signals for backtest replay
-	replayIdx       int         // current index into replaySignals
+	accumLong     float64     // accumulated long signal strength (decays each bar)
+	accumShort    float64     // accumulated short signal strength (decays each bar)
+	replaySignals []gptSignal // cached signals for backtest replay
+	replayIdx     int         // current index into replaySignals
 
 	lastCloseFailAt time.Time // throttle close retries after failure (prevent tick-level spam)
 	lastTickPrice   float64   // most recent tick price seen (for accurate maker offset on close orders)
+	lastPrice       float64   // most recent primary bar close (live+backtest); used to unwind hedge on any close path
 
 	// Post-SL immediate reversal: set by tickManage when SL fires on tick data.
 	// Cleared on next OnBar when the urgent GPT check runs.
@@ -254,7 +255,9 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 // OnTick receives real-time price for precise TP/SL management.
 // Implements strategy.TickReceiver.
 func (s *AIStrategy) OnTick(ctx *strategy.Context, price float64) {
-	if !s.warmedUp { return }
+	if !s.warmedUp {
+		return
+	}
 	if price > 0 {
 		s.lastTickPrice = price
 	}
@@ -268,8 +271,12 @@ func (s *AIStrategy) OnTick(ctx *strategy.Context, price float64) {
 
 // throttledReplaceSL calls ReplaceSLOrder at most once per 3 seconds to avoid API rate limits.
 func (s *AIStrategy) throttledReplaceSL(symbol, posSide, closeSide string, qty, stopPrice float64) {
-	if s.stagedEP == nil { return }
-	if time.Since(s.lastSLReplace) < 3*time.Second { return }
+	if s.stagedEP == nil {
+		return
+	}
+	if time.Since(s.lastSLReplace) < 3*time.Second {
+		return
+	}
 	s.stagedEP.ReplaceSLOrder(symbol, posSide, closeSide, qty, stopPrice)
 	s.lastSLReplace = time.Now()
 }
@@ -281,7 +288,9 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 	}
 
 	// ── 0. Skip tick-level management during minimum hold period ──
-	if p.barsHeld < s.cfg.MinHoldBars { return }
+	if p.barsHeld < s.cfg.MinHoldBars {
+		return
+	}
 
 	// ── Range/grid mode: only check TP on tick (no SL, no trailing) ──
 	if p.mode == modeRange {
@@ -300,7 +309,9 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 	// Only after MinHoldBars so the position is always protected.
 	if p.safetyNetSL && s.stagedEP != nil {
 		posSide := "LONG"
-		if p.side == "SHORT" { posSide = "SHORT" }
+		if p.side == "SHORT" {
+			posSide = "SHORT"
+		}
 		s.stagedEP.CancelExchangeSL(s.cfg.Symbol, posSide)
 		p.safetyNetSL = false
 		s.log.Info("AI: safety-net SL cancelled — local trailing active",
@@ -323,14 +334,24 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 	}
 
 	// ── 2. Real-time peak update ──
-	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price; p.lastPeakAt = time.Now() }
-	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price; p.lastPeakAt = time.Now() }
+	if p.side == "LONG" && price > p.peakPrice {
+		p.peakPrice = price
+		p.lastPeakAt = time.Now()
+	}
+	if p.side == "SHORT" && price < p.peakPrice {
+		p.peakPrice = price
+		p.lastPeakAt = time.Now()
+	}
 
 	// ── 3. Real-time trailing calculation + check ──
 	if p.R > 0 {
 		pnlR := 0.0
-		if p.side == "LONG" { pnlR = (price - p.entryPrice) / p.R }
-		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
+		if p.side == "LONG" {
+			pnlR = (price - p.entryPrice) / p.R
+		}
+		if p.side == "SHORT" {
+			pnlR = (p.entryPrice - price) / p.R
+		}
 
 		// ── 1h mode-based trailing ──
 		liveATR := s.calcATR()
@@ -362,10 +383,14 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 				var newTrail float64
 				if p.side == "LONG" {
 					newTrail = p.peakPrice - trailDist
-					if newTrail < floor { newTrail = floor }
+					if newTrail < floor {
+						newTrail = floor
+					}
 				} else {
 					newTrail = p.peakPrice + trailDist
-					if newTrail > floor { newTrail = floor }
+					if newTrail > floor {
+						newTrail = floor
+					}
 				}
 				newTrail = math.Round(newTrail*100) / 100
 				// Tier upgrade: allow trailing to widen (reset ratchet for this transition).
@@ -376,8 +401,12 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 				}
 				p.trailTier = tier
 				// Normal ratchet: only tighten within the same tier.
-				if p.side == "LONG" && newTrail > p.trailing { p.trailing = newTrail }
-				if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) { p.trailing = newTrail }
+				if p.side == "LONG" && newTrail > p.trailing {
+					p.trailing = newTrail
+				}
+				if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
+					p.trailing = newTrail
+				}
 			}
 
 		case hourlyExitMode:
@@ -388,27 +417,43 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 				s.log.Warn("TICK: stale peak exit — 45m no new high/low in EXIT_MODE",
 					zap.String("side", p.side), zap.Float64("pnlR", pnlR))
 				s.closePos(ctx, p, pptr, "stale_peak_exit")
-				if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
+				if pnlR > 0 {
+					s.consecLoss = 0
+				} else {
+					s.consecLoss++
+				}
 				return
 			}
 			trailDist := atr * 1.0
 			floor := p.stopLoss
 			if pnlR >= 0.3 {
 				lockR := math.Max(pnlR*0.5, 0.02)
-				if p.side == "LONG" { floor = p.entryPrice + lockR*p.R }
-				if p.side == "SHORT" { floor = p.entryPrice - lockR*p.R }
+				if p.side == "LONG" {
+					floor = p.entryPrice + lockR*p.R
+				}
+				if p.side == "SHORT" {
+					floor = p.entryPrice - lockR*p.R
+				}
 			}
 			var newTrail float64
 			if p.side == "LONG" {
 				newTrail = p.peakPrice - trailDist
-				if newTrail < floor { newTrail = floor }
+				if newTrail < floor {
+					newTrail = floor
+				}
 			} else {
 				newTrail = p.peakPrice + trailDist
-				if newTrail > floor { newTrail = floor }
+				if newTrail > floor {
+					newTrail = floor
+				}
 			}
 			newTrail = math.Round(newTrail*100) / 100
-			if p.side == "LONG" && newTrail > p.trailing { p.trailing = newTrail }
-			if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) { p.trailing = newTrail }
+			if p.side == "LONG" && newTrail > p.trailing {
+				p.trailing = newTrail
+			}
+			if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
+				p.trailing = newTrail
+			}
 
 		default: // hourlyTrendWeak — medium trailing, profit < 1 ATR → skip trailing
 			if pnlR > 0 && math.Abs(price-p.entryPrice) < atr {
@@ -419,26 +464,41 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 			if s.cfg.BreakevenR > 0 && p.R > 0 {
 				lockR := 0.0
 				switch {
-				case pnlR >= 0.8: lockR = 0.4
-				case pnlR >= 0.5: lockR = 0.2
-				case pnlR >= 0.3: lockR = 0.02
+				case pnlR >= 0.8:
+					lockR = 0.4
+				case pnlR >= 0.5:
+					lockR = 0.2
+				case pnlR >= 0.3:
+					lockR = 0.02
 				}
 				if lockR > 0 {
-					if p.side == "LONG" { floor = p.entryPrice + lockR*p.R }
-					if p.side == "SHORT" { floor = p.entryPrice - lockR*p.R }
+					if p.side == "LONG" {
+						floor = p.entryPrice + lockR*p.R
+					}
+					if p.side == "SHORT" {
+						floor = p.entryPrice - lockR*p.R
+					}
 				}
 			}
 			var newTrail float64
 			if p.side == "LONG" {
 				newTrail = p.peakPrice - trailDist
-				if newTrail < floor { newTrail = floor }
+				if newTrail < floor {
+					newTrail = floor
+				}
 			} else {
 				newTrail = p.peakPrice + trailDist
-				if newTrail > floor { newTrail = floor }
+				if newTrail > floor {
+					newTrail = floor
+				}
 			}
 			newTrail = math.Round(newTrail*100) / 100
-			if p.side == "LONG" && newTrail > p.trailing { p.trailing = newTrail }
-			if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) { p.trailing = newTrail }
+			if p.side == "LONG" && newTrail > p.trailing {
+				p.trailing = newTrail
+			}
+			if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
+				p.trailing = newTrail
+			}
 		}
 
 		// ── Time-based exit: close if held > 3h and NOT in strong trend ──
@@ -447,7 +507,11 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 				zap.String("side", p.side), zap.Float64("pnlR", pnlR),
 				zap.Duration("held", time.Since(p.filledAt)))
 			s.closePos(ctx, p, pptr, "time_exit")
-			if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
+			if pnlR > 0 {
+				s.consecLoss = 0
+			} else {
+				s.consecLoss++
+			}
 			return
 		}
 
@@ -502,13 +566,18 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 // The GPT call runs in a goroutine to avoid blocking tick processing.
 // Results are consumed by processEmergencyResult on the next tick.
 func (s *AIStrategy) emergencyReversalCheck(ctx *strategy.Context, price float64, p *posState) {
-	if s.emergencyActive.Load() { return }
+	if s.emergencyActive.Load() {
+		return
+	}
 	s.lastEmergencyAt = time.Now()
 	s.emergencyActive.Store(true)
 
 	side := p.side
 	bars := s.primaryBars()
-	if len(bars) == 0 { s.emergencyActive.Store(false); return }
+	if len(bars) == 0 {
+		s.emergencyActive.Store(false)
+		return
+	}
 
 	// Build context in the main goroutine (reads strategy state safely).
 	lastBar := bars[len(bars)-1]
@@ -541,9 +610,11 @@ func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice 
 		var p *posState
 		var pptr **posState
 		if result.side == "LONG" && s.longPos != nil && s.longPos.filled {
-			p = s.longPos; pptr = &s.longPos
+			p = s.longPos
+			pptr = &s.longPos
 		} else if result.side == "SHORT" && s.shortPos != nil && s.shortPos.filled {
-			p = s.shortPos; pptr = &s.shortPos
+			p = s.shortPos
+			pptr = &s.shortPos
 		}
 		if p == nil {
 			s.log.Info("TICK: emergency result arrived but position already closed")
@@ -552,11 +623,19 @@ func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice 
 
 		signal := result.signal
 		reverseConf := 0.0
-		if p.side == "LONG" && signal.Short != nil { reverseConf = signal.Short.Confidence }
-		if p.side == "SHORT" && signal.Long != nil { reverseConf = signal.Long.Confidence }
+		if p.side == "LONG" && signal.Short != nil {
+			reverseConf = signal.Short.Confidence
+		}
+		if p.side == "SHORT" && signal.Long != nil {
+			reverseConf = signal.Long.Confidence
+		}
 		if signal.Action != "" {
-			if p.side == "LONG" && signal.Action == "SELL" { reverseConf = signal.Confidence }
-			if p.side == "SHORT" && signal.Action == "BUY" { reverseConf = signal.Confidence }
+			if p.side == "LONG" && signal.Action == "SELL" {
+				reverseConf = signal.Confidence
+			}
+			if p.side == "SHORT" && signal.Action == "BUY" {
+				reverseConf = signal.Confidence
+			}
 		}
 
 		s.log.Info("TICK: emergency result received",
@@ -566,7 +645,9 @@ func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice 
 		// Emergency threshold = ReversalConf (same bar, not easier).
 		// Previously was ReversalConf-0.07 which made it too easy to trigger (0.53).
 		emergencyThreshold := s.cfg.ReversalConf
-		if emergencyThreshold < 0.65 { emergencyThreshold = 0.65 }
+		if emergencyThreshold < 0.65 {
+			emergencyThreshold = 0.65
+		}
 
 		if reverseConf >= emergencyThreshold {
 			closedSide := p.side
@@ -599,11 +680,17 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 	}
 
 	pos.remainQty -= fill.Qty
-	if pos.remainQty < 1e-10 { pos.remainQty = 0 }
+	if pos.remainQty < 1e-10 {
+		pos.remainQty = 0
+	}
 
 	pnl := 0.0
-	if pos.side == "LONG" { pnl = (fill.Price - pos.entryPrice) * fill.Qty }
-	if pos.side == "SHORT" { pnl = (pos.entryPrice - fill.Price) * fill.Qty }
+	if pos.side == "LONG" {
+		pnl = (fill.Price - pos.entryPrice) * fill.Qty
+	}
+	if pos.side == "SHORT" {
+		pnl = (pos.entryPrice - fill.Price) * fill.Qty
+	}
 
 	s.log.Info("AI: staged TP fill",
 		zap.String("side", pos.side),
@@ -622,7 +709,9 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 			zap.String("side", pos.side))
 		if s.stagedEP != nil {
 			posSide := "LONG"
-			if pos.side == "SHORT" { posSide = "SHORT" }
+			if pos.side == "SHORT" {
+				posSide = "SHORT"
+			}
 			s.stagedEP.CancelAllProtective(s.cfg.Symbol, posSide)
 		}
 		s.consecLoss = 0
@@ -653,7 +742,9 @@ func (s *AIStrategy) markTPFilled(pos *posState, fillPrice, fillQty float64) {
 	bestIdx := -1
 	bestDist := math.MaxFloat64
 	for i := range pos.stagedTPs {
-		if pos.stagedTPs[i].Status != "pending" { continue }
+		if pos.stagedTPs[i].Status != "pending" {
+			continue
+		}
 		dist := math.Abs(pos.stagedTPs[i].Price - fillPrice)
 		if dist < bestDist {
 			bestDist = dist
@@ -669,4 +760,3 @@ func (s *AIStrategy) markTPFilled(pos *posState, fillPrice, fillQty float64) {
 	}
 	s.saveStagedTPsToRedis(pos)
 }
-

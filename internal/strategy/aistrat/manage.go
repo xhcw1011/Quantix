@@ -37,15 +37,23 @@ func trendCutTriggered(side string, pnlR, trendCutR float64, hourlyDir int) bool
 
 func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
 	price := bar.Close
-	iv := bar.Interval; if iv == "" { iv = s.cfg.PrimaryInterval }
+	s.lastPrice = price // latest close (live+backtest); used to unwind hedge on any close path
+	iv := bar.Interval
+	if iv == "" {
+		iv = s.cfg.PrimaryInterval
+	}
 	isPrimary := iv == s.cfg.PrimaryInterval
-	if isPrimary { p.barsHeld++ }
+	if isPrimary {
+		p.barsHeld++
+	}
 
 	// Limit order pending (check on primary bars only)
 	if !p.filled {
 		if isPrimary && s.barCount-p.limitBar > s.cfg.LimitTimeoutBars {
 			s.log.Warn("AI: limit timeout — cancelling", zap.String("side", p.side), zap.String("id", p.orderID))
-			if p.orderID != "" { ctx.CancelOrder(p.orderID) }
+			if p.orderID != "" {
+				ctx.CancelOrder(p.orderID)
+			}
 			if p.filled {
 				s.log.Info("AI: limit order partially/fully filled before cancel, keeping position")
 				return
@@ -58,8 +66,12 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	}
 
 	// Update peak
-	if p.side == "LONG" && price > p.peakPrice { p.peakPrice = price }
-	if p.side == "SHORT" && price < p.peakPrice { p.peakPrice = price }
+	if p.side == "LONG" && price > p.peakPrice {
+		p.peakPrice = price
+	}
+	if p.side == "SHORT" && price < p.peakPrice {
+		p.peakPrice = price
+	}
 
 	// ── Catastrophic stop (ALL modes incl range/grid/hedge) ──
 	// Range/grid/hedge positions have no normal SL (they ride the range), but must
@@ -98,7 +110,9 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	// wrong-direction trades are cut. Enabled per-engine via TrendCutR (0 = off).
 	if p.filled && p.R > 0 && p.mode == modeRange && s.cfg.TrendCutR < 0 {
 		pnlR := (price - p.entryPrice) / p.R
-		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
+		if p.side == "SHORT" {
+			pnlR = (p.entryPrice - price) / p.R
+		}
 		dir := s.hourlyTrendDir()
 		if trendCutTriggered(p.side, pnlR, s.cfg.TrendCutR, dir) {
 			s.log.Warn("TREND CUT — reversion thesis broken, cutting on confirmed adverse trend",
@@ -132,7 +146,9 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 		}
 	}
 
-	if p.barsHeld < s.cfg.MinHoldBars { return } // minimum hold
+	if p.barsHeld < s.cfg.MinHoldBars {
+		return
+	} // minimum hold
 
 	// Range/grid positions: check TP + manage grid layers (no trailing)
 	if p.mode == modeRange {
@@ -141,7 +157,6 @@ func (s *AIStrategy) managePos(ctx *strategy.Context, bar exchange.Kline, p *pos
 	}
 	s.manageTrend(ctx, bar, p, pptr)
 }
-
 
 // manageRange handles Range/grid positions: fixed TP at BB middle, grid layers on drawdown.
 // No SL — grid rides the range. Risk managed by small qty per layer + max layers cap + regime exit.
@@ -176,11 +191,26 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 		}
 	}
 
+	// ── feat/aistrat-hedge additive hooks (all default OFF → zero behavior change) ──
+	// Run before the base TP check. The first two may close the position (return early);
+	// the tiered hedge only adds/manages opposite-side delta and never closes the main.
+	if s.manageGridTrail(ctx, bar, p, pptr) {
+		return
+	}
+	if s.manageGridRegimeExit(ctx, bar, p, pptr) {
+		return
+	}
+	s.manageTieredHedge(ctx, bar, p)
+
 	// ── Base position TP check ──
 	if p.takeProfit > 0 {
 		tpHit := false
-		if p.side == "LONG" && price >= p.takeProfit { tpHit = true }
-		if p.side == "SHORT" && price <= p.takeProfit { tpHit = true }
+		if p.side == "LONG" && price >= p.takeProfit {
+			tpHit = true
+		}
+		if p.side == "SHORT" && price <= p.takeProfit {
+			tpHit = true
+		}
 		if tpHit {
 			s.log.Info("AI: GRID TP hit",
 				zap.String("side", p.side), zap.Float64("entry", p.entryPrice),
@@ -196,7 +226,9 @@ func (s *AIStrategy) manageRange(ctx *strategy.Context, bar exchange.Kline, p *p
 }
 
 func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
-	if s.cfg.GridMaxLayers <= 0 { return }
+	if s.cfg.GridMaxLayers <= 0 {
+		return
+	}
 	price := bar.Close
 
 	// 1. Check existing grid orders for TP or fill
@@ -218,8 +250,12 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 
 		// Filled grid order — check TP
 		gridProfit := false
-		if p.side == "LONG" && price >= g.tp { gridProfit = true }
-		if p.side == "SHORT" && price <= g.tp { gridProfit = true }
+		if p.side == "LONG" && price >= g.tp {
+			gridProfit = true
+		}
+		if p.side == "SHORT" && price <= g.tp {
+			gridProfit = true
+		}
 
 		if gridProfit {
 			s.log.Info("AI: grid TP hit",
@@ -237,9 +273,15 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	}
 
 	// 2. Open new grid order if price moved far enough from last level
-	if len(p.gridOrders) >= s.cfg.GridMaxLayers { return }
-	if !p.filled { return } // base must be filled first
-	if s.cfg.ForceTrend { return }
+	if len(p.gridOrders) >= s.cfg.GridMaxLayers {
+		return
+	}
+	if !p.filled {
+		return
+	} // base must be filled first
+	if s.cfg.ForceTrend {
+		return
+	}
 
 	// Dynamic grid spacing: compute FRESH BB each bar (not stale lastBB values).
 	// Floor at configured GridSpacingPct to prevent layers from stacking in tight
@@ -253,7 +295,9 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 		if len(bb.Upper) > 0 && len(bb.Lower) > 0 {
 			bbWidth := bb.Upper[len(bb.Upper)-1] - bb.Lower[len(bb.Lower)-1]
 			dynamicSpacing := bbWidth / float64(s.cfg.GridMaxLayers+1)
-			if dynamicSpacing > fixedSpacing { spacing = dynamicSpacing }
+			if dynamicSpacing > fixedSpacing {
+				spacing = dynamicSpacing
+			}
 		}
 	}
 
@@ -273,26 +317,38 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 		gridEntry = math.Round(price*100) / 100
 		// Grid layer TP: base position's TP (BB middle), not fixed percentage
 		gridTP = p.takeProfit
-		if gridTP <= gridEntry { gridTP = math.Round((gridEntry+spacing)*100) / 100 }
+		if gridTP <= gridEntry {
+			gridTP = math.Round((gridEntry+spacing)*100) / 100
+		}
 		shouldAdd = true
 	}
 	if p.side == "SHORT" && price <= refPrice-spacing {
 		gridEntry = math.Round(price*100) / 100
 		gridTP = p.takeProfit
-		if gridTP >= gridEntry { gridTP = math.Round((gridEntry-spacing)*100) / 100 }
+		if gridTP >= gridEntry {
+			gridTP = math.Round((gridEntry-spacing)*100) / 100
+		}
 		shouldAdd = true
 	}
 
-	if !shouldAdd { return }
+	if !shouldAdd {
+		return
+	}
 
 	gridQty := math.Floor(p.initQty*s.cfg.GridQtyRatio*1000) / 1000
-	if gridQty <= 0 { return }
+	if gridQty <= 0 {
+		return
+	}
 	totalQty := p.remainQty + gridQty
-	if totalQty > p.initQty*2 { return }
+	if totalQty > p.initQty*2 {
+		return
+	}
 
 	// Use limit order for grid layers (maker fee, 60% cheaper than market)
 	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, true)
-	if omsID == "" { return }
+	if omsID == "" {
+		return
+	}
 
 	g := &gridOrder{
 		entryPrice: gridEntry, qty: gridQty, tp: gridTP,
@@ -308,7 +364,9 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 }
 
 func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *posState, pptr **posState) {
-	if p.barsHeld < s.cfg.MinTrendBars { return }
+	if p.barsHeld < s.cfg.MinTrendBars {
+		return
+	}
 
 	price := bar.Close
 	liveATR := s.calcATR()
@@ -316,8 +374,12 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 	// R-based profit measurement
 	pnlR := 0.0
 	if p.R > 0 {
-		if p.side == "LONG" { pnlR = (price - p.entryPrice) / p.R }
-		if p.side == "SHORT" { pnlR = (p.entryPrice - price) / p.R }
+		if p.side == "LONG" {
+			pnlR = (price - p.entryPrice) / p.R
+		}
+		if p.side == "SHORT" {
+			pnlR = (p.entryPrice - price) / p.R
+		}
 	}
 
 	// ── 1h mode-based trailing (bar-level, mirrors tickManage) ──
@@ -330,7 +392,11 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		s.log.Warn("BAR: time exit — held >3h in weak/exit mode",
 			zap.String("side", p.side), zap.Float64("pnlR", pnlR))
 		s.closePos(ctx, p, pptr, "time_exit")
-		if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
+		if pnlR > 0 {
+			s.consecLoss = 0
+		} else {
+			s.consecLoss++
+		}
 		return
 	}
 
@@ -362,10 +428,14 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 			var wideTrail float64
 			if p.side == "LONG" {
 				wideTrail = p.peakPrice - trailDist
-				if wideTrail < floor { wideTrail = floor }
+				if wideTrail < floor {
+					wideTrail = floor
+				}
 			} else {
 				wideTrail = p.peakPrice + trailDist
-				if wideTrail > floor { wideTrail = floor }
+				if wideTrail > floor {
+					wideTrail = floor
+				}
 			}
 			p.trailing = math.Round(wideTrail*100) / 100
 			s.syncToRedis(p)
@@ -375,8 +445,12 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		trailDist = atr * 1.0 // tighter than WEAK (1.5) but not so tight it jump-triggers
 		if pnlR >= 0.3 {
 			lockR := math.Max(pnlR*0.5, 0.02)
-			if p.side == "LONG" { floor = p.entryPrice + lockR*p.R }
-			if p.side == "SHORT" { floor = p.entryPrice - lockR*p.R }
+			if p.side == "LONG" {
+				floor = p.entryPrice + lockR*p.R
+			}
+			if p.side == "SHORT" {
+				floor = p.entryPrice - lockR*p.R
+			}
 		}
 	default: // hourlyTrendWeak — profit < 1 ATR → skip trailing
 		if pnlR > 0 && math.Abs(price-p.entryPrice) < atr {
@@ -386,13 +460,20 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		if s.cfg.BreakevenR > 0 && p.R > 0 {
 			lockR := 0.0
 			switch {
-			case pnlR >= 0.8: lockR = 0.4
-			case pnlR >= 0.5: lockR = 0.2
-			case pnlR >= 0.3: lockR = 0.02
+			case pnlR >= 0.8:
+				lockR = 0.4
+			case pnlR >= 0.5:
+				lockR = 0.2
+			case pnlR >= 0.3:
+				lockR = 0.02
 			}
 			if lockR > 0 {
-				if p.side == "LONG" { floor = p.entryPrice + lockR*p.R }
-				if p.side == "SHORT" { floor = p.entryPrice - lockR*p.R }
+				if p.side == "LONG" {
+					floor = p.entryPrice + lockR*p.R
+				}
+				if p.side == "SHORT" {
+					floor = p.entryPrice - lockR*p.R
+				}
 			}
 		}
 	}
@@ -401,16 +482,28 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 		var newTrail float64
 		if p.side == "LONG" {
 			newTrail = p.peakPrice - trailDist
-			if newTrail < floor { newTrail = floor }
+			if newTrail < floor {
+				newTrail = floor
+			}
 		} else {
 			newTrail = p.peakPrice + trailDist
-			if newTrail > floor { newTrail = floor }
+			if newTrail > floor {
+				newTrail = floor
+			}
 		}
 		newTrail = math.Round(newTrail*100) / 100
 		moved := false
-		if p.side == "LONG" && newTrail > p.trailing { p.trailing = newTrail; moved = true }
-		if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) { p.trailing = newTrail; moved = true }
-		if moved { s.syncToRedis(p) }
+		if p.side == "LONG" && newTrail > p.trailing {
+			p.trailing = newTrail
+			moved = true
+		}
+		if p.side == "SHORT" && (p.trailing == 0 || newTrail < p.trailing) {
+			p.trailing = newTrail
+			moved = true
+		}
+		if moved {
+			s.syncToRedis(p)
+		}
 	}
 
 	// ── Bounce TP: if price bounced 0.8R from extreme, close remaining ──
@@ -437,12 +530,16 @@ func (s *AIStrategy) manageTrend(ctx *strategy.Context, bar exchange.Kline, p *p
 	// ── Local SL check (backup for exchange SL) ──
 	if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
 		s.closePos(ctx, p, pptr, "trailing")
-		if pnlR > 0 { s.consecLoss = 0 }
+		if pnlR > 0 {
+			s.consecLoss = 0
+		}
 		return
 	}
 	if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
 		s.closePos(ctx, p, pptr, "trailing")
-		if pnlR > 0 { s.consecLoss = 0 }
+		if pnlR > 0 {
+			s.consecLoss = 0
+		}
 		return
 	}
 
@@ -475,4 +572,3 @@ func (s *AIStrategy) checkReversal(ctx *strategy.Context, bar exchange.Kline, p 
 		s.lastCallBar = s.barCount - s.cfg.CallIntervalBars
 	}
 }
-

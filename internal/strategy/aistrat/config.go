@@ -13,148 +13,452 @@ import (
 func init() {
 	registry.Register("ai", func(params map[string]any, log *zap.Logger) (strategy.Strategy, error) {
 		cfg := DefaultConfig()
-		if v, ok := params["Symbol"].(string); ok { cfg.Symbol = v }
-		if v, ok := params["APIKey"].(string); ok { cfg.APIKey = v }
-		if v, ok := params["Model"].(string); ok { cfg.Model = v }
-		if v, ok := params["ConfidenceThreshold"]; ok { cfg.ConfidenceThreshold = toFloat(v) }
-		if v, ok := params["LookbackBars"]; ok { cfg.LookbackBars = toInt(v) }
-		if v, ok := params["CallIntervalBars"]; ok { cfg.CallIntervalBars = toInt(v) }
-		if v, ok := params["RangeCallIntervalBars"]; ok { cfg.RangeCallIntervalBars = toInt(v) }
-		if v, ok := params["Leverage"]; ok { cfg.Leverage = toFloat(v) }
-		if v, ok := params["PosSizePct"]; ok { cfg.PosSizePct = toFloat(v) }
-		if v, ok := params["RiskPerTrade"]; ok { cfg.RiskPerTrade = toFloat(v) }
-		if v, ok := params["GridEquityPct"]; ok { cfg.GridEquityPct = toFloat(v) }
-		if v, ok := params["GridRiskPerLayer"]; ok { cfg.GridRiskPerLayer = toFloat(v) }
-		if v, ok := params["TrendEquityPct"]; ok { cfg.TrendEquityPct = toFloat(v) }
-		if v, ok := params["TrendRiskPerTrade"]; ok { cfg.TrendRiskPerTrade = toFloat(v) }
-		if v, ok := params["ATRK"]; ok { cfg.ATRK = toFloat(v) }
-		if v, ok := params["TrailingATRK"]; ok { cfg.TrailingATRK = toFloat(v) }
-		if v, ok := params["MaxDailyLossPct"]; ok { cfg.MaxDailyLossPct = toFloat(v) }
-		if v, ok := params["MaxConsecLoss"]; ok { cfg.MaxConsecLoss = toInt(v) }
-		if v, ok := params["EnableShort"].(bool); ok { cfg.EnableShort = v }
-		if v, ok := params["HedgeMode"].(bool); ok { cfg.HedgeMode = v }
-		if v, ok := params["RangeTPPct"]; ok { cfg.RangeTPPct = toFloat(v) }
-		if v, ok := params["RangeSLPct"]; ok { cfg.RangeSLPct = toFloat(v) }
-		if v, ok := params["GridMaxLayers"]; ok { cfg.GridMaxLayers = toInt(v) }
-		if v, ok := params["GridStaleBars"]; ok { cfg.GridStaleBars = toInt(v) }
-		if v, ok := params["GridStalePnlR"]; ok { cfg.GridStalePnlR = toFloat(v) }
-		if v, ok := params["CatastrophicStopR"]; ok { cfg.CatastrophicStopR = toFloat(v) }
-		if v, ok := params["TrendCutR"]; ok { cfg.TrendCutR = toFloat(v) }
-		if v, ok := params["RangeTrendFilter"].(bool); ok { cfg.RangeTrendFilter = v }
-		if v, ok := params["HourlyTrendMinSlope"]; ok { cfg.HourlyTrendMinSlope = toFloat(v) }
-		if v, ok := params["HourlyTrendEMA"]; ok { cfg.HourlyTrendEMA = toInt(v) }
-		if v, ok := params["HourlyTrendStickyBars"]; ok { cfg.HourlyTrendStickyBars = toInt(v) }
-		if v, ok := params["TrendScoreThreshold"]; ok { cfg.TrendScoreThreshold = toFloat(v) }
-		if v, ok := params["TrendAlignFullPenaltyScore"]; ok { cfg.TrendAlignFullPenaltyScore = toFloat(v) }
-		if v, ok := params["TrendScoreDecay"]; ok { cfg.TrendScoreDecay = toFloat(v) }
-		if v, ok := params["TrendScorePerBarCap"]; ok { cfg.TrendScorePerBarCap = toFloat(v) }
-		if v, ok := params["TrendScoreMax"]; ok { cfg.TrendScoreMax = toFloat(v) }
-		if v, ok := params["TrendScoreConfirmTF"].(string); ok { cfg.TrendScoreConfirmTF = v }
-		if v, ok := params["TrendEntryCooldownBars"]; ok { cfg.TrendEntryCooldownBars = toInt(v) }
-		if v, ok := params["GridMaxTPDist"]; ok { cfg.GridMaxTPDist = toFloat(v) }
-		if v, ok := params["GridSpacingPct"]; ok { cfg.GridSpacingPct = toFloat(v) }
-		if v, ok := params["GridTPPct"]; ok { cfg.GridTPPct = toFloat(v) }
-		if v, ok := params["GridQtyRatio"]; ok { cfg.GridQtyRatio = toFloat(v) }
+		if v, ok := params["Symbol"].(string); ok {
+			cfg.Symbol = v
+		}
+		if v, ok := params["APIKey"].(string); ok {
+			cfg.APIKey = v
+		}
+		if v, ok := params["Model"].(string); ok {
+			cfg.Model = v
+		}
+		if v, ok := params["ConfidenceThreshold"]; ok {
+			cfg.ConfidenceThreshold = toFloat(v)
+		}
+		if v, ok := params["LookbackBars"]; ok {
+			cfg.LookbackBars = toInt(v)
+		}
+		if v, ok := params["CallIntervalBars"]; ok {
+			cfg.CallIntervalBars = toInt(v)
+		}
+		if v, ok := params["RangeCallIntervalBars"]; ok {
+			cfg.RangeCallIntervalBars = toInt(v)
+		}
+		if v, ok := params["Leverage"]; ok {
+			cfg.Leverage = toFloat(v)
+		}
+		if v, ok := params["PosSizePct"]; ok {
+			cfg.PosSizePct = toFloat(v)
+		}
+		if v, ok := params["RiskPerTrade"]; ok {
+			cfg.RiskPerTrade = toFloat(v)
+		}
+		if v, ok := params["GridEquityPct"]; ok {
+			cfg.GridEquityPct = toFloat(v)
+		}
+		if v, ok := params["GridRiskPerLayer"]; ok {
+			cfg.GridRiskPerLayer = toFloat(v)
+		}
+		if v, ok := params["TrendEquityPct"]; ok {
+			cfg.TrendEquityPct = toFloat(v)
+		}
+		if v, ok := params["TrendRiskPerTrade"]; ok {
+			cfg.TrendRiskPerTrade = toFloat(v)
+		}
+		if v, ok := params["ATRK"]; ok {
+			cfg.ATRK = toFloat(v)
+		}
+		if v, ok := params["TrailingATRK"]; ok {
+			cfg.TrailingATRK = toFloat(v)
+		}
+		if v, ok := params["MaxDailyLossPct"]; ok {
+			cfg.MaxDailyLossPct = toFloat(v)
+		}
+		if v, ok := params["MaxConsecLoss"]; ok {
+			cfg.MaxConsecLoss = toInt(v)
+		}
+		if v, ok := params["EnableShort"].(bool); ok {
+			cfg.EnableShort = v
+		}
+		if v, ok := params["HedgeMode"].(bool); ok {
+			cfg.HedgeMode = v
+		}
+		if v, ok := params["RangeTPPct"]; ok {
+			cfg.RangeTPPct = toFloat(v)
+		}
+		if v, ok := params["RangeSLPct"]; ok {
+			cfg.RangeSLPct = toFloat(v)
+		}
+		if v, ok := params["GridMaxLayers"]; ok {
+			cfg.GridMaxLayers = toInt(v)
+		}
+		if v, ok := params["GridStaleBars"]; ok {
+			cfg.GridStaleBars = toInt(v)
+		}
+		if v, ok := params["GridStalePnlR"]; ok {
+			cfg.GridStalePnlR = toFloat(v)
+		}
+		if v, ok := params["CatastrophicStopR"]; ok {
+			cfg.CatastrophicStopR = toFloat(v)
+		}
+		if v, ok := params["TrendCutR"]; ok {
+			cfg.TrendCutR = toFloat(v)
+		}
+		if v, ok := params["RangeTrendFilter"].(bool); ok {
+			cfg.RangeTrendFilter = v
+		}
+		if v, ok := params["HourlyTrendMinSlope"]; ok {
+			cfg.HourlyTrendMinSlope = toFloat(v)
+		}
+		if v, ok := params["HourlyTrendEMA"]; ok {
+			cfg.HourlyTrendEMA = toInt(v)
+		}
+		if v, ok := params["HourlyTrendStickyBars"]; ok {
+			cfg.HourlyTrendStickyBars = toInt(v)
+		}
+		if v, ok := params["TrendScoreThreshold"]; ok {
+			cfg.TrendScoreThreshold = toFloat(v)
+		}
+		if v, ok := params["TrendAlignFullPenaltyScore"]; ok {
+			cfg.TrendAlignFullPenaltyScore = toFloat(v)
+		}
+		if v, ok := params["TrendScoreDecay"]; ok {
+			cfg.TrendScoreDecay = toFloat(v)
+		}
+		if v, ok := params["TrendScorePerBarCap"]; ok {
+			cfg.TrendScorePerBarCap = toFloat(v)
+		}
+		if v, ok := params["TrendScoreMax"]; ok {
+			cfg.TrendScoreMax = toFloat(v)
+		}
+		if v, ok := params["TrendScoreConfirmTF"].(string); ok {
+			cfg.TrendScoreConfirmTF = v
+		}
+		if v, ok := params["TrendEntryCooldownBars"]; ok {
+			cfg.TrendEntryCooldownBars = toInt(v)
+		}
+		// Grid hedge / trail / regime-exit (feat/aistrat-hedge)
+		if v, ok := params["GridHedgeEnabled"].(bool); ok {
+			cfg.GridHedgeEnabled = v
+		}
+		if v, ok := params["HedgeTier1PnlR"]; ok {
+			cfg.HedgeTier1PnlR = toFloat(v)
+		}
+		if v, ok := params["HedgeTier1Ratio"]; ok {
+			cfg.HedgeTier1Ratio = toFloat(v)
+		}
+		if v, ok := params["HedgeTier2PnlR"]; ok {
+			cfg.HedgeTier2PnlR = toFloat(v)
+		}
+		if v, ok := params["HedgeTier2Ratio"]; ok {
+			cfg.HedgeTier2Ratio = toFloat(v)
+		}
+		if v, ok := params["HedgeTier3PnlR"]; ok {
+			cfg.HedgeTier3PnlR = toFloat(v)
+		}
+		if v, ok := params["HedgeTier3Ratio"]; ok {
+			cfg.HedgeTier3Ratio = toFloat(v)
+		}
+		if v, ok := params["HedgeTrailPeakPct"]; ok {
+			cfg.HedgeTrailPeakPct = toFloat(v)
+		}
+		if v, ok := params["HedgeMinPeakFavor"]; ok {
+			cfg.HedgeMinPeakFavor = toFloat(v)
+		}
+		if v, ok := params["HedgeMainRecoverPnlR"]; ok {
+			cfg.HedgeMainRecoverPnlR = toFloat(v)
+		}
+		if v, ok := params["HedgeReopenCooldownBars"]; ok {
+			cfg.HedgeReopenCooldownBars = toInt(v)
+		}
+		if v, ok := params["GridTrailEnabled"].(bool); ok {
+			cfg.GridTrailEnabled = v
+		}
+		if v, ok := params["GridTrailActivatePnlR"]; ok {
+			cfg.GridTrailActivatePnlR = toFloat(v)
+		}
+		if v, ok := params["GridTrailPullbackR"]; ok {
+			cfg.GridTrailPullbackR = toFloat(v)
+		}
+		if v, ok := params["GridRegimeExitEnabled"].(bool); ok {
+			cfg.GridRegimeExitEnabled = v
+		}
+		if v, ok := params["GridRegimeExitBars"]; ok {
+			cfg.GridRegimeExitBars = toInt(v)
+		}
+		if v, ok := params["GridRegimeExitPnlR"]; ok {
+			cfg.GridRegimeExitPnlR = toFloat(v)
+		}
+		if v, ok := params["GridMaxTPDist"]; ok {
+			cfg.GridMaxTPDist = toFloat(v)
+		}
+		if v, ok := params["GridSpacingPct"]; ok {
+			cfg.GridSpacingPct = toFloat(v)
+		}
+		if v, ok := params["GridTPPct"]; ok {
+			cfg.GridTPPct = toFloat(v)
+		}
+		if v, ok := params["GridQtyRatio"]; ok {
+			cfg.GridQtyRatio = toFloat(v)
+		}
 		if v, ok := params["TPLevels"]; ok {
 			switch vv := v.(type) {
-			case []float64: cfg.TPLevels = vv
+			case []float64:
+				cfg.TPLevels = vv
 			case []any:
 				var sl []float64
-				for _, item := range vv { if f, ok := item.(float64); ok { sl = append(sl, f) } }
-				if len(sl) > 0 { cfg.TPLevels = sl }
+				for _, item := range vv {
+					if f, ok := item.(float64); ok {
+						sl = append(sl, f)
+					}
+				}
+				if len(sl) > 0 {
+					cfg.TPLevels = sl
+				}
 			}
 		}
 		if v, ok := params["TPQtySplits"]; ok {
 			switch vv := v.(type) {
-			case []float64: cfg.TPQtySplits = vv
+			case []float64:
+				cfg.TPQtySplits = vv
 			case []any:
 				var sl []float64
-				for _, item := range vv { if f, ok := item.(float64); ok { sl = append(sl, f) } }
-				if len(sl) > 0 { cfg.TPQtySplits = sl }
+				for _, item := range vv {
+					if f, ok := item.(float64); ok {
+						sl = append(sl, f)
+					}
+				}
+				if len(sl) > 0 {
+					cfg.TPQtySplits = sl
+				}
 			}
 		}
-		if v, ok := params["BreakevenR"]; ok { cfg.BreakevenR = toFloat(v) }
-		if v, ok := params["BreakevenBuf"]; ok { cfg.BreakevenBuf = toFloat(v) }
-		if v, ok := params["TrailBasePct"]; ok { cfg.TrailBasePct = toFloat(v) }
-		if v, ok := params["TrailLowVolPct"]; ok { cfg.TrailLowVolPct = toFloat(v) }
-		if v, ok := params["TrailHighVolPct"]; ok { cfg.TrailHighVolPct = toFloat(v) }
-		if v, ok := params["TrailFloorPct"]; ok { cfg.TrailFloorPct = toFloat(v) }
-		if v, ok := params["MinSLDistPct"]; ok { cfg.MinSLDistPct = toFloat(v) }
-		if v, ok := params["ReversalConf"]; ok { cfg.ReversalConf = toFloat(v) }
-		if v, ok := params["MarketEntryConf"]; ok { cfg.MarketEntryConf = toFloat(v) }
-		if v, ok := params["RangeBEPct"]; ok { cfg.RangeBEPct = toFloat(v) }
-		if v, ok := params["RangeLockPct"]; ok { cfg.RangeLockPct = toFloat(v) }
-		if v, ok := params["RangeLockOffset"]; ok { cfg.RangeLockOffset = toFloat(v) }
-		if v, ok := params["RangeTrailPct"]; ok { cfg.RangeTrailPct = toFloat(v) }
-		if v, ok := params["RangeTrailDist"]; ok { cfg.RangeTrailDist = toFloat(v) }
+		if v, ok := params["BreakevenR"]; ok {
+			cfg.BreakevenR = toFloat(v)
+		}
+		if v, ok := params["BreakevenBuf"]; ok {
+			cfg.BreakevenBuf = toFloat(v)
+		}
+		if v, ok := params["TrailBasePct"]; ok {
+			cfg.TrailBasePct = toFloat(v)
+		}
+		if v, ok := params["TrailLowVolPct"]; ok {
+			cfg.TrailLowVolPct = toFloat(v)
+		}
+		if v, ok := params["TrailHighVolPct"]; ok {
+			cfg.TrailHighVolPct = toFloat(v)
+		}
+		if v, ok := params["TrailFloorPct"]; ok {
+			cfg.TrailFloorPct = toFloat(v)
+		}
+		if v, ok := params["MinSLDistPct"]; ok {
+			cfg.MinSLDistPct = toFloat(v)
+		}
+		if v, ok := params["ReversalConf"]; ok {
+			cfg.ReversalConf = toFloat(v)
+		}
+		if v, ok := params["MarketEntryConf"]; ok {
+			cfg.MarketEntryConf = toFloat(v)
+		}
+		if v, ok := params["RangeBEPct"]; ok {
+			cfg.RangeBEPct = toFloat(v)
+		}
+		if v, ok := params["RangeLockPct"]; ok {
+			cfg.RangeLockPct = toFloat(v)
+		}
+		if v, ok := params["RangeLockOffset"]; ok {
+			cfg.RangeLockOffset = toFloat(v)
+		}
+		if v, ok := params["RangeTrailPct"]; ok {
+			cfg.RangeTrailPct = toFloat(v)
+		}
+		if v, ok := params["RangeTrailDist"]; ok {
+			cfg.RangeTrailDist = toFloat(v)
+		}
 		// Timeout configs removed — SL/trailing handle exits, timeouts cause random-price closes.
-		if v, ok := params["BBWidthMin"]; ok { cfg.BBWidthMin = toFloat(v) }
-		if v, ok := params["BBWidthMax"]; ok { cfg.BBWidthMax = toFloat(v) }
-		if v, ok := params["RangeEMAConv"]; ok { cfg.RangeEMAConv = toFloat(v) }
-		if v, ok := params["MTFStrongTrend"]; ok { cfg.MTFStrongTrend = toFloat(v) }
-		if v, ok := params["MTFWeakTrend"]; ok { cfg.MTFWeakTrend = toFloat(v) }
-		if v, ok := params["MTFBullRSI"]; ok { cfg.MTFBullRSI = toFloat(v) }
-		if v, ok := params["MTFBearRSI"]; ok { cfg.MTFBearRSI = toFloat(v) }
-		if v, ok := params["MTF1mThreshold"]; ok { cfg.MTF1mThreshold = toFloat(v) }
-		if v, ok := params["MTFQtyScaleHard"]; ok { cfg.MTFQtyScaleHard = toFloat(v) }
-		if v, ok := params["MTFQtyScaleSoft"]; ok { cfg.MTFQtyScaleSoft = toFloat(v) }
-		if v, ok := params["SwingProximity"]; ok { cfg.SwingProximity = toFloat(v) }
-		if v, ok := params["ConfQtyScale"].(bool); ok { cfg.ConfQtyScale = v }
-		if v, ok := params["MaxRPercent"]; ok { cfg.MaxRPercent = toFloat(v) }
-		if v, ok := params["FeeDragPct"]; ok { cfg.FeeDragPct = toFloat(v) }
-		if v, ok := params["SignalDecay"]; ok { cfg.SignalDecay = toFloat(v) }
-		if v, ok := params["SignalAccumMax"]; ok { cfg.SignalAccumMax = toFloat(v) }
-		if v, ok := params["RegimeN"]; ok { cfg.RegimeN = toInt(v) }
-		if v, ok := params["StrongTrendThreshold"]; ok { cfg.StrongTrendThreshold = toFloat(v) }
-		if v, ok := params["StrongTrendMinVol"]; ok { cfg.StrongTrendMinVol = toFloat(v) }
-		if v, ok := params["SlowTrendThreshold"]; ok { cfg.SlowTrendThreshold = toFloat(v) }
-		if v, ok := params["SlowTrendDirScore"]; ok { cfg.SlowTrendDirScore = toFloat(v) }
-		if v, ok := params["ExpansionATRK"]; ok { cfg.ExpansionATRK = toFloat(v) }
-		if v, ok := params["ExpansionBodyK"]; ok { cfg.ExpansionBodyK = toFloat(v) }
-		if v, ok := params["RegimeEntryConf"]; ok { cfg.RegimeEntryConf = toFloat(v) }
-		if v, ok := params["RangeEntryConf"]; ok { cfg.RangeEntryConf = toFloat(v) }
-		if v, ok := params["RSIPeriod"]; ok { cfg.RSIPeriod = toInt(v) }
-		if v, ok := params["MACDFast"]; ok { cfg.MACDFast = toInt(v) }
-		if v, ok := params["MACDSlow"]; ok { cfg.MACDSlow = toInt(v) }
-		if v, ok := params["MACDSignal"]; ok { cfg.MACDSignal = toInt(v) }
-		if v, ok := params["EMAFast"]; ok { cfg.EMAFast = toInt(v) }
-		if v, ok := params["EMASlow"]; ok { cfg.EMASlow = toInt(v) }
-		if v, ok := params["BBPeriod"]; ok { cfg.BBPeriod = toInt(v) }
-		if v, ok := params["BBStdDev"]; ok { cfg.BBStdDev = toFloat(v) }
-		if v, ok := params["ATRPeriod"]; ok { cfg.ATRPeriod = toInt(v) }
-		if v, ok := params["VolMAPeriod"]; ok { cfg.VolMAPeriod = toInt(v) }
-		if v, ok := params["TrendEfficiencyMin"]; ok { cfg.TrendEfficiencyMin = toFloat(v) }
-		if v, ok := params["TrendExhaustPct"]; ok { cfg.TrendExhaustPct = toFloat(v) }
-		if v, ok := params["SwingSLMinATR"]; ok { cfg.SwingSLMinATR = toFloat(v) }
-		if v, ok := params["SwingSLMaxATR"]; ok { cfg.SwingSLMaxATR = toFloat(v) }
-		if v, ok := params["GptTPMinR"]; ok { cfg.GptTPMinR = toFloat(v) }
-		if v, ok := params["GptTPMaxR"]; ok { cfg.GptTPMaxR = toFloat(v) }
-		if v, ok := params["CounterTrendCap"]; ok { cfg.CounterTrendCap = toFloat(v) }
-		if v, ok := params["AccumBaseThresh"]; ok { cfg.AccumBaseThresh = toFloat(v) }
-		if v, ok := params["BoostMinConf"]; ok { cfg.BoostMinConf = toFloat(v) }
-		if v, ok := params["BounceTPR"]; ok { cfg.BounceTPR = toFloat(v) }
-		if v, ok := params["EmergencyPnlR"]; ok { cfg.EmergencyPnlR = toFloat(v) }
-		if v, ok := params["EntryATRK"]; ok { cfg.EntryATRK = toFloat(v) }
-		if v, ok := params["MaxEntryDevPct"]; ok { cfg.MaxEntryDevPct = toFloat(v) }
-		if v, ok := params["LimitTimeoutBars"]; ok { cfg.LimitTimeoutBars = toInt(v) }
-		if v, ok := params["MinHoldBars"]; ok { cfg.MinHoldBars = toInt(v) }
-		if v, ok := params["MinTrendBars"]; ok { cfg.MinTrendBars = toInt(v) }
-		if v, ok := params["GPTTemperature"]; ok { cfg.GPTTemperature = toFloat(v) }
-		if v, ok := params["GPTMaxTokens"]; ok { cfg.GPTMaxTokens = toInt(v) }
-		if v, ok := params["GPTTimeout"]; ok { cfg.GPTTimeout = time.Duration(toFloat(v)) * time.Second }
-		if v, ok := params["ForceTrend"].(bool); ok { cfg.ForceTrend = v }
-		if v, ok := params["HedgeOnDrawdown"].(bool); ok { cfg.HedgeOnDrawdown = v }
-		if v, ok := params["HedgeDrawdownPct"]; ok { cfg.HedgeDrawdownPct = toFloat(v) }
-		if v, ok := params["HedgeCooldown"]; ok { cfg.HedgeCooldown = time.Duration(toFloat(v)) * time.Minute }
-		if v, ok := params["HedgeQtyRatio"]; ok { cfg.HedgeQtyRatio = toFloat(v) }
-		if v, ok := params["HedgeTPRatio"]; ok { cfg.HedgeTPRatio = toFloat(v) }
-		if v, ok := params["Interval"].(string); ok && cfg.PrimaryInterval == "" { cfg.PrimaryInterval = v }
+		if v, ok := params["BBWidthMin"]; ok {
+			cfg.BBWidthMin = toFloat(v)
+		}
+		if v, ok := params["BBWidthMax"]; ok {
+			cfg.BBWidthMax = toFloat(v)
+		}
+		if v, ok := params["RangeEMAConv"]; ok {
+			cfg.RangeEMAConv = toFloat(v)
+		}
+		if v, ok := params["MTFStrongTrend"]; ok {
+			cfg.MTFStrongTrend = toFloat(v)
+		}
+		if v, ok := params["MTFWeakTrend"]; ok {
+			cfg.MTFWeakTrend = toFloat(v)
+		}
+		if v, ok := params["MTFBullRSI"]; ok {
+			cfg.MTFBullRSI = toFloat(v)
+		}
+		if v, ok := params["MTFBearRSI"]; ok {
+			cfg.MTFBearRSI = toFloat(v)
+		}
+		if v, ok := params["MTF1mThreshold"]; ok {
+			cfg.MTF1mThreshold = toFloat(v)
+		}
+		if v, ok := params["MTFQtyScaleHard"]; ok {
+			cfg.MTFQtyScaleHard = toFloat(v)
+		}
+		if v, ok := params["MTFQtyScaleSoft"]; ok {
+			cfg.MTFQtyScaleSoft = toFloat(v)
+		}
+		if v, ok := params["SwingProximity"]; ok {
+			cfg.SwingProximity = toFloat(v)
+		}
+		if v, ok := params["ConfQtyScale"].(bool); ok {
+			cfg.ConfQtyScale = v
+		}
+		if v, ok := params["MaxRPercent"]; ok {
+			cfg.MaxRPercent = toFloat(v)
+		}
+		if v, ok := params["FeeDragPct"]; ok {
+			cfg.FeeDragPct = toFloat(v)
+		}
+		if v, ok := params["SignalDecay"]; ok {
+			cfg.SignalDecay = toFloat(v)
+		}
+		if v, ok := params["SignalAccumMax"]; ok {
+			cfg.SignalAccumMax = toFloat(v)
+		}
+		if v, ok := params["RegimeN"]; ok {
+			cfg.RegimeN = toInt(v)
+		}
+		if v, ok := params["StrongTrendThreshold"]; ok {
+			cfg.StrongTrendThreshold = toFloat(v)
+		}
+		if v, ok := params["StrongTrendMinVol"]; ok {
+			cfg.StrongTrendMinVol = toFloat(v)
+		}
+		if v, ok := params["SlowTrendThreshold"]; ok {
+			cfg.SlowTrendThreshold = toFloat(v)
+		}
+		if v, ok := params["SlowTrendDirScore"]; ok {
+			cfg.SlowTrendDirScore = toFloat(v)
+		}
+		if v, ok := params["ExpansionATRK"]; ok {
+			cfg.ExpansionATRK = toFloat(v)
+		}
+		if v, ok := params["ExpansionBodyK"]; ok {
+			cfg.ExpansionBodyK = toFloat(v)
+		}
+		if v, ok := params["RegimeEntryConf"]; ok {
+			cfg.RegimeEntryConf = toFloat(v)
+		}
+		if v, ok := params["RangeEntryConf"]; ok {
+			cfg.RangeEntryConf = toFloat(v)
+		}
+		if v, ok := params["RSIPeriod"]; ok {
+			cfg.RSIPeriod = toInt(v)
+		}
+		if v, ok := params["MACDFast"]; ok {
+			cfg.MACDFast = toInt(v)
+		}
+		if v, ok := params["MACDSlow"]; ok {
+			cfg.MACDSlow = toInt(v)
+		}
+		if v, ok := params["MACDSignal"]; ok {
+			cfg.MACDSignal = toInt(v)
+		}
+		if v, ok := params["EMAFast"]; ok {
+			cfg.EMAFast = toInt(v)
+		}
+		if v, ok := params["EMASlow"]; ok {
+			cfg.EMASlow = toInt(v)
+		}
+		if v, ok := params["BBPeriod"]; ok {
+			cfg.BBPeriod = toInt(v)
+		}
+		if v, ok := params["BBStdDev"]; ok {
+			cfg.BBStdDev = toFloat(v)
+		}
+		if v, ok := params["ATRPeriod"]; ok {
+			cfg.ATRPeriod = toInt(v)
+		}
+		if v, ok := params["VolMAPeriod"]; ok {
+			cfg.VolMAPeriod = toInt(v)
+		}
+		if v, ok := params["TrendEfficiencyMin"]; ok {
+			cfg.TrendEfficiencyMin = toFloat(v)
+		}
+		if v, ok := params["TrendExhaustPct"]; ok {
+			cfg.TrendExhaustPct = toFloat(v)
+		}
+		if v, ok := params["SwingSLMinATR"]; ok {
+			cfg.SwingSLMinATR = toFloat(v)
+		}
+		if v, ok := params["SwingSLMaxATR"]; ok {
+			cfg.SwingSLMaxATR = toFloat(v)
+		}
+		if v, ok := params["GptTPMinR"]; ok {
+			cfg.GptTPMinR = toFloat(v)
+		}
+		if v, ok := params["GptTPMaxR"]; ok {
+			cfg.GptTPMaxR = toFloat(v)
+		}
+		if v, ok := params["CounterTrendCap"]; ok {
+			cfg.CounterTrendCap = toFloat(v)
+		}
+		if v, ok := params["AccumBaseThresh"]; ok {
+			cfg.AccumBaseThresh = toFloat(v)
+		}
+		if v, ok := params["BoostMinConf"]; ok {
+			cfg.BoostMinConf = toFloat(v)
+		}
+		if v, ok := params["BounceTPR"]; ok {
+			cfg.BounceTPR = toFloat(v)
+		}
+		if v, ok := params["EmergencyPnlR"]; ok {
+			cfg.EmergencyPnlR = toFloat(v)
+		}
+		if v, ok := params["EntryATRK"]; ok {
+			cfg.EntryATRK = toFloat(v)
+		}
+		if v, ok := params["MaxEntryDevPct"]; ok {
+			cfg.MaxEntryDevPct = toFloat(v)
+		}
+		if v, ok := params["LimitTimeoutBars"]; ok {
+			cfg.LimitTimeoutBars = toInt(v)
+		}
+		if v, ok := params["MinHoldBars"]; ok {
+			cfg.MinHoldBars = toInt(v)
+		}
+		if v, ok := params["MinTrendBars"]; ok {
+			cfg.MinTrendBars = toInt(v)
+		}
+		if v, ok := params["GPTTemperature"]; ok {
+			cfg.GPTTemperature = toFloat(v)
+		}
+		if v, ok := params["GPTMaxTokens"]; ok {
+			cfg.GPTMaxTokens = toInt(v)
+		}
+		if v, ok := params["GPTTimeout"]; ok {
+			cfg.GPTTimeout = time.Duration(toFloat(v)) * time.Second
+		}
+		if v, ok := params["ForceTrend"].(bool); ok {
+			cfg.ForceTrend = v
+		}
+		if v, ok := params["HedgeOnDrawdown"].(bool); ok {
+			cfg.HedgeOnDrawdown = v
+		}
+		if v, ok := params["HedgeDrawdownPct"]; ok {
+			cfg.HedgeDrawdownPct = toFloat(v)
+		}
+		if v, ok := params["HedgeCooldown"]; ok {
+			cfg.HedgeCooldown = time.Duration(toFloat(v)) * time.Minute
+		}
+		if v, ok := params["HedgeQtyRatio"]; ok {
+			cfg.HedgeQtyRatio = toFloat(v)
+		}
+		if v, ok := params["HedgeTPRatio"]; ok {
+			cfg.HedgeTPRatio = toFloat(v)
+		}
+		if v, ok := params["Interval"].(string); ok && cfg.PrimaryInterval == "" {
+			cfg.PrimaryInterval = v
+		}
 		if v, ok := params["Intervals"]; ok {
 			switch vv := v.(type) {
 			case []string:
 				cfg.Intervals = vv
 			case []any:
-				for _, item := range vv { if s, ok := item.(string); ok { cfg.Intervals = append(cfg.Intervals, s) } }
+				for _, item := range vv {
+					if s, ok := item.(string); ok {
+						cfg.Intervals = append(cfg.Intervals, s)
+					}
+				}
 			}
 		}
 		if cfg.APIKey == "" {
@@ -196,21 +500,21 @@ func init() {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type Config struct {
-	Symbol              string
-	APIKey              string
-	Model               string
-	ConfidenceThreshold float64
-	LookbackBars        int
+	Symbol                string
+	APIKey                string
+	Model                 string
+	ConfidenceThreshold   float64
+	LookbackBars          int
 	CallIntervalBars      int
 	RangeCallIntervalBars int // GPT call interval (in bars) when regime=RANGE and no positions (default 3)
 	EnableShort           bool
-	HedgeMode           bool          // true = long+short simultaneously; false = single strongest direction
-	ForceTrend          bool          // true = disable Range mode, always use Trend mode
-	HedgeOnDrawdown     bool          // true = allow counter-trend Range scalp when main position is losing
-	HedgeDrawdownPct    float64       // min drawdown % to trigger hedge (default 0.005 = 0.5% of entry)
-	HedgeCooldown       time.Duration // cooldown after hedge close before next hedge (default 15m)
-	HedgeQtyRatio       float64       // hedge position size as ratio of main position (default 0.3)
-	HedgeTPRatio        float64       // hedge TP = min(1U equivalent, mainSL_distance * this ratio) (default 0.5)
+	HedgeMode             bool          // true = long+short simultaneously; false = single strongest direction
+	ForceTrend            bool          // true = disable Range mode, always use Trend mode
+	HedgeOnDrawdown       bool          // true = allow counter-trend Range scalp when main position is losing
+	HedgeDrawdownPct      float64       // min drawdown % to trigger hedge (default 0.005 = 0.5% of entry)
+	HedgeCooldown         time.Duration // cooldown after hedge close before next hedge (default 15m)
+	HedgeQtyRatio         float64       // hedge position size as ratio of main position (default 0.3)
+	HedgeTPRatio          float64       // hedge TP = min(1U equivalent, mainSL_distance * this ratio) (default 0.5)
 
 	// Multi-timeframe
 	PrimaryInterval string   // "5m" — drives GPT signals + entries
@@ -303,16 +607,38 @@ type Config struct {
 	TrendScoreConfirmTF        string  // higher-TF confirm source: "15m" (lastTrendDir) or "1h" (lastHourlyDir)
 	TrendEntryCooldownBars     int     // primary bars to wait after a trend entry before another
 
+	// ── Grid hedge / trail / regime-exit (feat/aistrat-hedge; all default OFF) ──
+	// 1. Tiered hedge: add opposite-side delta when the grid pnlR worsens past a tier.
+	GridHedgeEnabled        bool
+	HedgeTier1PnlR          float64 // pnlR that opens tier 1 (e.g. -1.0)
+	HedgeTier1Ratio         float64 // hedge qty as fraction of main remainQty at tier 1
+	HedgeTier2PnlR          float64
+	HedgeTier2Ratio         float64
+	HedgeTier3PnlR          float64
+	HedgeTier3Ratio         float64
+	HedgeTrailPeakPct       float64 // close hedge when its $favor retreats this fraction from peak
+	HedgeMinPeakFavor       float64 // only arm hedge-trail once peak $favor >= this
+	HedgeMainRecoverPnlR    float64 // close hedge (if favor>=0) once main pnlR recovers past this
+	HedgeReopenCooldownBars int     // primary bars to wait before re-opening a hedge after close
+	// 2. Grid profit-lock trailing: lock gains once pnlR peaks then pulls back.
+	GridTrailEnabled      bool
+	GridTrailActivatePnlR float64 // arm trailing once pnlR first reaches this
+	GridTrailPullbackR    float64 // close main if pnlR retreats this much from its peak
+	// 3. Grid regime-break exit: bail when regime opposes the position for too long.
+	GridRegimeExitEnabled bool
+	GridRegimeExitBars    int     // consecutive adverse-regime bars to trigger
+	GridRegimeExitPnlR    float64 // ...and only if pnlR <= this (negative)
+
 	// Staged TP (trend mode) — exchange-native limit orders
 	// Default (range/slow_trend) TP levels:
-	TPLevels     []float64 // R-multiples for each TP level
-	TPQtySplits  []float64 // fraction of qty for each level
+	TPLevels    []float64 // R-multiples for each TP level
+	TPQtySplits []float64 // fraction of qty for each level
 	// Strong-trend TP levels (wider targets to ride momentum):
 	TrendTPLevels    []float64 // R-multiples for STRONG_TREND/EXPANSION (default [1.0, 1.8])
 	TrendTPQtySplits []float64 // fraction of qty for trend TP (default [0.50, 0.30])
 	TrendBreakevenR  float64   // breakeven R for trend mode (default 0.80)
-	BreakevenR   float64   // R threshold to move SL to breakeven (default 0.5)
-	BreakevenBuf float64   // buffer above/below entry for breakeven SL (default 0.001 = 0.1%)
+	BreakevenR       float64   // R threshold to move SL to breakeven (default 0.5)
+	BreakevenBuf     float64   // buffer above/below entry for breakeven SL (default 0.001 = 0.1%)
 
 	// Trailing stop (trend fallback when staged orders unavailable)
 	TrailBasePct    float64 // base trailing % (default 0.012 = 1.2%)
@@ -324,14 +650,14 @@ type Config struct {
 	MarketEntryConf float64 // confidence threshold for immediate market entry (default 0.90)
 
 	// Range position management
-	RangeBEPct         float64       // PnL % to move SL to breakeven (default 0.003)
-	RangeLockPct       float64       // PnL % to lock in partial profit (default 0.006)
-	RangeLockOffset    float64       // profit lock offset % (default 0.003)
-	RangeTrailPct      float64       // PnL % to start trailing (default 0.008)
-	RangeTrailDist     float64       // trailing distance % (default 0.003)
-	BBWidthMin         float64       // min BB width for range TP (default 0.006)
-	BBWidthMax         float64       // max BB width for range TP (default 0.015)
-	RangeEMAConv       float64       // EMA convergence threshold for regime detection (default 0.003)
+	RangeBEPct      float64 // PnL % to move SL to breakeven (default 0.003)
+	RangeLockPct    float64 // PnL % to lock in partial profit (default 0.006)
+	RangeLockOffset float64 // profit lock offset % (default 0.003)
+	RangeTrailPct   float64 // PnL % to start trailing (default 0.008)
+	RangeTrailDist  float64 // trailing distance % (default 0.003)
+	BBWidthMin      float64 // min BB width for range TP (default 0.006)
+	BBWidthMax      float64 // max BB width for range TP (default 0.015)
+	RangeEMAConv    float64 // EMA convergence threshold for regime detection (default 0.003)
 
 	// MTF scoring
 	MTFStrongTrend  float64 // 15m return threshold for strong trend (default 0.01)
@@ -349,17 +675,17 @@ type Config struct {
 	SignalAccumMax  float64 // cap for accumulated signal score (default 1.5)
 
 	// Regime detection
-	RegimeN               int     // lookback bars for trend strength (default 20)
-	StrongTrendThreshold  float64 // trendStrength > this = STRONG_TREND (default 2.5)
-	StrongTrendMinVol     float64 // min ATR/price for STRONG_TREND (default 0.001)
-	SlowTrendThreshold    float64 // trendStrength > this = SLOW_TREND (default 1.5)
-	SlowTrendDirScore     float64 // min direction score for SLOW_TREND (default 0.60)
-	ExpansionATRK         float64 // bar range > ATR * this = breakout candidate (default 2.0)
-	ExpansionBodyK        float64 // bar body > ATR * this = confirmed breakout (default 1.0)
-	TrendEfficiencyMin    float64 // min efficiency ratio (|net|/sum|moves|) to classify as trend; below = RANGE (default 0.30)
-	TrendExhaustPct       float64 // skip with-trend entry if 4h move > price × this (default 0.035 = 3.5%)
-	RegimeEntryConf       float64 // GPT confidence threshold for with-trend entry in STRONG_TREND/EXPANSION (default 0.80)
-	RangeEntryConf        float64 // GPT confidence threshold when RANGE; 0 = disabled (default 0)
+	RegimeN              int     // lookback bars for trend strength (default 20)
+	StrongTrendThreshold float64 // trendStrength > this = STRONG_TREND (default 2.5)
+	StrongTrendMinVol    float64 // min ATR/price for STRONG_TREND (default 0.001)
+	SlowTrendThreshold   float64 // trendStrength > this = SLOW_TREND (default 1.5)
+	SlowTrendDirScore    float64 // min direction score for SLOW_TREND (default 0.60)
+	ExpansionATRK        float64 // bar range > ATR * this = breakout candidate (default 2.0)
+	ExpansionBodyK       float64 // bar body > ATR * this = confirmed breakout (default 1.0)
+	TrendEfficiencyMin   float64 // min efficiency ratio (|net|/sum|moves|) to classify as trend; below = RANGE (default 0.30)
+	TrendExhaustPct      float64 // skip with-trend entry if 4h move > price × this (default 0.035 = 3.5%)
+	RegimeEntryConf      float64 // GPT confidence threshold for with-trend entry in STRONG_TREND/EXPANSION (default 0.80)
+	RangeEntryConf       float64 // GPT confidence threshold when RANGE; 0 = disabled (default 0)
 
 	// Technical indicator periods
 	RSIPeriod   int     // RSI lookback (default 14)
@@ -374,11 +700,11 @@ type Config struct {
 	VolMAPeriod int     // Volume MA period (default 20)
 
 	// Entry/exit tuning
-	EntryATRK        float64       // entry offset = ATR × EntryATRK (default 0.5; adapts to volatility)
-	MaxEntryDevPct   float64       // max GPT entry deviation from spot (default 0.005)
-	LimitTimeoutBars int           // bars to wait for limit fill (default 2)
-	MinHoldBars      int           // minimum bars before TP/SL checks (default 3)
-	MinTrendBars     int           // minimum bars before trend management (default 5)
+	EntryATRK        float64 // entry offset = ATR × EntryATRK (default 0.5; adapts to volatility)
+	MaxEntryDevPct   float64 // max GPT entry deviation from spot (default 0.005)
+	LimitTimeoutBars int     // bars to wait for limit fill (default 2)
+	MinHoldBars      int     // minimum bars before TP/SL checks (default 3)
+	MinTrendBars     int     // minimum bars before trend management (default 5)
 
 	// GPT tuning
 	GPTTemperature float64       // GPT temperature (default 0.3)
@@ -397,60 +723,60 @@ func DefaultConfig() Config {
 		Leverage: 10, EnableShort: true, ForceTrend: false,
 
 		// ─── 核心风险参数（最常调整）─────────────────────────────────
-		RiskPerTrade:  0.015, // 每笔风险 1.5% equity（旧参数，被 Grid/Trend 分仓参数取代）
+		RiskPerTrade:  0.015,                         // 每笔风险 1.5% equity（旧参数，被 Grid/Trend 分仓参数取代）
 		GridEquityPct: 0.70, GridRiskPerLayer: 0.008, // 网格: 70% equity, 每层风险 0.8%
 		TrendEquityPct: 0.30, TrendRiskPerTrade: 0.01, // 趋势: 30% equity, 每笔风险 1%
-		ATRK:          3.0,   // SLOW_TREND SL = ATR × 3.0
-		SwingSLMinATR: 2.5,   // STRONG_TREND SL 下限 = ATR × 2.5（放宽：给swing SL足够空间）
-		SwingSLMaxATR: 4.0,   // STRONG_TREND SL 上限 = ATR × 4.0（放宽：强趋势需要更多回撤空间）
-		TrailingATRK:  3.0,   // trailing = entryATR × 3.0
+		ATRK:          3.0, // SLOW_TREND SL = ATR × 3.0
+		SwingSLMinATR: 2.5, // STRONG_TREND SL 下限 = ATR × 2.5（放宽：给swing SL足够空间）
+		SwingSLMaxATR: 4.0, // STRONG_TREND SL 上限 = ATR × 4.0（放宽：强趋势需要更多回撤空间）
+		TrailingATRK:  3.0, // trailing = entryATR × 3.0
 
 		// ─── 入场门槛 ─────────────────────────────────────────────
-		ConfidenceThreshold: 0.80,  // 默认/逆趋势入场门槛
-		RegimeEntryConf:     0.72,  // STRONG_TREND/EXPANSION 顺趋势门槛（宽松，抓住更多顺势单）
-		RangeEntryConf:      0.75,  // RANGE 均值回归入场门槛
-		CounterTrendCap:     0.25,  // 逆趋势 GPT conf 硬上限（从0.40降低：防止accumulator叠加逆趋势信号到触发阈值）
-		BoostMinConf:        0.70,  // swing/MTF boost 最低 GPT conf
-		ReversalConf:        0.75,  // GPT reversal 平仓门槛
-		MarketEntryConf:     0.90,  // 市价入场门槛（未使用）
+		ConfidenceThreshold: 0.80, // 默认/逆趋势入场门槛
+		RegimeEntryConf:     0.72, // STRONG_TREND/EXPANSION 顺趋势门槛（宽松，抓住更多顺势单）
+		RangeEntryConf:      0.75, // RANGE 均值回归入场门槛
+		CounterTrendCap:     0.25, // 逆趋势 GPT conf 硬上限（从0.40降低：防止accumulator叠加逆趋势信号到触发阈值）
+		BoostMinConf:        0.70, // swing/MTF boost 最低 GPT conf
+		ReversalConf:        0.75, // GPT reversal 平仓门槛
+		MarketEntryConf:     0.90, // 市价入场门槛（未使用）
 
 		// ─── 信号积累 ─────────────────────────────────────────────
-		AccumBaseThresh: 0.30,  // conf > 0.30 才积累：add = conf - 0.30
-		SignalDecay:     0.80,  // 每bar衰减 × 0.80
-		SignalAccumMax:  0.85,  // 积累上限（降低：溢出信号准确率仅20%）
+		AccumBaseThresh:  0.30, // conf > 0.30 才积累：add = conf - 0.30
+		SignalDecay:      0.80, // 每bar衰减 × 0.80
+		SignalAccumMax:   0.85, // 积累上限（降低：溢出信号准确率仅20%）
 		CallIntervalBars: 1, RangeCallIntervalBars: 3, LookbackBars: 60,
 
 		// ─── TP 获利 ──────────────────────────────────────────────
-		TPLevels: []float64{1.0}, TPQtySplits: []float64{0.50},              // 默认 TP: 1.0R 平 50%
+		TPLevels: []float64{1.0}, TPQtySplits: []float64{0.50}, // 默认 TP: 1.0R 平 50%
 		TrendTPLevels: []float64{2.0}, TrendTPQtySplits: []float64{0.30}, // 强趋势 TP: 2.0R 平 30%，70% 靠 trailing 吃趋势
-		GptTPMinR: 0.50,  // GPT支撑/阻力位做TP：有效范围 0.5R ~ 2.5R
+		GptTPMinR: 0.50, // GPT支撑/阻力位做TP：有效范围 0.5R ~ 2.5R
 		GptTPMaxR: 2.50,
-		BounceTPR: 0.40,  // TP部分成交后，价格从peak回撤 0.4R 平掉剩余（缩小配合0.5R TP）
+		BounceTPR: 0.40, // TP部分成交后，价格从peak回撤 0.4R 平掉剩余（缩小配合0.5R TP）
 
 		// ─── 保护机制 ─────────────────────────────────────────────
 		TrendBreakevenR: 0.50, BreakevenR: 0.50, BreakevenBuf: 0.001, // 盈利0.5R后SL移到入场价，防止赚变亏
 		EmergencyPnlR: -0.9,  // 亏损超 0.9R 触发紧急GPT检查
-		MinSLDistPct: 0.008,  // SL最小距离 0.8%
-		MaxRPercent: 0.015,   // R/price > 1.5% 跳过交易（放宽：旧1%在宽SL下会误拦）
+		MinSLDistPct:  0.008, // SL最小距离 0.8%
+		MaxRPercent:   0.015, // R/price > 1.5% 跳过交易（放宽：旧1%在宽SL下会误拦）
 
 		// ─── 入场微调 ─────────────────────────────────────────────
-		EntryATRK: 0.5,              // 入场 offset = ATR × 0.5（自适应波动率，正常≈$2.5，高波动≈$4）
-		MaxEntryDevPct: 0.010,   // GPT入场价最大偏差 1.0%
-		PosSizePct: 0.40,        // 单笔最大margin占比 40%
-		ConfQtyScale: false,     // 不按confidence缩放qty
-		FeeDragPct: 0.0004,      // 手续费 Maker 0.02% × 2 = 0.04% round-trip
+		EntryATRK:      0.5,    // 入场 offset = ATR × 0.5（自适应波动率，正常≈$2.5，高波动≈$4）
+		MaxEntryDevPct: 0.010,  // GPT入场价最大偏差 1.0%
+		PosSizePct:     0.40,   // 单笔最大margin占比 40%
+		ConfQtyScale:   false,  // 不按confidence缩放qty
+		FeeDragPct:     0.0004, // 手续费 Maker 0.02% × 2 = 0.04% round-trip
 
 		// ─── 时间控制 ─────────────────────────────────────────────
-		LimitTimeoutBars: 2,  // 限价单超时 2 bars (10min)
-		MinHoldBars: 3,       // 最少持仓 3 bars (15min)
-		MinTrendBars: 5,      // 趋势管理启动 5 bars (25min)
+		LimitTimeoutBars: 2, // 限价单超时 2 bars (10min)
+		MinHoldBars:      3, // 最少持仓 3 bars (15min)
+		MinTrendBars:     5, // 趋势管理启动 5 bars (25min)
 
 		// ─── Regime 检测 ──────────────────────────────────────────
 		RegimeN: 20, StrongTrendThreshold: 2.5, StrongTrendMinVol: 0.001,
 		SlowTrendThreshold: 1.5, SlowTrendDirScore: 0.60,
 		ExpansionATRK: 2.0, ExpansionBodyK: 1.0,
-		TrendEfficiencyMin: 0.40, // 效率比<0.40=震荡市→不交易（收紧：防止震荡市误判为趋势）
-		TrendExhaustPct: 0.035,  // 4h趋势运行>3.5%时不再追入（ETH≈$80，防止追在顶/底）
+		TrendEfficiencyMin: 0.40,  // 效率比<0.40=震荡市→不交易（收紧：防止震荡市误判为趋势）
+		TrendExhaustPct:    0.035, // 4h趋势运行>3.5%时不再追入（ETH≈$80，防止追在顶/底）
 
 		// ─── MTF 评分 ─────────────────────────────────────────────
 		MTFStrongTrend: 0.01, MTFWeakTrend: 0.002,
@@ -472,12 +798,12 @@ func DefaultConfig() Config {
 		BBWidthMin: 0.006, BBWidthMax: 0.015, RangeEMAConv: 0.003,
 		GridMaxLayers: 3, GridSpacingPct: 0.01, GridTPPct: 0.004, GridQtyRatio: 0.5, GridMaxTPDist: 8.0, // layers add PYRAMID-only (winning side, see manageGrid) — never average into losers
 		GridStaleBars: 576, GridStalePnlR: -1.5, // 48h @ 5m bars × pnlR < -1.5R → 强制释放槽位
-		CatastrophicStopR: -3.0, // hard stop for ALL modes — cap any single position loss at ~3R
-		TrendCutR: 0, // trend-confirmed early cut: 0 = off (enable per-engine via params, e.g. -1.5)
-		RangeTrendFilter:    true,   // Phase 2: don't fade a confirmed 1h trend even in RANGE mode
-		HourlyTrendMinSlope: 0.0002, // 0.02%/bar — a flat/lagging EMA reads neutral (don't over-suppress)
-		HourlyTrendEMA:      16,     // 4h trend reference (was period-80 = 20h, too laggy → forced longs into falls)
-		HourlyTrendStickyBars: 0,    // 1h-dir hysteresis: 0 = off (enable per-engine via params, e.g. 12 ≈ 1h)
+		CatastrophicStopR:          -3.0,   // hard stop for ALL modes — cap any single position loss at ~3R
+		TrendCutR:                  0,      // trend-confirmed early cut: 0 = off (enable per-engine via params, e.g. -1.5)
+		RangeTrendFilter:           true,   // Phase 2: don't fade a confirmed 1h trend even in RANGE mode
+		HourlyTrendMinSlope:        0.0002, // 0.02%/bar — a flat/lagging EMA reads neutral (don't over-suppress)
+		HourlyTrendEMA:             16,     // 4h trend reference (was period-80 = 20h, too laggy → forced longs into falls)
+		HourlyTrendStickyBars:      0,      // 1h-dir hysteresis: 0 = off (enable per-engine via params, e.g. 12 ≈ 1h)
 		TrendScoreThreshold:        3.5,
 		TrendAlignFullPenaltyScore: 2.5,
 		TrendScoreDecay:            0.9,
@@ -485,6 +811,13 @@ func DefaultConfig() Config {
 		TrendScoreMax:              5.0,
 		TrendScoreConfirmTF:        "15m",
 		TrendEntryCooldownBars:     12,
+		// Grid hedge/trail/regime-exit — sensible params, but all *Enabled default false (OFF).
+		HedgeTier1PnlR: -1.0, HedgeTier1Ratio: 0.25,
+		HedgeTier2PnlR: -2.0, HedgeTier2Ratio: 0.50,
+		HedgeTier3PnlR: -3.0, HedgeTier3Ratio: 0.80,
+		HedgeTrailPeakPct: 0.50, HedgeMinPeakFavor: 0.10, HedgeMainRecoverPnlR: -0.3, HedgeReopenCooldownBars: 6,
+		GridTrailActivatePnlR: 1.0, GridTrailPullbackR: 0.5,
+		GridRegimeExitBars: 8, GridRegimeExitPnlR: -1.0,
 		TrailBasePct: 0.012, TrailLowVolPct: 0.008, TrailHighVolPct: 0.015, TrailFloorPct: 0.005,
 
 		// ─── 风控 ─────────────────────────────────────────────────
@@ -494,5 +827,25 @@ func DefaultConfig() Config {
 	}
 }
 
-func toFloat(v any) float64 { switch n := v.(type) { case float64: return n; case int: return float64(n); case int64: return float64(n) }; return 0 }
-func toInt(v any) int { switch n := v.(type) { case float64: return int(n); case int: return n; case int64: return int(n) }; return 0 }
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 0
+}
+func toInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return 0
+}

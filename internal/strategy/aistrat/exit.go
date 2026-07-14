@@ -24,7 +24,9 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 	s.stagedEP = ep
 
 	R := pos.R
-	if R <= 0 { return }
+	if R <= 0 {
+		return
+	}
 	// R = |entry - SL|, directly from position. No ATR cap — let profits run.
 	entry := pos.entryPrice
 	qty := pos.remainQty // use remaining qty, not initial (may have been partially closed)
@@ -68,7 +70,9 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 				dist = gptDist
 			}
 		}
-		if dist < s.cfg.GptTPMinR*R { dist = s.cfg.GptTPMinR * R }
+		if dist < s.cfg.GptTPMinR*R {
+			dist = s.cfg.GptTPMinR * R
+		}
 
 		var tpPrice float64
 		if pos.side == "LONG" {
@@ -77,7 +81,9 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 			tpPrice = math.Round((entry-dist)*100) / 100
 		}
 		q := math.Floor(qty*splits[i]*1000) / 1000
-		if q <= 0 { q = 0.001 }
+		if q <= 0 {
+			q = 0.001
+		}
 		tps = append(tps, strategy.StagedTP{Price: tpPrice, Qty: q})
 	}
 
@@ -111,6 +117,10 @@ func (s *AIStrategy) placeStagedExitOrders(ctx *strategy.Context, pos *posState)
 // ─── Close Helpers ───────────────────────────────────────────────────────────
 
 func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posState, reason string) {
+	// Unwind any tiered hedge before flattening the main (no-op unless a hedge is open).
+	// This is the single choke point that covers every close path (TP, stale, trail,
+	// regime-exit, external). feat/aistrat-hedge.
+	s.closeHedgeAll(ctx, p, s.lastPrice)
 	qty := math.Floor(p.remainQty*1000) / 1000
 	// Reconcile the close qty to EXCHANGE truth (the position syncer). The
 	// strategy-internal remainQty drifts from the real position (missed/async
@@ -135,7 +145,10 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 			qty = exQty
 		}
 	}
-	if qty <= 0 { *pptr = nil; return }
+	if qty <= 0 {
+		*pptr = nil
+		return
+	}
 
 	// Check if the exchange already closed the position (algo SL/TP triggered via UDS).
 	// In that case, skip placing a redundant close order — just clean up local state.
@@ -148,7 +161,9 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 		if p.stagedTPPlaced {
 			if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
 				posSide := "LONG"
-				if p.side == "SHORT" { posSide = "SHORT" }
+				if p.side == "SHORT" {
+					posSide = "SHORT"
+				}
 				ep.CancelAllProtective(s.cfg.Symbol, posSide)
 			}
 		}
@@ -163,7 +178,9 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 	if p.stagedTPPlaced {
 		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
 			posSide := "LONG"
-			if p.side == "SHORT" { posSide = "SHORT" }
+			if p.side == "SHORT" {
+				posSide = "SHORT"
+			}
 			ep.CancelAllProtective(s.cfg.Symbol, posSide)
 		}
 		p.stagedTPPlaced = false
@@ -225,10 +242,16 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 	}
 	bars := s.primaryBars()
 	closePrice := 0.0
-	if len(bars) > 0 { closePrice = bars[len(bars)-1].Close }
+	if len(bars) > 0 {
+		closePrice = bars[len(bars)-1].Close
+	}
 	pnl := 0.0
-	if p.side == "LONG" { pnl = (closePrice - p.entryPrice) * qty }
-	if p.side == "SHORT" { pnl = (p.entryPrice - closePrice) * qty }
+	if p.side == "LONG" {
+		pnl = (closePrice - p.entryPrice) * qty
+	}
+	if p.side == "SHORT" {
+		pnl = (p.entryPrice - closePrice) * qty
+	}
 	s.log.Info("AI: CLOSE", zap.String("side", p.side), zap.String("reason", reason),
 		zap.Float64("entry", p.entryPrice), zap.Float64("qty", qty), zap.Bool("market", useMarket),
 		zap.Float64("est_pnl", pnl))
@@ -306,7 +329,9 @@ func (s *AIStrategy) checkDayReset(ctx *strategy.Context, price float64) {
 
 // canHedge returns true if the main position is in sufficient drawdown and cooldown has elapsed.
 func (s *AIStrategy) canHedge(price float64, mainPos *posState) bool {
-	if mainPos == nil || !mainPos.filled { return false }
+	if mainPos == nil || !mainPos.filled {
+		return false
+	}
 	// Cooldown: don't hedge again too soon after last hedge closed
 	if !s.lastHedgeClose.IsZero() && time.Since(s.lastHedgeClose) < s.cfg.HedgeCooldown {
 		return false
@@ -320,4 +345,3 @@ func (s *AIStrategy) canHedge(price float64, mainPos *posState) bool {
 	}
 	return drawdownPct >= s.cfg.HedgeDrawdownPct
 }
-
