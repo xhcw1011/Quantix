@@ -1,6 +1,8 @@
 package guardian
 
 import (
+	"math"
+
 	"github.com/Quantix/quantix/internal/exchange"
 	"github.com/Quantix/quantix/internal/strategy"
 	"go.uber.org/zap"
@@ -21,6 +23,13 @@ type Guardian struct {
 	barsHeld    int
 	closePlaced bool // a protective close has been submitted (prevents dupes)
 	done        bool // the protective close has filled
+
+	// alerts (optional)
+	alerts   *AlertEngine
+	dispatch Dispatcher
+	sma      *SMA
+	avgATR   float64
+	avgAlpha float64
 }
 
 // NewGuardian builds a Guardian for an already-armed Protection.
@@ -28,7 +37,23 @@ func NewGuardian(symbol string, prot *Protection, atrWindow int, log *zap.Logger
 	if log == nil {
 		log = zap.NewNop()
 	}
-	return &Guardian{symbol: symbol, prot: prot, atr: NewATR(atrWindow), log: log}
+	// AvgATR baseline = EMA of ATR over ~4× the ATR window (for vol-spike detection).
+	alpha := 2.0 / (float64(4*atrWindow) + 1)
+	return &Guardian{symbol: symbol, prot: prot, atr: NewATR(atrWindow), log: log, avgAlpha: alpha}
+}
+
+// SetAlerts attaches an alert engine and dispatcher. maPeriod>0 enables the MA
+// reference used by MAState (0 = no MA rules). Safe to call once before running.
+func (g *Guardian) SetAlerts(engine *AlertEngine, d Dispatcher) {
+	g.alerts = engine
+	g.dispatch = d
+}
+
+// SetMAPeriod enables the reference moving average for MA-cross fact alerts.
+func (g *Guardian) SetMAPeriod(period int) {
+	if period > 0 {
+		g.sma = NewSMA(period)
+	}
 }
 
 // Name identifies the strategy type.
@@ -45,9 +70,15 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		pc = bar.Open
 	}
 	atr := g.atr.Update(bar.High, bar.Low, pc)
+	g.updateAvgATR(atr)
+	if g.sma != nil {
+		g.sma.Add(bar.Close)
+	}
 	g.prevClose = bar.Close
 	g.lastPrice = bar.Close
 	g.barsHeld++
+
+	g.evalAlerts(bar.Close)
 
 	// Exit check first, using the stop as it stood during the bar.
 	if g.checkExitBar(ctx, bar) {
@@ -63,6 +94,7 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 		return
 	}
 	g.lastPrice = price
+	g.evalAlerts(price)
 	if g.prot.TPHit(price) {
 		g.placeClose(ctx, "take_profit")
 		return
@@ -72,6 +104,45 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 		return
 	}
 	g.prot.UpdateStop(price, g.atr.Value())
+}
+
+func (g *Guardian) updateAvgATR(atr float64) {
+	if atr <= 0 {
+		return
+	}
+	if g.avgATR == 0 {
+		g.avgATR = atr
+		return
+	}
+	g.avgATR += g.avgAlpha * (atr - g.avgATR)
+}
+
+// evalAlerts builds the snapshot, runs the rules, and dispatches what fired.
+func (g *Guardian) evalAlerts(price float64) {
+	if g.alerts == nil || g.alerts.Len() == 0 {
+		return
+	}
+	r := g.prot.R
+	stopDistR := 0.0
+	if r > 0 {
+		stopDistR = math.Abs(price-g.prot.Stop) / r
+	}
+	c := AlertCtx{
+		Price:     price,
+		PnlR:      g.prot.PnlR(price),
+		StopDistR: stopDistR,
+		ATR:       g.atr.Value(),
+		AvgATR:    g.avgATR,
+		BarsHeld:  g.barsHeld,
+	}
+	if g.sma != nil && g.sma.Ready() {
+		c.MA, c.HasMA = g.sma.Value(), true
+	}
+	for _, a := range g.alerts.Evaluate(c) {
+		if g.dispatch != nil {
+			_ = g.dispatch.Send(a.Title, "["+g.symbol+"] "+a.Msg)
+		}
+	}
 }
 
 // OnFill marks the guardian done once its protective close has filled.
