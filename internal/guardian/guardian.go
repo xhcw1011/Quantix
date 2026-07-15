@@ -1,6 +1,7 @@
 package guardian
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/Quantix/quantix/internal/exchange"
@@ -161,6 +162,14 @@ func (g *Guardian) saveState() {
 	})
 }
 
+// notifyAction sends a factual notification about something the guardian did
+// (placed/moved a stop, closed, retired). No-op when no dispatcher is wired.
+func (g *Guardian) notifyAction(event, msg string) {
+	if g.dispatch != nil {
+		_ = g.dispatch.Send(event, "["+g.symbol+"] "+msg)
+	}
+}
+
 // ensureRestingStop places the resting stop once, the first time the position is armed.
 func (g *Guardian) ensureRestingStop(ctx *strategy.Context) {
 	if !g.wantRestingStop || g.restingTried || g.prot == nil || g.inactive() {
@@ -168,6 +177,9 @@ func (g *Guardian) ensureRestingStop(ctx *strategy.Context) {
 	}
 	g.restingTried = true
 	g.placeRestingStop(ctx)
+	if g.restingMode {
+		g.notifyAction("stop_placed", fmt.Sprintf("已挂交易所止损单 @ %.4g,即使程序掉线也会替你止损", g.prot.Stop))
+	}
 }
 
 // placeRestingStop submits a reduce-only STOP_MARKET at the current stop. On success
@@ -206,6 +218,7 @@ func (g *Guardian) syncRestingStop(ctx *strategy.Context) {
 	_ = ctx.CancelOrder(g.stopOrderID)
 	g.stopOrderID = ""
 	g.placeRestingStop(ctx)
+	g.notifyAction("stop_advanced", fmt.Sprintf("止损已上移到 %.4g,锁住更多利润", g.prot.Stop))
 }
 
 // stopReq builds the reduce-only STOP_MARKET order for the current stop.
@@ -310,6 +323,7 @@ func (g *Guardian) resyncPosition(ctx *strategy.Context) bool {
 		}
 		g.log.Info("guardian: position resized, stop re-sized",
 			zap.String("symbol", g.symbol), zap.Float64("qty", absQty))
+		g.notifyAction("resized", fmt.Sprintf("检测到仓位变动,止损数量已调整为 %.6g", absQty))
 	}
 	return false
 }
@@ -324,6 +338,7 @@ func (g *Guardian) retire(ctx *strategy.Context) {
 	g.saveState()
 	g.log.Info("guardian: position closed externally, retiring",
 		zap.String("symbol", g.symbol))
+	g.notifyAction("retired", "检测到你已手动平掉这个仓位,已撤掉止损单、停止守护")
 }
 
 func (g *Guardian) updateAvgATR(atr float64) {
@@ -374,6 +389,7 @@ func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
 		g.log.Info("guardian: protective exit filled",
 			zap.String("symbol", g.symbol),
 			zap.Float64("price", fill.Price))
+		g.notifyAction("closed", fmt.Sprintf("已按保护单平仓 @ %.4g,守护结束", fill.Price))
 	}
 }
 
@@ -456,6 +472,11 @@ func (g *Guardian) placeClose(ctx *strategy.Context, reason string) {
 	req.Reason = "guardian_" + reason
 	ctx.PlaceOrder(req)
 	g.closePlaced = true
+	verb := "止损"
+	if reason == "take_profit" {
+		verb = "止盈"
+	}
+	g.notifyAction("closing", fmt.Sprintf("已触发%s,正在平仓(约 %.4g)", verb, g.lastPrice))
 	g.log.Info("guardian: protective close submitted",
 		zap.String("symbol", g.symbol),
 		zap.String("side", g.prot.Side),
