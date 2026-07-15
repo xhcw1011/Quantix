@@ -37,10 +37,11 @@ type Guardian struct {
 	// exchange-native STOP_MARKET that survives bot/server death; the bot only
 	// advances it. If placement fails, restingMode stays false and the tick-based
 	// close is used as a fallback.
-	wantRestingStop bool
-	restingMode     bool
-	restingTried    bool
-	stopOrderID     string
+	wantRestingStop  bool
+	restingMode      bool
+	restingTried     bool
+	stopOrderID      string
+	restingStopPrice float64 // stop price currently resting on the exchange
 }
 
 // NewGuardian builds a Guardian for an already-armed Protection.
@@ -128,10 +129,31 @@ func (g *Guardian) placeRestingStop(ctx *strategy.Context) {
 		return
 	}
 	g.stopOrderID = id
+	g.restingStopPrice = g.prot.Stop
 	g.restingMode = true
 	g.log.Info("guardian: resting stop placed",
 		zap.String("symbol", g.symbol), zap.Float64("stop", g.prot.Stop),
 		zap.String("order", id))
+}
+
+// syncRestingStop advances the resting stop when the trail has moved it materially
+// in the trade's favour (cancel-then-replace, matching the broker's ReplaceSLOrder
+// convention). Sub-epsilon moves are ignored to avoid churn.
+func (g *Guardian) syncRestingStop(ctx *strategy.Context) {
+	if !g.restingMode || g.stopOrderID == "" {
+		return
+	}
+	eps := math.Max(g.prot.Stop*0.0005, 1e-9) // 0.05% of price
+	improved := g.prot.Stop-g.restingStopPrice >= eps
+	if g.prot.Side == SideShort {
+		improved = g.restingStopPrice-g.prot.Stop >= eps
+	}
+	if !improved {
+		return
+	}
+	_ = ctx.CancelOrder(g.stopOrderID)
+	g.stopOrderID = ""
+	g.placeRestingStop(ctx)
 }
 
 // stopReq builds the reduce-only STOP_MARKET order for the current stop.
@@ -183,8 +205,9 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if g.checkExitBar(ctx, bar) {
 		return
 	}
-	// Then trail for the next bar.
+	// Then trail for the next bar, advancing the resting stop if it moved.
 	g.prot.UpdateStop(bar.Close, atr)
+	g.syncRestingStop(ctx)
 }
 
 // OnTick enforces the stop/TP precisely between bars and trails on favourable ticks.
@@ -205,6 +228,7 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 		return
 	}
 	g.prot.UpdateStop(price, g.atr.Value())
+	g.syncRestingStop(ctx)
 }
 
 func (g *Guardian) updateAvgATR(atr float64) {

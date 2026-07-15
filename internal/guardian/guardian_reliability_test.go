@@ -91,3 +91,30 @@ func TestGuardian_FallsBackToTickCloseWhenRestingUnsupported(t *testing.T) {
 		t.Fatalf("fallback should place exactly 1 market close, got %d", n)
 	}
 }
+
+func TestGuardian_AdvancesRestingStopOnTrail(t *testing.T) {
+	g, b, ctx := newRestingLong()
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // arm + rest @95
+	g.OnTick(ctx, 106)                                                      // activate, stop -> 101
+	g.OnTick(ctx, 110)                                                      // stop -> 105
+
+	so := b.byType(strategy.OrderStopMarket)
+	last := so[len(so)-1]
+	if last.StopPrice != 105 {
+		t.Fatalf("resting stop should advance to 105, got %v (all: %d)", last.StopPrice, len(so))
+	}
+	if len(b.canceled) < 1 {
+		t.Fatal("old resting stop must be canceled when replaced")
+	}
+}
+
+func TestGuardian_DoesNotChurnRestingStopBelowEpsilon(t *testing.T) {
+	g, b, ctx := newRestingLong()
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
+	g.OnTick(ctx, 106) // activate, stop -> 101, replace
+	n := len(b.byType(strategy.OrderStopMarket))
+	g.OnTick(ctx, 106.02) // stop -> ~101.02, tiny advance
+	if len(b.byType(strategy.OrderStopMarket)) != n {
+		t.Fatal("sub-epsilon advance must not churn a replacement")
+	}
+}
