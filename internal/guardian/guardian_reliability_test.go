@@ -150,3 +150,45 @@ func TestGuardian_RestoresTrailedStopAfterRestart(t *testing.T) {
 		t.Fatalf("restored guardian must not place a duplicate resting stop, got %d", n)
 	}
 }
+
+func TestGuardian_RetiresWhenPositionClosedExternally(t *testing.T) {
+	g := NewGuardian("ETHUSDT", NewProtection(SideLong, 100, 1, trailCfg(), 0), 14, zap.NewNop())
+	g.SetRestingStop(true)
+	pf := &gPortfolio{qty: 1, avg: 100}
+	b := &relBroker{}
+	ctx := strategy.NewContext(pf, b, zap.NewNop())
+
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // arm + resting stop
+	pf.qty = 0                                                              // user closes / liquidation
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // detect flat
+
+	if !g.done {
+		t.Fatal("guardian must retire (done) when the position is closed externally")
+	}
+	if len(b.canceled) < 1 {
+		t.Fatal("guardian must cancel its resting stop on retire (no orphan)")
+	}
+	if n := len(b.byType(strategy.OrderMarket)); n != 0 {
+		t.Fatalf("must not place a close on a flat account, got %d", n)
+	}
+}
+
+func TestGuardian_ResizesRestingStopWhenPositionChanges(t *testing.T) {
+	g := NewGuardian("ETHUSDT", NewProtection(SideLong, 100, 1, trailCfg(), 0), 14, zap.NewNop())
+	g.SetRestingStop(true)
+	pf := &gPortfolio{qty: 1, avg: 100}
+	b := &relBroker{}
+	ctx := strategy.NewContext(pf, b, zap.NewNop())
+
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // resting stop qty 1
+	pf.qty = 2                                                              // user added to the position
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // detect resize
+
+	so := b.byType(strategy.OrderStopMarket)
+	if so[len(so)-1].Qty != 2 {
+		t.Fatalf("resting stop must resize to qty 2, got %v", so[len(so)-1].Qty)
+	}
+	if len(b.canceled) < 1 {
+		t.Fatal("old resting stop must be canceled on resize")
+	}
+}

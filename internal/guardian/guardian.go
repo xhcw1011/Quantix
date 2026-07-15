@@ -250,6 +250,9 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		}
 	}
 	g.maybeRestore()
+	if g.resyncPosition(ctx) { // position closed externally → retired
+		return
+	}
 	g.ensureRestingStop(ctx)
 	g.barsHeld++
 	g.evalAlerts(bar.Close)
@@ -283,6 +286,44 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 	}
 	g.prot.UpdateStop(price, g.atr.Value())
 	g.syncRestingStop(ctx)
+}
+
+// resyncPosition reconciles against the live account position each bar. If the
+// position vanished (user closed / liquidated) it retires; if the size changed it
+// updates the protected qty and re-sizes the resting stop. Returns true if the
+// guardian retired this cycle.
+func (g *Guardian) resyncPosition(ctx *strategy.Context) bool {
+	if g.prot == nil || g.inactive() || ctx.Portfolio == nil {
+		return false
+	}
+	qty, _, ok := ctx.Portfolio.Position(g.symbol)
+	if !ok || qty == 0 {
+		g.retire(ctx)
+		return true
+	}
+	if absQty := math.Abs(qty); absQty != g.prot.Qty {
+		g.prot.Qty = absQty
+		if g.restingMode && g.stopOrderID != "" {
+			_ = ctx.CancelOrder(g.stopOrderID)
+			g.stopOrderID = ""
+			g.placeRestingStop(ctx)
+		}
+		g.log.Info("guardian: position resized, stop re-sized",
+			zap.String("symbol", g.symbol), zap.Float64("qty", absQty))
+	}
+	return false
+}
+
+// retire cancels the resting stop and marks the guardian done (position gone).
+func (g *Guardian) retire(ctx *strategy.Context) {
+	if g.stopOrderID != "" {
+		_ = ctx.CancelOrder(g.stopOrderID)
+		g.stopOrderID = ""
+	}
+	g.done = true
+	g.saveState()
+	g.log.Info("guardian: position closed externally, retiring",
+		zap.String("symbol", g.symbol))
 }
 
 func (g *Guardian) updateAvgATR(atr float64) {
