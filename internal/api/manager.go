@@ -461,9 +461,15 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 	// Build notifier: load user's per-user Telegram config from DB, then optionally add email.
 	notifier := m.buildNotifier(context.Background(), userID)
 
-	// Guardian strategies deliver their alerts through the same notifier; wire it in.
-	if gs, ok := strat.(interface{ SetDispatcher(guardian.Dispatcher) }); ok {
-		gs.SetDispatcher(guardian.NewNotifyDispatcher(notifier))
+	// Guardian: wire the notifier for alerts, and for LIVE mode enable the
+	// exchange-native resting stop (survives bot/server death) plus DB-backed
+	// trail-state persistence (restores the advanced stop on restart).
+	if g, ok := strat.(*guardian.Guardian); ok {
+		g.SetDispatcher(guardian.NewNotifyDispatcher(notifier))
+		if req.Mode == "live" {
+			g.SetRestingStop(true)
+			g.SetStateStore(&guardianStateStore{store: m.store}, engineID)
+		}
 	}
 
 	if req.Mode == "paper" {
