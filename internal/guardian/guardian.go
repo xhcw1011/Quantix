@@ -32,6 +32,15 @@ type Guardian struct {
 	sma      *SMA
 	avgATR   float64
 	avgAlpha float64
+
+	// resting-stop reliability (opt-in; live). When on, the protective stop is an
+	// exchange-native STOP_MARKET that survives bot/server death; the bot only
+	// advances it. If placement fails, restingMode stays false and the tick-based
+	// close is used as a fallback.
+	wantRestingStop bool
+	restingMode     bool
+	restingTried    bool
+	stopOrderID     string
 }
 
 // NewGuardian builds a Guardian for an already-armed Protection.
@@ -95,6 +104,51 @@ func (g *Guardian) SetMAPeriod(period int) {
 // notifier here after constructing the strategy from the registry).
 func (g *Guardian) SetDispatcher(d Dispatcher) { g.dispatch = d }
 
+// SetRestingStop enables placing an exchange-native resting STOP_MARKET as the
+// protective stop (survives bot/server death). The live engine turns this on; it
+// stays off in backtest/paper, where the tick-based close is used.
+func (g *Guardian) SetRestingStop(on bool) { g.wantRestingStop = on }
+
+// ensureRestingStop places the resting stop once, the first time the position is armed.
+func (g *Guardian) ensureRestingStop(ctx *strategy.Context) {
+	if !g.wantRestingStop || g.restingTried || g.prot == nil || g.inactive() {
+		return
+	}
+	g.restingTried = true
+	g.placeRestingStop(ctx)
+}
+
+// placeRestingStop submits a reduce-only STOP_MARKET at the current stop. On success
+// the exchange owns the trigger (the bot only advances it); on failure restingMode
+// stays false and the tick-based close takes over.
+func (g *Guardian) placeRestingStop(ctx *strategy.Context) {
+	id := ctx.PlaceOrder(g.stopReq())
+	if id == "" {
+		g.restingMode = false
+		return
+	}
+	g.stopOrderID = id
+	g.restingMode = true
+	g.log.Info("guardian: resting stop placed",
+		zap.String("symbol", g.symbol), zap.Float64("stop", g.prot.Stop),
+		zap.String("order", id))
+}
+
+// stopReq builds the reduce-only STOP_MARKET order for the current stop.
+func (g *Guardian) stopReq() strategy.OrderRequest {
+	var req strategy.OrderRequest
+	if g.prot.Side == SideLong {
+		req = strategy.OrderRequest{Symbol: g.symbol, Side: strategy.SideSell, PositionSide: strategy.PositionSideLong}
+	} else {
+		req = strategy.OrderRequest{Symbol: g.symbol, Side: strategy.SideBuy, PositionSide: strategy.PositionSideShort}
+	}
+	req.Type = strategy.OrderStopMarket
+	req.Qty = g.prot.Qty
+	req.StopPrice = g.prot.Stop
+	req.Reason = "guardian_resting_stop"
+	return req
+}
+
 // Name identifies the strategy type.
 func (g *Guardian) Name() string { return "guardian" }
 
@@ -121,6 +175,7 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			return
 		}
 	}
+	g.ensureRestingStop(ctx)
 	g.barsHeld++
 	g.evalAlerts(bar.Close)
 
@@ -137,13 +192,15 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 	if g.inactive() || g.prot == nil {
 		return
 	}
+	g.ensureRestingStop(ctx)
 	g.lastPrice = price
 	g.evalAlerts(price)
 	if g.prot.TPHit(price) {
 		g.placeClose(ctx, "take_profit")
 		return
 	}
-	if g.prot.StopHit(price) {
+	// In resting mode the exchange owns the stop trigger; the bot only trails it.
+	if !g.restingMode && g.prot.StopHit(price) {
 		g.placeClose(ctx, g.stopReason())
 		return
 	}
@@ -189,10 +246,12 @@ func (g *Guardian) evalAlerts(price float64) {
 	}
 }
 
-// OnFill marks the guardian done once its protective close has filled.
+// OnFill marks the guardian done once its protective order (resting stop or a
+// tick-based close) has filled.
 func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
-	if g.closePlaced && !g.done {
+	if !g.done && (g.closePlaced || g.stopOrderID != "") {
 		g.done = true
+		g.stopOrderID = ""
 		g.log.Info("guardian: protective exit filled",
 			zap.String("symbol", g.symbol),
 			zap.Float64("price", fill.Price))
@@ -243,7 +302,7 @@ func (g *Guardian) checkExitBar(ctx *strategy.Context, bar exchange.Kline) bool 
 			g.placeClose(ctx, "take_profit")
 			return true
 		}
-		if g.prot.StopHit(bar.Low) {
+		if !g.restingMode && g.prot.StopHit(bar.Low) {
 			g.placeClose(ctx, g.stopReason())
 			return true
 		}
@@ -252,7 +311,7 @@ func (g *Guardian) checkExitBar(ctx *strategy.Context, bar exchange.Kline) bool 
 			g.placeClose(ctx, "take_profit")
 			return true
 		}
-		if g.prot.StopHit(bar.High) {
+		if !g.restingMode && g.prot.StopHit(bar.High) {
 			g.placeClose(ctx, g.stopReason())
 			return true
 		}
@@ -263,6 +322,11 @@ func (g *Guardian) checkExitBar(ctx *strategy.Context, bar exchange.Kline) bool 
 func (g *Guardian) placeClose(ctx *strategy.Context, reason string) {
 	if g.closePlaced {
 		return
+	}
+	// Cancel any resting stop first so it doesn't orphan on the exchange.
+	if g.stopOrderID != "" {
+		_ = ctx.CancelOrder(g.stopOrderID)
+		g.stopOrderID = ""
 	}
 	var req strategy.OrderRequest
 	if g.prot.Side == SideLong {
