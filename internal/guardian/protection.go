@@ -189,3 +189,14 @@ func (p *Protection) SetActivated(a bool) { p.activated = a }
 
 // TPPrice returns the computed take-profit price (0 if disabled).
 func (p *Protection) TPPrice() float64 { return p.tp }
+
+// RiskUSD is the worst-case loss to the initial stop (qty × per-unit risk).
+func (p *Protection) RiskUSD() float64 { return p.Qty * p.R }
+
+// RiskPct is the initial stop distance as a percent of entry.
+func (p *Protection) RiskPct() float64 {
+	if p.Entry > 0 {
+		return p.R / p.Entry * 100
+	}
+	return 0
+}

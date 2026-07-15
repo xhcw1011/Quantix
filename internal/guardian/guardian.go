@@ -48,6 +48,8 @@ type Guardian struct {
 	store        StateStore
 	stateKey     string
 	restoreTried bool
+
+	armNotified bool // arm-summary (risk preview) sent once
 }
 
 // NewGuardian builds a Guardian for an already-armed Protection.
@@ -170,6 +172,26 @@ func (g *Guardian) notifyAction(event, msg string) {
 	}
 }
 
+// notifyArmSummary sends the risk preview (and any sanity warnings) once, when the
+// guardian first starts protecting a position.
+func (g *Guardian) notifyArmSummary() {
+	if g.armNotified || g.prot == nil {
+		return
+	}
+	g.armNotified = true
+	p := g.prot
+	dir := "多"
+	if p.Side == SideShort {
+		dir = "空"
+	}
+	g.notifyAction("armed", fmt.Sprintf(
+		"开始守护 %s %s单 @%.4g,止损 @%.4g(%.1f%%),这单最多亏 ~$%.2f",
+		g.symbol, dir, p.Entry, p.Stop, p.RiskPct(), p.RiskUSD()))
+	for _, warn := range RiskWarnings(p) {
+		g.notifyAction("warning", "⚠️ "+warn)
+	}
+}
+
 // ensureRestingStop places the resting stop once, the first time the position is armed.
 func (g *Guardian) ensureRestingStop(ctx *strategy.Context) {
 	if !g.wantRestingStop || g.restingTried || g.prot == nil || g.inactive() {
@@ -266,6 +288,7 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if g.resyncPosition(ctx) { // position closed externally → retired
 		return
 	}
+	g.notifyArmSummary()
 	g.ensureRestingStop(ctx)
 	g.barsHeld++
 	g.evalAlerts(bar.Close)
@@ -285,6 +308,7 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 		return
 	}
 	g.maybeRestore()
+	g.notifyArmSummary()
 	g.ensureRestingStop(ctx)
 	g.lastPrice = price
 	g.evalAlerts(price)

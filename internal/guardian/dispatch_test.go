@@ -33,11 +33,8 @@ func TestGuardian_DispatchesMilestoneAlert(t *testing.T) {
 	fd := &fakeDispatch{}
 	g.SetAlerts(eng, fd)
 
-	g.OnTick(ctx, 106) // pnlR = 1.2 -> +1R milestone fires
-	if len(fd.sent) != 1 {
-		t.Fatalf("want 1 dispatched alert, got %d", len(fd.sent))
-	}
-	if fd.sent[0].Title != "profit_milestone" {
-		t.Fatalf("alert title = %q", fd.sent[0].Title)
+	g.OnTick(ctx, 106) // pnlR = 1.2 -> +1R milestone fires (plus the one-time arm summary)
+	if !hasTitle(fd.sent, "profit_milestone") {
+		t.Fatalf("expected a profit_milestone alert, got %+v", fd.sent)
 	}
 }
