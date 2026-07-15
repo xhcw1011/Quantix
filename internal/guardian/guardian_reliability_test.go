@@ -118,3 +118,35 @@ func TestGuardian_DoesNotChurnRestingStopBelowEpsilon(t *testing.T) {
 		t.Fatal("sub-epsilon advance must not churn a replacement")
 	}
 }
+
+func TestGuardian_RestoresTrailedStopAfterRestart(t *testing.T) {
+	store := NewMemStateStore()
+	mk := func(b *relBroker) (*Guardian, *strategy.Context) {
+		g := NewGuardian("ETHUSDT", NewProtection(SideLong, 100, 1, trailCfg(), 0), 14, zap.NewNop())
+		g.SetRestingStop(true)
+		g.SetStateStore(store, "eng1")
+		ctx := strategy.NewContext(&gPortfolio{qty: 1, avg: 100}, b, zap.NewNop())
+		return g, ctx
+	}
+
+	// first run: arm then trail the stop up to 105.
+	b1 := &relBroker{}
+	g1, c1 := mk(b1)
+	g1.OnBar(c1, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
+	g1.OnTick(c1, 106)
+	g1.OnTick(c1, 110)
+	if g1.prot.Stop != 105 {
+		t.Fatalf("pre-restart stop should be 105, got %v", g1.prot.Stop)
+	}
+
+	// "restart": a fresh Guardian sharing the store/key must restore the trailed stop.
+	b2 := &relBroker{}
+	g2, c2 := mk(b2)
+	g2.OnBar(c2, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
+	if g2.prot.Stop != 105 {
+		t.Fatalf("restart must restore trailed stop 105 (not reset to initial 95), got %v", g2.prot.Stop)
+	}
+	if n := len(b2.byType(strategy.OrderStopMarket)); n != 0 {
+		t.Fatalf("restored guardian must not place a duplicate resting stop, got %d", n)
+	}
+}

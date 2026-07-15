@@ -184,5 +184,8 @@ func (p *Protection) TPHit(price float64) bool {
 // Activated reports whether the trailing stop is engaged.
 func (p *Protection) Activated() bool { return p.activated }
 
+// SetActivated restores the activation flag (used by restart recovery).
+func (p *Protection) SetActivated(a bool) { p.activated = a }
+
 // TPPrice returns the computed take-profit price (0 if disabled).
 func (p *Protection) TPPrice() float64 { return p.tp }

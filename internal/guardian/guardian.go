@@ -42,6 +42,11 @@ type Guardian struct {
 	restingTried     bool
 	stopOrderID      string
 	restingStopPrice float64 // stop price currently resting on the exchange
+
+	// restart recovery (optional)
+	store        StateStore
+	stateKey     string
+	restoreTried bool
 }
 
 // NewGuardian builds a Guardian for an already-armed Protection.
@@ -110,6 +115,52 @@ func (g *Guardian) SetDispatcher(d Dispatcher) { g.dispatch = d }
 // stays off in backtest/paper, where the tick-based close is used.
 func (g *Guardian) SetRestingStop(on bool) { g.wantRestingStop = on }
 
+// SetStateStore wires persistence so the trailed stop survives a restart. key is
+// the engine id; the live engine supplies a DB-backed store.
+func (g *Guardian) SetStateStore(store StateStore, key string) {
+	g.store = store
+	g.stateKey = key
+}
+
+// maybeRestore loads persisted trail state once, overriding the freshly-armed
+// protection so a restart resumes the advanced stop instead of resetting it.
+func (g *Guardian) maybeRestore() {
+	if g.restoreTried || g.store == nil || g.stateKey == "" || g.prot == nil {
+		return
+	}
+	g.restoreTried = true
+	st, ok := g.store.Load(g.stateKey)
+	if !ok {
+		return
+	}
+	g.prot.Stop = st.Stop
+	g.prot.PeakR = st.PeakR
+	g.prot.SetActivated(st.Activated)
+	g.stopOrderID = st.StopOrderID
+	g.restingStopPrice = st.RestingStopPrice
+	if st.StopOrderID != "" {
+		// The resting stop still lives on the exchange; don't place a duplicate.
+		g.restingMode = true
+		g.restingTried = true
+	}
+	g.log.Info("guardian: restored trail state after restart",
+		zap.String("symbol", g.symbol), zap.Float64("stop", st.Stop))
+}
+
+// saveState persists the current trail state (best-effort).
+func (g *Guardian) saveState() {
+	if g.store == nil || g.stateKey == "" || g.prot == nil {
+		return
+	}
+	_ = g.store.Save(g.stateKey, GuardianState{
+		Stop:             g.prot.Stop,
+		PeakR:            g.prot.PeakR,
+		Activated:        g.prot.Activated(),
+		StopOrderID:      g.stopOrderID,
+		RestingStopPrice: g.restingStopPrice,
+	})
+}
+
 // ensureRestingStop places the resting stop once, the first time the position is armed.
 func (g *Guardian) ensureRestingStop(ctx *strategy.Context) {
 	if !g.wantRestingStop || g.restingTried || g.prot == nil || g.inactive() {
@@ -131,6 +182,7 @@ func (g *Guardian) placeRestingStop(ctx *strategy.Context) {
 	g.stopOrderID = id
 	g.restingStopPrice = g.prot.Stop
 	g.restingMode = true
+	g.saveState()
 	g.log.Info("guardian: resting stop placed",
 		zap.String("symbol", g.symbol), zap.Float64("stop", g.prot.Stop),
 		zap.String("order", id))
@@ -197,6 +249,7 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			return
 		}
 	}
+	g.maybeRestore()
 	g.ensureRestingStop(ctx)
 	g.barsHeld++
 	g.evalAlerts(bar.Close)
@@ -215,6 +268,7 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 	if g.inactive() || g.prot == nil {
 		return
 	}
+	g.maybeRestore()
 	g.ensureRestingStop(ctx)
 	g.lastPrice = price
 	g.evalAlerts(price)
