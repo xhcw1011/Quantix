@@ -554,15 +554,27 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 // updates the protected qty and re-sizes the resting stop. Returns true if the
 // guardian retired this cycle.
 func (g *Guardian) resyncPosition(ctx *strategy.Context) bool {
-	if g.prot == nil || g.inactive() || ctx.Portfolio == nil {
+	if g.prot == nil || g.inactive() {
 		return false
 	}
-	qty, _, ok := ctx.Portfolio.Position(g.symbol)
-	if !ok || qty == 0 {
+	// Determine the live position size. Prefer the syncer — it tracks hedge LONG/
+	// SHORT legs, whereas ctx.Portfolio.Position only exposes the one-way slot and
+	// would report a hedge position as gone (falsely retiring the guardian). Fall
+	// back to the portfolio only when no syncer is present (backtest/paper).
+	var qty float64
+	var known bool
+	if pos := g.livePosition(ctx); pos != nil {
+		qty, known = pos.Qty, true
+	} else if _, ok := ctx.Extra["position_syncer"]; !ok && ctx.Portfolio != nil {
+		if q, _, pok := ctx.Portfolio.Position(g.symbol); pok {
+			qty, known = math.Abs(q), true
+		}
+	}
+	if !known || qty == 0 {
 		g.retire(ctx)
 		return true
 	}
-	if absQty := math.Abs(qty); absQty != g.prot.Qty {
+	if absQty := qty; absQty != g.prot.Qty {
 		g.prot.Qty = absQty
 		if g.restingMode && g.stopOrderID != "" {
 			_ = ctx.CancelOrder(g.stopOrderID)
