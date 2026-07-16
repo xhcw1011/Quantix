@@ -179,10 +179,11 @@ export default function Engine() {
     qty: 0,
   })
 
-  // Credentials and strategies filtered by the selected market tab.
-  const filteredCreds = creds.filter((c) =>
-    market === 'spot' ? c.market_type === 'spot' : (c.market_type === 'swap' || c.market_type === 'futures')
-  )
+  // Show ALL of the user's accounts in the credential picker — one exchange API
+  // key usually works for both spot and futures, so we don't hard-filter by the
+  // credential's market_type (it's shown in the label; the exchange enforces
+  // actual permissions). Strategies are still filtered by the market tab.
+  const filteredCreds = creds
   const availableStrategies = strategiesForMarket(market).filter((s) => strategies.includes(s.id))
 
   // Leverage and short toggle are futures-only concepts.
@@ -191,13 +192,12 @@ export default function Engine() {
 
   const handleMarketChange = (newMarket: MarketKind) => {
     setMarket(newMarket)
-    const marketCreds = creds.filter((c) =>
-      newMarket === 'spot' ? c.market_type === 'spot' : (c.market_type === 'swap' || c.market_type === 'futures')
-    )
     const marketStrategies = strategiesForMarket(newMarket).filter((s) => strategies.includes(s.id))
     setForm((f) => ({
       ...f,
-      credential_id: marketCreds[0]?.id ?? 0,
+      // Keep the currently selected account (all accounts are available on both
+      // tabs); only switch the strategy to one valid for the new market.
+      credential_id: f.credential_id || creds[0]?.id || 0,
       strategy_id: marketStrategies[0]?.id ?? f.strategy_id,
     }))
   }
@@ -373,7 +373,7 @@ export default function Engine() {
       {/* New engine form */}
       {showForm && (
         <div className="bg-slate-800 rounded-xl p-5">
-          <h2 className="text-sm font-semibold text-slate-300 mb-4">Start New Engine</h2>
+          <h2 className="text-sm font-semibold text-slate-300 mb-4">启动新策略</h2>
 
           {/* Market tabs: 现货 (default/primary) vs 合约·进阶 (secondary) */}
           <div className="flex gap-2 mb-5">
@@ -403,13 +403,8 @@ export default function Engine() {
 
           {creds.length === 0 ? (
             <p className="text-slate-400 text-sm">
-              No credentials found.{' '}
-              <a href="/credentials" className="text-blue-400 hover:underline">Add a credential</a> first.
-            </p>
-          ) : filteredCreds.length === 0 ? (
-            <p className="text-slate-400 text-sm">
-              还没有{market === 'spot' ? '现货' : '合约'}凭证，先去{' '}
-              <a href="/credentials" className="text-blue-400 hover:underline">添加凭证</a>。
+              还没有交易账户,先去{' '}
+              <a href="/credentials" className="text-blue-400 hover:underline">「交易所账户」页添加</a>。
             </p>
           ) : (
             <form onSubmit={handleStart} className="space-y-4">
@@ -435,17 +430,22 @@ export default function Engine() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Credential</label>
+                  <label className="block text-xs text-slate-400 mb-1">交易账户</label>
                   <select
                     value={form.credential_id}
                     onChange={(e) => setForm({ ...form, credential_id: +e.target.value })}
                     className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
                   >
-                    {filteredCreds.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.label} ({c.exchange} {c.market_type}{c.testnet ? ' testnet' : ''}{c.demo ? ' demo' : ''})
-                      </option>
-                    ))}
+                    {filteredCreds.length === 0 && <option value={0}>(还没有账户,先去「交易所账户」页添加)</option>}
+                    {filteredCreds.map((c) => {
+                      const mkt = c.market_type === 'spot' ? '现货' : c.market_type === 'swap' ? '永续' : '合约'
+                      const kind = c.demo ? '模拟' : c.testnet ? '测试网' : '正式'
+                      return (
+                        <option key={c.id} value={c.id}>
+                          {c.label}({c.exchange} · {mkt} · {kind})
+                        </option>
+                      )
+                    })}
                   </select>
                 </div>
                 <div>
@@ -631,7 +631,7 @@ export default function Engine() {
               {showLeverage && (
                 <div className="bg-orange-900/20 border border-orange-700/40 rounded-lg p-3">
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs text-slate-400">Leverage</label>
+                    <label className="text-xs text-slate-400">杠杆</label>
                     <span className="text-sm font-bold text-orange-300">{form.leverage}x</span>
                   </div>
                   <input
@@ -819,9 +819,9 @@ export default function Engine() {
                   )}
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-xs text-slate-400">
-                  <div><span className="block text-slate-500">Strategy</span>{strategyLabel(eng.strategy_id)}</div>
-                  <div><span className="block text-slate-500">Symbol</span>{eng.symbol}</div>
-                  <div><span className="block text-slate-500">Interval</span>{eng.interval}</div>
+                  <div><span className="block text-slate-500">策略</span>{strategyLabel(eng.strategy_id)}</div>
+                  <div><span className="block text-slate-500">交易对</span>{eng.symbol}</div>
+                  <div><span className="block text-slate-500">周期</span>{eng.interval}</div>
                   <div><span className="block text-slate-500">Started</span>{new Date(eng.started_at).toLocaleString()}</div>
                 </div>
                 {eng.mode === 'live' && <LiveStatus engineID={eng.engine_id} strategyId={eng.strategy_id} />}
