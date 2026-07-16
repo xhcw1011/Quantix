@@ -76,6 +76,11 @@ type Engine struct {
 	tickCh    chan float64            // real-time price from ticker WS
 	log       *zap.Logger
 
+	// engineLive flips true once the startup backfill replay is drained, so the
+	// broker leaves warmup and real-time entries (e.g. guardian arm-with-entry)
+	// fire immediately instead of waiting for the next closed live bar.
+	engineLive bool
+
 	fillMu      sync.Mutex // protects realizedPnL, wins, total, dailyBaselineEquity, dailyBaselineWins, dailyBaselineTotal
 	realizedPnL float64
 	wins, total int

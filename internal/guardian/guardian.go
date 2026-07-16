@@ -67,6 +67,8 @@ type Guardian struct {
 	wantEntry   bool
 	entrySide   string
 	entryQty    float64
+	entryType   string  // "market" (default) or "limit"
+	entryPrice  float64 // limit price when entryType == "limit"
 	entryPlaced bool
 }
 
@@ -97,7 +99,18 @@ func NewEntryGuardian(symbol, side string, qty float64, cfg ProtectionConfig, at
 	g.wantEntry = true
 	g.entrySide = side
 	g.entryQty = qty
+	g.entryType = "market"
 	return g
+}
+
+// SetLimitEntry switches arm-with-entry to a resting LIMIT order at price (0 or
+// non-"limit" type keeps the default market entry). The protective exit stays
+// market regardless.
+func (g *Guardian) SetLimitEntry(price float64) {
+	if price > 0 {
+		g.entryType = "limit"
+		g.entryPrice = price
+	}
 }
 
 // livePosition returns the live account position for this symbol (preferring the
@@ -173,9 +186,16 @@ func (g *Guardian) placeEntry(ctx *strategy.Context) {
 	} else {
 		req = strategy.OpenShort(g.symbol, g.entryQty)
 	}
+	// Optional resting LIMIT entry (protective exit stays market).
+	kind := "市价"
+	if g.entryType == "limit" && g.entryPrice > 0 {
+		req.Type = strategy.OrderLimit
+		req.Price = g.entryPrice
+		kind = fmt.Sprintf("限价%.6g", g.entryPrice)
+	}
 	req.Reason = "guardian_entry"
 	ctx.PlaceOrder(req)
-	g.notifyAction("entry", fmt.Sprintf("已按你的指令开%s单 %.6g,成交后自动挂上保护", dir, g.entryQty))
+	g.notifyAction("entry", fmt.Sprintf("已按你的指令%s开%s单 %.6g,成交后自动挂上保护", kind, dir, g.entryQty))
 }
 
 // tryArm initialises Protection from the live account position; returns whether armed.
@@ -438,9 +458,27 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	g.syncRestingStop(ctx)
 }
 
+// engineLive reports whether the engine has finished replaying the warmup
+// backfill and is now trading real-time (set by the live engine via ctx.Extra).
+// Until then order execution is suppressed, so we must not place the entry.
+func engineLive(ctx *strategy.Context) bool {
+	v, _ := ctx.Extra["engine_live"].(bool)
+	return v
+}
+
 // OnTick enforces the stop/TP precisely between bars and trails on favourable ticks.
 func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
-	if g.inactive() || g.prot == nil {
+	if g.inactive() {
+		return
+	}
+	g.lastPrice = price
+	// arm-with-entry: open as soon as the engine is live (real-time), rather than
+	// waiting for the next closed bar. Skip if a position already exists — OnBar
+	// adopts that case. This is what makes "顺便帮我开仓" open promptly.
+	if g.prot == nil {
+		if g.wantEntry && !g.entryPlaced && engineLive(ctx) && g.livePosition(ctx) == nil {
+			g.placeEntry(ctx)
+		}
 		return
 	}
 	g.maybeRestore()

@@ -368,6 +368,17 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				zap.String("symbol", kline.Symbol), zap.String("interval", kline.Interval),
 				zap.Float64("close", kline.Close), zap.Bool("closed", kline.IsClosed))
 			e.onBar(kline)
+			// Go live once the pre-buffered warmup backfill is drained (channel
+			// empty after a warmup bar) or a real live bar arrives. Clearing the
+			// broker warmup here lets real-time OnTick actions (guardian
+			// arm-with-entry) fire immediately instead of waiting for the next
+			// closed bar. One-shot.
+			if !e.engineLive && (!kline.Warmup || len(klineCh) == 0) {
+				e.engineLive = true
+				e.broker.SetWarmup(false)
+				e.stratCtx.Extra["engine_live"] = true
+				e.log.Info("engine live — warmup drained, real-time entry enabled")
+			}
 
 		case tickPrice, ok := <-e.tickCh:
 			if !ok {

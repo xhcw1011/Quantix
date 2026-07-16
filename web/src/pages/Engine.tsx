@@ -175,10 +175,15 @@ export default function Engine() {
   const [symbolPrice, setSymbolPrice] = useState<string | null>(null)
   const [symbolPriceNum, setSymbolPriceNum] = useState<number | null>(null) // 原始数值,用于盈亏估算
   // 自动守仓 "顺便帮我开仓" — off by default = 守护已有仓位.
-  const [guardianEntry, setGuardianEntry] = useState<{ enabled: boolean; side: 'long' | 'short'; qty: number }>({
+  const [guardianEntry, setGuardianEntry] = useState<{
+    enabled: boolean; side: 'long' | 'short'; qty: number
+    orderType: 'market' | 'limit'; limitPrice: number
+  }>({
     enabled: false,
     side: 'long',
     qty: 0,
+    orderType: 'market',
+    limitPrice: 0,
   })
   // 自动守仓参数按 U 还是按 % 输入(默认按 U — U 本位用户想直接看会亏赚多少 U)。
   const [guardianUMode, setGuardianUMode] = useState<boolean>(true)
@@ -235,7 +240,7 @@ export default function Engine() {
   useEffect(() => {
     setSelectedPresetIdx(-1)
     setExtraParams('')
-    setGuardianEntry({ enabled: false, side: 'long', qty: 0 })
+    setGuardianEntry({ enabled: false, side: 'long', qty: 0, orderType: 'market', limitPrice: 0 })
     setStratParams(
       Object.fromEntries(fieldsForStrategy(form.strategy_id).map((f) => [f.key, f.default]))
     )
@@ -331,6 +336,10 @@ export default function Engine() {
         params.PlaceEntry = true
         params.Side = guardianEntry.side
         params.Qty = guardianEntry.qty
+        if (guardianEntry.orderType === 'limit' && guardianEntry.limitPrice > 0) {
+          params.EntryType = 'limit'
+          params.EntryPrice = guardianEntry.limitPrice
+        }
       }
       if (form.strategy_id === 'macross') {
         if (showShortToggle && form.enable_short) {
@@ -706,6 +715,40 @@ export default function Engine() {
                             </p>
                           )}
                         </div>
+                      </div>
+                      {/* 开仓方式:市价立即成交 / 限价挂单等价。平仓一律市价。 */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-xs text-slate-400">开仓方式</label>
+                          <div className="inline-flex rounded border border-slate-600 overflow-hidden text-[10px]">
+                            {([['market', '市价(立即开)'], ['limit', '限价(挂单)']] as const).map(([m, lbl]) => (
+                              <button
+                                key={m}
+                                type="button"
+                                onClick={() => setGuardianEntry((g) => ({
+                                  ...g,
+                                  orderType: m,
+                                  limitPrice: m === 'limit' && g.limitPrice <= 0 && symbolPriceNum ? symbolPriceNum : g.limitPrice,
+                                }))}
+                                className={`px-2 py-0.5 ${guardianEntry.orderType === m ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`}
+                              >{lbl}</button>
+                            ))}
+                          </div>
+                        </div>
+                        {guardianEntry.orderType === 'market' ? (
+                          <p className="text-[10px] text-slate-500">按当前价立即成交{symbolPriceNum ? `(≈ ${symbolPrice})` : ''}。</p>
+                        ) : (
+                          <>
+                            <input
+                              type="number" min="0" step="any"
+                              value={guardianEntry.limitPrice || ''}
+                              onChange={(e) => setGuardianEntry((g) => ({ ...g, limitPrice: e.target.value === '' ? 0 : Number(e.target.value) }))}
+                              className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                              placeholder={`挂单价,例如 ${symbolPrice ?? '64000'}`}
+                            />
+                            <p className="text-[10px] text-slate-500 mt-0.5">挂在这个价等成交,成交后才挂保护;不到价就一直等。</p>
+                          </>
+                        )}
                       </div>
                       {/* 杠杆:只在开新仓时才相关,所以跟着"顺便帮我开仓"一起 */}
                       {showLeverage && (

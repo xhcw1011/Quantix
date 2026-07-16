@@ -78,6 +78,52 @@ func TestGuardian_EntryWaitsForLiveBar(t *testing.T) {
 	}
 }
 
+// TestGuardian_EntryOpensPromptlyOnTickWhenLive verifies the instant-open path:
+// once the engine signals it's live (past warmup), the entry is placed on the
+// next real-time tick rather than waiting for the next closed bar.
+func TestGuardian_EntryOpensPromptlyOnTickWhenLive(t *testing.T) {
+	g := NewEntryGuardian("ETHUSDT", SideShort, 0.1, entryCfg(), 14, zap.NewNop())
+	b := &gBroker{}
+	ctx := strategy.NewContext(&gPortfolio{}, b, zap.NewNop())
+
+	// Not live yet → a tick must NOT open (order would be suppressed + latched).
+	g.OnTick(ctx, 2000)
+	if len(b.orders) != 0 {
+		t.Fatalf("expected NO entry before engine is live, got %d", len(b.orders))
+	}
+	// Engine goes live → next tick opens immediately.
+	ctx.Extra["engine_live"] = true
+	g.OnTick(ctx, 2000)
+	if len(b.orders) != 1 {
+		t.Fatalf("expected 1 entry on the first live tick, got %d", len(b.orders))
+	}
+	if b.orders[0].Type != strategy.OrderMarket {
+		t.Fatalf("expected a MARKET entry by default, got %s", b.orders[0].Type)
+	}
+}
+
+// TestGuardian_LimitEntry verifies the entry is placed as a resting LIMIT order
+// at the given price when configured, while the exit stays market.
+func TestGuardian_LimitEntry(t *testing.T) {
+	g := NewEntryGuardian("ETHUSDT", SideLong, 0.2, entryCfg(), 14, zap.NewNop())
+	g.SetLimitEntry(1950)
+	b := &gBroker{}
+	ctx := strategy.NewContext(&gPortfolio{}, b, zap.NewNop())
+	ctx.Extra["engine_live"] = true
+
+	g.OnTick(ctx, 2000)
+	if len(b.orders) != 1 {
+		t.Fatalf("expected 1 limit entry, got %d", len(b.orders))
+	}
+	o := b.orders[0]
+	if o.Type != strategy.OrderLimit || o.Price != 1950 {
+		t.Fatalf("expected LIMIT @1950, got type=%s price=%v", o.Type, o.Price)
+	}
+	if o.Side != strategy.SideBuy || o.PositionSide != strategy.PositionSideLong {
+		t.Fatalf("expected buy/long open, got %+v", o)
+	}
+}
+
 // TestGuardian_EntryPlacesWhenFlat guards first-run behaviour: with no existing
 // position, arm-with-entry must still place the entry once.
 func TestGuardian_EntryPlacesWhenFlat(t *testing.T) {

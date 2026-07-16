@@ -25,6 +25,11 @@ type guardianConfig struct {
 	Entry float64
 	Qty   float64
 
+	// arm-with-entry order type (PlaceEntry only). EntryType "limit" places a
+	// resting limit order at EntryPrice; "market" (default) opens at market.
+	EntryType  string
+	EntryPrice float64
+
 	Prot      ProtectionConfig
 	ATRWindow int
 	MAPeriod  int
@@ -48,6 +53,9 @@ func Factory(params map[string]any, log *zap.Logger) (strategy.Strategy, error) 
 	switch {
 	case gc.PlaceEntry:
 		g = NewEntryGuardian(gc.Symbol, gc.Side, gc.Qty, gc.Prot, gc.ATRWindow, log)
+		if gc.EntryType == "limit" {
+			g.SetLimitEntry(gc.EntryPrice)
+		}
 	case gc.Adopt:
 		g = NewAdoptGuardian(gc.Symbol, gc.Prot, gc.ATRWindow, log)
 	default:
@@ -155,6 +163,13 @@ func parseGuardianConfig(p map[string]any) (guardianConfig, error) {
 		gc.Qty = floatOr(p, "Qty", 0)
 		if (gc.Side != SideLong && gc.Side != SideShort) || gc.Qty <= 0 {
 			return gc, fmt.Errorf("guardian: PlaceEntry requires Side (long/short) and Qty>0")
+		}
+		gc.EntryType = strings.ToLower(strOr(p, "EntryType", "market"))
+		if gc.EntryType == "limit" {
+			gc.EntryPrice = floatOr(p, "EntryPrice", 0)
+			if gc.EntryPrice <= 0 {
+				return gc, fmt.Errorf("guardian: limit entry requires EntryPrice>0")
+			}
 		}
 	case !gc.Adopt:
 		gc.Side = normSide(strOr(p, "Side", ""))
