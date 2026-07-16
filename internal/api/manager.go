@@ -50,6 +50,7 @@ type StartRequest struct {
 	Interval     string         `json:"interval"`
 	Intervals    []string       `json:"intervals,omitempty"` // multi-timeframe: e.g. ["1m","5m","15m"]
 	Mode         string         `json:"mode"`                // "live" (default) | "paper"
+	MarketType   string         `json:"market_type"`         // "spot" | "futures" — what the user is trading now; overrides the credential's stored label (one key does both)
 	Leverage     int            `json:"leverage"`            // 1–20; 0 = use exchange default (futures/swap only)
 	ContractMode string         `json:"contract_mode"`       // "hedge" | "one_way" (futures/swap only)
 	Params       map[string]any `json:"params,omitempty"`    // extra strategy parameters
@@ -321,6 +322,15 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 
 	// Build exchange config
 	excCfg := config.ExchangeConfig{Active: cred.Exchange}
+	// The engine's market (spot vs futures) is what the user is trading now, not
+	// the credential's stored label — one exchange key (e.g. Binance) works for
+	// both. Prefer the request's market_type; fall back to the credential's.
+	effMarket := cred.MarketType
+	if req.MarketType != "" {
+		effMarket = req.MarketType
+	}
+	isSpotMarket := effMarket == "spot" || effMarket == "SPOT"
+
 	switch cred.Exchange {
 	case "binance":
 		// Live and demo Binance engines can coexist in one process: REST clients
@@ -329,18 +339,18 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 		// package-global network flags across the dial). No same-network guard.
 		excCfg.Binance = config.BinanceConfig{
 			APIKey: apiKey, APISecret: apiSecret,
-			Testnet: cred.Testnet, Demo: cred.Demo, MarketType: cred.MarketType,
+			Testnet: cred.Testnet, Demo: cred.Demo, MarketType: effMarket,
 		}
 		// Spot does not support leverage — reject early to prevent confusing exchange errors.
-		if cred.MarketType == "spot" && req.Leverage > 1 {
+		if isSpotMarket && req.Leverage > 1 {
 			return "", fmt.Errorf("leverage is not supported for spot trading (got %d); set leverage to 0 or 1", req.Leverage)
 		}
 	case "okx":
 		excCfg.OKX = config.OKXConfig{
 			APIKey: apiKey, APISecret: apiSecret, Passphrase: passphrase,
-			Demo: cred.Demo, MarketType: cred.MarketType,
+			Demo: cred.Demo, MarketType: effMarket,
 		}
-		if (cred.MarketType == "SPOT" || cred.MarketType == "spot") && req.Leverage > 1 {
+		if isSpotMarket && req.Leverage > 1 {
 			return "", fmt.Errorf("leverage is not supported for spot trading (got %d); set leverage to 0 or 1", req.Leverage)
 		}
 	case "bybit":
@@ -527,10 +537,10 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 		// log values wildly wrong (full notional locked instead of 1/leverage margin).
 		// Real exchange-side margin is unaffected, but monitoring/log values become
 		// untrustworthy. spot already rejected above (lines 307-317).
-		isFutures := cred.MarketType != "spot" && cred.MarketType != "SPOT"
+		isFutures := !isSpotMarket
 		if isFutures && req.Leverage <= 0 {
 			engineCancel()
-			return "", fmt.Errorf("leverage is required for %s/%s (got %d); futures engines need explicit leverage to compute correct margin", cred.Exchange, cred.MarketType, req.Leverage)
+			return "", fmt.Errorf("leverage is required for %s/%s (got %d); futures engines need explicit leverage to compute correct margin", cred.Exchange, effMarket, req.Leverage)
 		}
 		if req.Leverage > 0 {
 			leverageCtx, leverageCancel := context.WithTimeout(context.Background(), 10*time.Second)

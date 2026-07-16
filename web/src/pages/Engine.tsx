@@ -184,6 +184,8 @@ export default function Engine() {
   const [guardianUMode, setGuardianUMode] = useState<boolean>(true)
   // 守护"账户已有持仓"(没开顺便帮我开仓)时,用于估算盈亏的持仓数量;仅前端估算,不发后端。
   const [guardianAdoptQty, setGuardianAdoptQty] = useState<number>(0)
+  // 开仓"数量"按哪种单位填(默认名义 U:开多大的仓,与杠杆无关)。canonical 仍是币数量。
+  const [guardianQtyMode, setGuardianQtyMode] = useState<'notional' | 'margin' | 'coin'>('notional')
 
   // Show ALL of the user's accounts in the credential picker — one exchange API
   // key usually works for both spot and futures, so we don't hard-filter by the
@@ -283,6 +285,9 @@ export default function Engine() {
         symbol: form.symbol,
         interval: form.interval,
         mode: form.mode,
+        // What we're trading now (from the market tab) — the backend uses this,
+        // not the credential's stored label, since one key does both.
+        market_type: market === 'futures' ? 'futures' : 'spot',
         risk: form.risk,
       }
       if (form.mode === 'live') {
@@ -394,6 +399,20 @@ export default function Engine() {
   const round2 = (x: number) => Math.round(x * 100) / 100
   // 止损档=亏,其余(保本/落袋/全平)=赚。
   const guardianFieldIsLoss = (key: string) => key === 'StopValue'
+
+  // 开仓"数量"单位换算:canonical = 币数量(BTC)。名义 U = 币×价(与杠杆无关);
+  // 保证金 U = 名义/杠杆。价格未知时退回按币数量填。
+  const guardianLev = form.leverage > 0 ? form.leverage : 1
+  const qtyToDisplay = (qty: number): number => {
+    if (!symbolPriceNum || guardianQtyMode === 'coin') return qty
+    if (guardianQtyMode === 'notional') return round2(qty * symbolPriceNum)
+    return round2((qty * symbolPriceNum) / guardianLev) // margin
+  }
+  const displayToQty = (v: number): number => {
+    if (!symbolPriceNum || guardianQtyMode === 'coin') return v
+    if (guardianQtyMode === 'notional') return v / symbolPriceNum
+    return (v * guardianLev) / symbolPriceNum // margin
+  }
 
   return (
     <div className="space-y-6">
@@ -651,14 +670,41 @@ export default function Engine() {
                           </select>
                         </div>
                         <div>
-                          <label className="block text-xs text-slate-400 mb-1">数量</label>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-xs text-slate-400">数量</label>
+                            {symbolPriceNum && (
+                              <div className="inline-flex rounded border border-slate-600 overflow-hidden text-[10px]">
+                                {([['notional', '名义U'], ['margin', '保证金U'], ['coin', '币']] as const).map(([m, lbl]) => (
+                                  <button
+                                    key={m}
+                                    type="button"
+                                    onClick={() => setGuardianQtyMode(m)}
+                                    className={`px-1.5 py-0.5 ${guardianQtyMode === m ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`}
+                                  >{lbl}</button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
                           <input
-                            type="number" min="0" step="0.001"
-                            value={guardianEntry.qty}
-                            onChange={(e) => setGuardianEntry((g) => ({ ...g, qty: e.target.value === '' ? 0 : Number(e.target.value) }))}
+                            type="number" min="0"
+                            step={guardianQtyMode === 'coin' || !symbolPriceNum ? '0.001' : 'any'}
+                            value={guardianEntry.qty > 0 ? qtyToDisplay(guardianEntry.qty) : ''}
+                            onChange={(e) => {
+                              const v = e.target.value === '' ? 0 : Number(e.target.value)
+                              setGuardianEntry((g) => ({ ...g, qty: v <= 0 ? 0 : displayToQty(v) }))
+                            }}
                             className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                            placeholder="例如 0.1"
+                            placeholder={
+                              guardianQtyMode === 'coin' || !symbolPriceNum
+                                ? '币的个数,例如 0.005'
+                                : guardianQtyMode === 'margin' ? '保证金 U,例如 100' : '名义 U,例如 1000'
+                            }
                           />
+                          {symbolPriceNum && guardianEntry.qty > 0 && (
+                            <p className="text-[10px] text-slate-400 mt-0.5">
+                              ≈ {guardianEntry.qty.toFixed(6)} 币 · 名义 {(guardianEntry.qty * symbolPriceNum).toLocaleString('en-US', { maximumFractionDigits: 0 })} U · 占保证金 {(guardianEntry.qty * symbolPriceNum / guardianLev).toLocaleString('en-US', { maximumFractionDigits: 0 })} U({guardianLev}x)
+                            </p>
+                          )}
                         </div>
                       </div>
                       {/* 杠杆:只在开新仓时才相关,所以跟着"顺便帮我开仓"一起 */}
@@ -739,7 +785,7 @@ export default function Engine() {
                           <input
                             type="number"
                             value={displayVal}
-                            step={useU ? 1 : f.step}
+                            step={useU ? 'any' : f.step}
                             min={0}
                             onChange={(e) => {
                               const val = e.target.value
