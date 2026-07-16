@@ -28,7 +28,7 @@ function LiveStatus({ engineID, strategyId }: { engineID: string; strategyId?: s
   if (!data) {
     return (
       <p className="text-xs text-slate-600 mt-2">
-        Live status: waiting for next snapshot (push interval ~60s)…
+        实时状态:等待下一次快照(约 60 秒一次)…
       </p>
     )
   }
@@ -41,14 +41,14 @@ function LiveStatus({ engineID, strategyId }: { engineID: string; strategyId?: s
   return (
     <div className="mt-3 border-t border-slate-700 pt-2 text-xs">
       <div className="flex items-center justify-between text-slate-500 mb-1.5">
-        <span>Live status</span>
-        <span>updated {ageS}s ago</span>
+        <span>实时状态</span>
+        <span>{ageS}秒前更新</span>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-x-3 gap-y-1 text-slate-300">
-        <div><span className="text-slate-500">Equity</span> <span className="font-mono">${num(data.equity)}</span></div>
-        <div><span className="text-slate-500">Cash</span> <span className="font-mono">${num(data.cash)}</span></div>
-        <div><span className="text-slate-500">Realized</span> <span className="font-mono">${num(data.realized_pnl)}</span></div>
-        <div><span className="text-slate-500">Return</span> <span className="font-mono">{num(data.total_return_pct)}%</span></div>
+        <div><span className="text-slate-500">权益</span> <span className="font-mono">${num(data.equity)}</span></div>
+        <div><span className="text-slate-500">可用资金</span> <span className="font-mono">${num(data.cash)}</span></div>
+        <div><span className="text-slate-500">已实现</span> <span className="font-mono">${num(data.realized_pnl)}</span></div>
+        <div><span className="text-slate-500">收益率</span> <span className="font-mono">{num(data.total_return_pct)}%</span></div>
         {data.strat_regime !== undefined && (
           <div><span className="text-slate-500">Regime</span> <span className="font-mono">{data.strat_regime}</span></div>
         )}
@@ -101,7 +101,7 @@ function LiveStatus({ engineID, strategyId }: { engineID: string; strategyId?: s
 
       {stratFields.length > 0 && (
         <details className="mt-2">
-          <summary className="text-slate-500 cursor-pointer">Strategy detail ({stratFields.length} fields)</summary>
+          <summary className="text-slate-500 cursor-pointer">策略详情 ({stratFields.length} 项)</summary>
           <pre className="text-[10px] text-slate-400 mt-1 overflow-x-auto">{JSON.stringify(Object.fromEntries(stratFields), null, 2)}</pre>
         </details>
       )}
@@ -120,6 +120,7 @@ interface Credential {
 
 interface EngineInfo {
   engine_id: string
+  credential_id: number
   strategy_id: string
   symbol: string
   interval: string
@@ -342,7 +343,7 @@ export default function Engine() {
   }
 
   const handleStop = async (engineId: string) => {
-    if (!confirm(`Stop engine "${engineId}"? This will cancel all pending orders.`)) return
+    if (!confirm(`确定停止「${engineId}」?会取消所有未成交挂单。`)) return
     setStoppingId(engineId)
     try {
       await stopEngineById(engineId)
@@ -356,17 +357,27 @@ export default function Engine() {
 
   const runningEngines = engines.filter((e) => e.running)
   const stoppedEngines = engines.filter((e) => !e.running)
+
+  // 资金属性:引擎动的是真钱还是模拟钱(mode=live 只是"实时",配 demo/testnet 账户仍是假钱)。
+  const credById = Object.fromEntries(creds.map((c) => [c.id, c]))
+  const engineMoney = (eng: EngineInfo) => {
+    if (eng.mode === 'paper') return { text: '回测/模拟', cls: 'bg-slate-600 text-slate-300' }
+    const c = credById[eng.credential_id]
+    if (!c) return { text: '实时', cls: 'bg-slate-600 text-slate-300' }
+    if (c.testnet || c.demo) return { text: '模拟盘', cls: 'bg-blue-900/50 text-blue-300' }
+    return { text: '真钱', cls: 'bg-red-900/50 text-red-300' }
+  }
   const fields = fieldsForStrategy(form.strategy_id)
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">Engine Control</h1>
+        <h1 className="text-xl font-bold">策略引擎</h1>
         <button
           onClick={() => { setShowForm(!showForm); setError('') }}
           className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-sm font-semibold"
         >
-          {showForm ? '✕ Cancel' : '+ New Engine'}
+          {showForm ? '✕ 取消' : '+ 新建策略'}
         </button>
       </div>
 
@@ -793,11 +804,11 @@ export default function Engine() {
       {/* Running engines */}
       <div className="space-y-3">
         <h2 className="text-sm font-semibold text-slate-400">
-          Running ({runningEngines.length})
+          运行中 ({runningEngines.length})
         </h2>
         {runningEngines.length === 0 ? (
           <div className="bg-slate-800 rounded-xl p-5 text-slate-500 text-sm">
-            No engines running. Click <strong>+ New Engine</strong> to start one.
+            暂无运行中的策略。点 <strong>+ 新建策略</strong> 启动一个。
           </div>
         ) : (
           runningEngines.map((eng) => (
@@ -806,12 +817,11 @@ export default function Engine() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-semibold text-sm">{eng.engine_id}</span>
-                  <span className="text-xs bg-green-900/50 text-green-300 px-1.5 py-0.5 rounded">running</span>
-                  {eng.mode === 'paper' ? (
-                    <span className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded">paper</span>
-                  ) : (
-                    <span className="text-xs bg-slate-600 text-slate-300 px-1.5 py-0.5 rounded">live</span>
-                  )}
+                  <span className="text-xs bg-green-900/50 text-green-300 px-1.5 py-0.5 rounded">运行中</span>
+                  {(() => {
+                    const m = engineMoney(eng)
+                    return <span title={`mode=${eng.mode} · credential_id=${eng.credential_id}`} className={`text-xs ${m.cls} px-1.5 py-0.5 rounded`}>{m.text}</span>
+                  })()}
                   {eng.leverage && eng.leverage > 1 && (
                     <span className="text-xs bg-orange-900/50 text-orange-300 px-1.5 py-0.5 rounded font-mono">
                       {eng.leverage}x
@@ -822,7 +832,7 @@ export default function Engine() {
                   <div><span className="block text-slate-500">策略</span>{strategyLabel(eng.strategy_id)}</div>
                   <div><span className="block text-slate-500">交易对</span>{eng.symbol}</div>
                   <div><span className="block text-slate-500">周期</span>{eng.interval}</div>
-                  <div><span className="block text-slate-500">Started</span>{new Date(eng.started_at).toLocaleString()}</div>
+                  <div><span className="block text-slate-500">启动于</span>{new Date(eng.started_at).toLocaleString()}</div>
                 </div>
                 {eng.mode === 'live' && <LiveStatus engineID={eng.engine_id} strategyId={eng.strategy_id} />}
               </div>
@@ -831,7 +841,7 @@ export default function Engine() {
                 disabled={stoppingId === eng.engine_id}
                 className="px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded text-xs font-semibold flex-shrink-0"
               >
-                {stoppingId === eng.engine_id ? 'Stopping…' : '⏹ Stop'}
+                {stoppingId === eng.engine_id ? '停止中…' : '⏹ 停止'}
               </button>
             </div>
           ))

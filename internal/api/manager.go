@@ -63,10 +63,11 @@ type StartRequest struct {
 
 // EngineInfo describes a running or stopped engine.
 type EngineInfo struct {
-	EngineID   string `json:"engine_id"`
-	UserID     int    `json:"user_id,omitempty"` // populated in admin views
-	StrategyID string `json:"strategy_id"`
-	Symbol     string `json:"symbol"`
+	EngineID     string `json:"engine_id"`
+	UserID       int    `json:"user_id,omitempty"` // populated in admin views
+	CredentialID int    `json:"credential_id"`
+	StrategyID   string `json:"strategy_id"`
+	Symbol       string `json:"symbol"`
 	Interval   string `json:"interval"`
 	Mode       string `json:"mode"` // "live" | "paper"
 	Leverage   int    `json:"leverage,omitempty"`
@@ -1097,13 +1098,14 @@ func parseBarInterval(iv string) time.Duration {
 
 func engineInfoFromRE(re *runningEngine) *EngineInfo {
 	info := &EngineInfo{
-		EngineID:   re.engineID,
-		StrategyID: re.strategyID,
-		Symbol:     re.symbol,
-		Interval:   re.interval,
-		Mode:       re.mode,
-		Leverage:   re.leverage,
-		StartedAt:  re.startedAt.Format(time.RFC3339),
+		EngineID:     re.engineID,
+		CredentialID: re.credentialID,
+		StrategyID:   re.strategyID,
+		Symbol:       re.symbol,
+		Interval:     re.interval,
+		Mode:         re.mode,
+		Leverage:     re.leverage,
+		StartedAt:    re.startedAt.Format(time.RFC3339),
 	}
 	select {
 	case <-re.done:
