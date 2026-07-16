@@ -62,6 +62,40 @@ type MACross struct {
 	// first live bar afterwards (see primeDirection).
 	sawWarmup bool
 	primed    bool
+
+	// reconciled records that we've seeded hasLong/hasShort from the live account
+	// position once at startup. Without this, a restart resets the in-memory flags
+	// to flat and priming re-opens a position the account already holds — the
+	// "re-orders on every deploy" bug. See reconcilePosition.
+	reconciled bool
+}
+
+// positionReporter reports whether a live position exists on a side. The live
+// engine's position.Syncer satisfies it and is injected via
+// ctx.Extra["position_syncer"]; absent in backtests (nil → no reconciliation).
+type positionReporter interface {
+	HasPosition(side string) bool
+}
+
+// reconcilePosition seeds hedge-mode hasLong/hasShort from the real account
+// position (via the injected syncer) exactly once, so priming after a restart
+// sees the true flat state and doesn't stack a duplicate entry onto a position
+// the account already holds. No-op without a syncer (backtests unchanged).
+func (m *MACross) reconcilePosition(ctx *strategy.Context) {
+	if m.reconciled {
+		return
+	}
+	m.reconciled = true
+	pr, ok := ctx.Extra["position_syncer"].(positionReporter)
+	if !ok || pr == nil {
+		return
+	}
+	if pr.HasPosition(string(strategy.PositionSideLong)) {
+		m.hasLong = true
+	}
+	if pr.HasPosition(string(strategy.PositionSideShort)) {
+		m.hasShort = true
+	}
 }
 
 // New creates a new MACross strategy with the given configuration.
@@ -84,6 +118,11 @@ func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	if bar.Warmup {
 		m.sawWarmup = true
+	}
+	// Hedge mode: learn the real account position once, before any priming, so a
+	// restart doesn't re-open a position the account already holds.
+	if m.cfg.EnableShort {
+		m.reconcilePosition(ctx)
 	}
 
 	m.closes = append(m.closes, bar.Close)
