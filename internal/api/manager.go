@@ -69,21 +69,21 @@ type EngineInfo struct {
 	CredentialID int    `json:"credential_id"`
 	StrategyID   string `json:"strategy_id"`
 	Symbol       string `json:"symbol"`
-	Interval   string `json:"interval"`
-	Mode       string `json:"mode"` // "live" | "paper"
-	Leverage   int    `json:"leverage,omitempty"`
-	Running    bool   `json:"running"`
-	StartedAt  string `json:"started_at"`
-	Error      string `json:"error,omitempty"`
+	Interval     string `json:"interval"`
+	Mode         string `json:"mode"` // "live" | "paper"
+	Leverage     int    `json:"leverage,omitempty"`
+	Running      bool   `json:"running"`
+	StartedAt    string `json:"started_at"`
+	Error        string `json:"error,omitempty"`
 }
 
 // EngineStatus is kept for backward-compat with the old /api/engine/status endpoint.
 type EngineStatus = EngineInfo
 
 type runningEngine struct {
-	engine     *live.Engine  // set for live mode
-	paperEng   *paper.Engine // set for paper mode
-	cancel     context.CancelFunc
+	engine       *live.Engine  // set for live mode
+	paperEng     *paper.Engine // set for paper mode
+	cancel       context.CancelFunc
 	engineID     string
 	userID       int
 	credentialID int
@@ -115,10 +115,10 @@ type EnginePositions struct {
 	CredentialID int            `json:"credential_id"`
 	Symbol       string         `json:"symbol"`
 	Mode         string         `json:"mode"`
-	LastPrice  float64        `json:"last_price"`
-	Cash       float64        `json:"cash"`
-	Equity     float64        `json:"equity"`
-	Positions  []PositionView `json:"positions"`
+	LastPrice    float64        `json:"last_price"`
+	Cash         float64        `json:"cash"`
+	Equity       float64        `json:"equity"`
+	Positions    []PositionView `json:"positions"`
 }
 
 // EngineManager manages multiple live/paper trading engines per user.
@@ -449,12 +449,12 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 		userID:       userID,
 		credentialID: req.CredentialID,
 		strategyID:   req.StrategyID,
-		symbol:     req.Symbol,
-		interval:   req.Interval,
-		mode:       req.Mode,
-		leverage:   req.Leverage,
-		startedAt:  time.Now(),
-		done:       make(chan struct{}),
+		symbol:       req.Symbol,
+		interval:     req.Interval,
+		mode:         req.Mode,
+		leverage:     req.Leverage,
+		startedAt:    time.Now(),
+		done:         make(chan struct{}),
 	}
 
 	// Build notifier: load user's per-user Telegram config from DB, then optionally add email.
@@ -862,6 +862,62 @@ func (m *EngineManager) StopAllUsers() {
 		}
 		delete(m.engines, userID)
 	}
+}
+
+// UpdateParams applies live parameter changes to a running engine's strategy
+// (currently only the guardian's protective config) and persists them so an
+// auto-restart uses the new values. The update is applied in the engine's run
+// loop, never concurrently with the strategy callbacks.
+func (m *EngineManager) UpdateParams(userID int, engineID string, params map[string]any) error {
+	m.mu.RLock()
+	re := m.engines[userID][engineID]
+	m.mu.RUnlock()
+	if re == nil {
+		return fmt.Errorf("engine not found")
+	}
+	if re.engine == nil {
+		return fmt.Errorf("改参数目前只支持实盘引擎")
+	}
+	if !re.engine.SubmitParamUpdate(params) {
+		return fmt.Errorf("更新繁忙,请稍后重试")
+	}
+	if err := m.mergeSessionParams(userID, engineID, params); err != nil {
+		m.log.Warn("param update applied to engine but persist failed (restart would use old values)",
+			zap.Int("user_id", userID), zap.String("engine_id", engineID), zap.Error(err))
+	}
+	return nil
+}
+
+// mergeSessionParams merges params into the persisted session's stored request so
+// a restart replays the updated values. No-op if the session isn't found.
+func (m *EngineManager) mergeSessionParams(userID int, engineID string, params map[string]any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sessions, err := m.store.GetActiveEngineSessions(ctx)
+	if err != nil {
+		return err
+	}
+	for _, s := range sessions {
+		if s.UserID != userID || s.EngineID != engineID {
+			continue
+		}
+		var req StartRequest
+		if err := json.Unmarshal(s.RequestJSON, &req); err != nil {
+			return err
+		}
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		for k, v := range params {
+			req.Params[k] = v
+		}
+		reqJSON, err := json.Marshal(req)
+		if err != nil {
+			return err
+		}
+		return m.store.UpsertEngineSession(ctx, userID, engineID, reqJSON)
+	}
+	return nil
 }
 
 // AutoRestart queries all active engine sessions from the DB and restarts them.

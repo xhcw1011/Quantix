@@ -49,6 +49,9 @@ export const stopEngineById = (id: string) => api.delete(`/engines/${id}`)
 export const getEngineById = (id: string) => api.get(`/engines/${id}`)
 export const closeEnginePosition = (id: string, side: 'LONG' | 'SHORT') =>
   api.post(`/engines/${id}/close-position`, null, { params: { side } })
+// Update a running engine's strategy params live (guardian risk levels).
+export const updateEngineParams = (id: string, params: object) =>
+  api.put(`/engines/${id}/params`, { params })
 export const getRecentLogs = (id: string, lines = 200, grep = '') =>
   api.get(`/engines/${id}/recent-logs`, { params: { lines, grep } })
 

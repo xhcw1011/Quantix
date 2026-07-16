@@ -54,6 +54,28 @@ func TestGuardian_EntryAdoptsExistingInsteadOfReopening(t *testing.T) {
 	}
 }
 
+// TestGuardian_UpdateParamsLive verifies live "修改参数" on a running guardian:
+// the stop recomputes from the new value without stopping/rearming.
+func TestGuardian_UpdateParamsLive(t *testing.T) {
+	cfg := ProtectionConfig{StopMode: StopPct, StopValue: 0.03}
+	g := NewGuardian("ETHUSDT", NewProtection(SideLong, 100, 1, cfg, 0), 14, zap.NewNop())
+	ctx := strategy.NewContext(&gPortfolio{qty: 1, avg: 100}, &gBroker{}, zap.NewNop())
+
+	if err := g.UpdateParams(ctx, map[string]any{"StopMode": "pct", "StopValue": 0.02}); err != nil {
+		t.Fatal(err)
+	}
+	if g.Prot().Stop != 98 {
+		t.Fatalf("stop = %v, want 98 after tightening 3%%→2%%", g.Prot().Stop)
+	}
+	// Add a take-profit live.
+	if err := g.UpdateParams(ctx, map[string]any{"StopMode": "pct", "StopValue": 0.02, "TPValue": 0.10}); err != nil {
+		t.Fatal(err)
+	}
+	if g.Prot().TPPrice() != 110 {
+		t.Fatalf("tp = %v, want 110 after adding 10%% TP", g.Prot().TPPrice())
+	}
+}
+
 // TestGuardian_EntryWaitsForLiveBar is the regression test for "选了帮我开仓但没下单":
 // the entry was placed on the first (warmup) bar, where the broker suppresses the
 // order and entryPlaced latches — so it never really opened. The open must wait

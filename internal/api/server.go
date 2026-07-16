@@ -11,9 +11,9 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 
+	_ "github.com/Quantix/quantix/docs" // Swagger generated docs
 	"github.com/Quantix/quantix/internal/config"
 	"github.com/Quantix/quantix/internal/data"
-	_ "github.com/Quantix/quantix/docs" // Swagger generated docs
 )
 
 // Server is the Quantix HTTP API server.
@@ -191,6 +191,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/engines/{id}", auth(http.HandlerFunc(s.stopEngineByID)))
 	mux.Handle("GET /api/engines/{id}", auth(http.HandlerFunc(s.getEngineByID)))
 	mux.Handle("POST /api/engines/{id}/close-position", auth(http.HandlerFunc(s.closeEnginePosition)))
+	mux.Handle("PUT /api/engines/{id}/params", auth(http.HandlerFunc(s.updateEngineParams)))
 	mux.Handle("GET /api/engines/{id}/recent-logs", auth(http.HandlerFunc(s.recentLogs)))
 
 	// Engine control — legacy (deprecated, kept for backward compat)
@@ -217,7 +218,7 @@ func (s *Server) Handler() http.Handler {
 	// WebSocket
 	mux.Handle("GET /api/ws", auth(http.HandlerFunc(s.handleWS)))
 
-	return securityHeaders(corsMiddleware(rateLimitMiddleware(s.rateLimiter)(maxBodyBytes(1<<20)(mux))))
+	return securityHeaders(corsMiddleware(rateLimitMiddleware(s.rateLimiter)(maxBodyBytes(1 << 20)(mux))))
 }
 
 // ─── Shared response types (used in Swagger annotations) ─────────────────────

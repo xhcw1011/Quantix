@@ -175,6 +175,18 @@ func (e *Engine) GetTickCh() chan float64 {
 	return e.tickCh
 }
 
+// SubmitParamUpdate queues a live parameter update to be applied by the run loop
+// (never concurrently with OnBar/OnTick/OnFill). Non-blocking so the API handler
+// never blocks on the engine goroutine; returns false if the buffer is full.
+func (e *Engine) SubmitParamUpdate(params map[string]any) bool {
+	select {
+	case e.updateCh <- params:
+		return true
+	default:
+		return false
+	}
+}
+
 // SetExtra injects arbitrary data into the strategy context.
 func (e *Engine) SetExtra(key string, val any) {
 	if e.stratCtx != nil {

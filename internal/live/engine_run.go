@@ -390,6 +390,15 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				tr.OnTick(e.stratCtx, tickPrice)
 			}
 
+		case params := <-e.updateCh:
+			if u, ok := e.strategy.(strategy.LiveUpdatable); ok {
+				if err := u.UpdateParams(e.stratCtx, params); err != nil {
+					e.log.Warn("live param update rejected", zap.Error(err))
+				}
+			} else {
+				e.log.Warn("live param update ignored — strategy not updatable")
+			}
+
 		case fill := <-e.stratFillCh:
 			e.strategy.OnFill(e.stratCtx, fill)
 

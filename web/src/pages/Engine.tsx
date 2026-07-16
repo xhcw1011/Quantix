@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getTicker, listCredentials, listEngines, listStrategies, listStrategyPresets, startEngine, stopEngineById } from '../api/trading'
+import { getTicker, listCredentials, listEngines, listStrategies, listStrategyPresets, startEngine, stopEngineById, updateEngineParams } from '../api/trading'
 import { useTradeSocket } from '../hooks/useTradeSocket'
 import { COMMON_SYMBOLS, strategiesForMarket, strategyLabel, strategyMeta } from '../constants/strategies'
 import type { MarketKind } from '../constants/strategies'
@@ -17,6 +17,11 @@ interface Preset {
 function LiveStatus({ engineID, strategyId }: { engineID: string; strategyId?: string }) {
   const [data, setData] = useState<Record<string, any> | null>(null)
   const [lastTs, setLastTs] = useState<number>(0)
+  // 守仓风控档 live 编辑
+  const [editing, setEditing] = useState(false)
+  const [ev, setEv] = useState<Record<string, number | ''>>({})
+  const [saving, setSaving] = useState(false)
+  const [saveMsg, setSaveMsg] = useState('')
 
   useTradeSocket((msg: any) => {
     if (msg?.type === 'status' && msg?.data?.engine_id === engineID) {
@@ -24,6 +29,29 @@ function LiveStatus({ engineID, strategyId }: { engineID: string; strategyId?: s
       setLastTs(Date.now())
     }
   })
+
+  const guardianFields = fieldsForStrategy('guardian')
+  const openEdit = () => {
+    const cur = (data?.strat_edit ?? {}) as Record<string, number>
+    setEv(Object.fromEntries(guardianFields.map((f) => [f.key, cur[f.key] ?? f.default])))
+    setSaveMsg('')
+    setEditing(true)
+  }
+  const saveEdit = async () => {
+    setSaving(true)
+    setSaveMsg('')
+    try {
+      const params: Record<string, number> = {}
+      for (const f of guardianFields) params[f.key] = (Number(ev[f.key]) || 0) / 100 // % → fraction
+      await updateEngineParams(engineID, params)
+      setSaveMsg('已保存,立即生效')
+      setEditing(false)
+    } catch (e: any) {
+      setSaveMsg(e.response?.data?.error || '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   if (!data) {
     return (
@@ -78,7 +106,12 @@ function LiveStatus({ engineID, strategyId }: { engineID: string; strategyId?: s
           <div className="mt-2 border border-slate-700 rounded-lg bg-slate-900/40 p-3">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold text-slate-300">自动守仓 · {data.strat_symbol ?? ''}</span>
-              <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-200">{stateLabel}</span>
+              <div className="flex items-center gap-2">
+                {armed && !editing && (
+                  <button type="button" onClick={openEdit} className="text-xs px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-200">✎ 改风控档</button>
+                )}
+                <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-200">{stateLabel}</span>
+              </div>
             </div>
             {armed ? (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-x-3 gap-y-1.5 text-slate-300">
@@ -95,6 +128,30 @@ function LiveStatus({ engineID, strategyId }: { engineID: string; strategyId?: s
             ) : (
               <p className="text-slate-400">正在准备守护你的仓位…</p>
             )}
+            {editing && (
+              <div className="mt-3 border-t border-slate-700 pt-2">
+                <p className="text-[10px] text-slate-500 mb-2">改完立即生效,不停引擎、不动仓位。止损在已开始移动后只能收紧、不能放宽。</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {guardianFields.map((f) => (
+                    <div key={f.key}>
+                      <label className="block text-[11px] text-slate-400 mb-0.5">{f.label} (%)</label>
+                      <input
+                        type="number" step="any" min={0}
+                        value={ev[f.key] ?? ''}
+                        onChange={(e) => setEv((p) => ({ ...p, [f.key]: e.target.value === '' ? '' : Number(e.target.value) }))}
+                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <button type="button" onClick={saveEdit} disabled={saving} className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded text-xs font-semibold">{saving ? '保存中…' : '保存'}</button>
+                  <button type="button" onClick={() => setEditing(false)} className="px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-xs">取消</button>
+                  {saveMsg && <span className="text-[11px] text-slate-400">{saveMsg}</span>}
+                </div>
+              </div>
+            )}
+            {!editing && saveMsg && <p className="text-[11px] text-emerald-400 mt-1.5">{saveMsg}</p>}
           </div>
         )
       })()}

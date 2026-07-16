@@ -99,21 +99,54 @@ func buildAlertEngine(gc guardianConfig) *AlertEngine {
 	return e
 }
 
+// parseProtection builds a ProtectionConfig from a params map. Shared by the
+// initial guardian setup and the live "修改参数" update path so both interpret the
+// UI's plain-percentage fields identically.
+func parseProtection(p map[string]any) ProtectionConfig {
+	// Plain-percentage defaults (intuitive for non-technical users); ATR mode
+	// stays available to API callers via StopMode="atr".
+	prot := ProtectionConfig{
+		StopMode:     parseStopMode(strOr(p, "StopMode", "pct")),
+		StopValue:    floatOr(p, "StopValue", 0.03),
+		TrailEnabled: boolOr(p, "TrailEnabled", true),
+		ActivateR:    floatOr(p, "ActivateR", 1),
+		TrailMode:    parseTrailMode(strOr(p, "TrailMode", "r")),
+		TrailValue:   floatOr(p, "TrailValue", 1),
+	}
+	// Take-profit: the UI sends only a value; a positive value means percent-of-
+	// entry unless an explicit mode is given, and 0 (or missing) means "no target".
+	prot.TPValue = floatOr(p, "TPValue", 0)
+	prot.TPMode = parseTPMode(strOr(p, "TPMode", ""))
+	if prot.TPValue > 0 && prot.TPMode == TPNone {
+		prot.TPMode = TPPct
+	}
+	if prot.TPValue <= 0 {
+		prot.TPMode = TPNone
+	}
+	// Break-even: the UI sends BreakEvenPct (profit % at which to lock in no-loss);
+	// convert to R for the percentage stop. API callers may set BreakEvenAtR directly.
+	if bePct := floatOr(p, "BreakEvenPct", 0); bePct > 0 && prot.StopMode == StopPct && prot.StopValue > 0 {
+		prot.BreakEvenAtR = bePct / prot.StopValue
+	} else {
+		prot.BreakEvenAtR = floatOr(p, "BreakEvenAtR", 0)
+	}
+	// Partial take-profit: UI sends PartialTPPct (profit % to bank a fraction);
+	// convert to R for the percentage stop. Fraction defaults to half.
+	if ptPct := floatOr(p, "PartialTPPct", 0); ptPct > 0 && prot.StopMode == StopPct && prot.StopValue > 0 {
+		prot.PartialTPAtR = ptPct / prot.StopValue
+	} else {
+		prot.PartialTPAtR = floatOr(p, "PartialTPAtR", 0)
+	}
+	prot.PartialTPFraction = floatOr(p, "PartialTPFraction", 0.5)
+	return prot
+}
+
 func parseGuardianConfig(p map[string]any) (guardianConfig, error) {
 	gc := guardianConfig{
 		Adopt:     boolOr(p, "Adopt", true),
 		ATRWindow: intOr(p, "ATRWindow", 14),
 		MAPeriod:  intOr(p, "MAPeriod", 0),
-		Prot: ProtectionConfig{
-			// Plain-percentage defaults (intuitive for non-technical users); ATR
-			// mode stays available to API callers via StopMode="atr".
-			StopMode:     parseStopMode(strOr(p, "StopMode", "pct")),
-			StopValue:    floatOr(p, "StopValue", 0.03),
-			TrailEnabled: boolOr(p, "TrailEnabled", true),
-			ActivateR:    floatOr(p, "ActivateR", 1),
-			TrailMode:    parseTrailMode(strOr(p, "TrailMode", "r")),
-			TrailValue:   floatOr(p, "TrailValue", 1),
-		},
+		Prot:      parseProtection(p),
 		// Sensible alerts on by default; user need not configure them.
 		AlertMilestoneStep: floatOr(p, "AlertProfitMilestone", 1),
 		AlertStopProxR:     floatOr(p, "AlertStopProximityR", 0.3),
@@ -125,31 +158,6 @@ func parseGuardianConfig(p map[string]any) (guardianConfig, error) {
 	if gc.Symbol == "" {
 		return gc, fmt.Errorf("guardian: Symbol is required")
 	}
-	// Take-profit: the UI sends only a value; a positive value means percent-of-
-	// entry unless an explicit mode is given, and 0 (or missing) means "no target".
-	gc.Prot.TPValue = floatOr(p, "TPValue", 0)
-	gc.Prot.TPMode = parseTPMode(strOr(p, "TPMode", ""))
-	if gc.Prot.TPValue > 0 && gc.Prot.TPMode == TPNone {
-		gc.Prot.TPMode = TPPct
-	}
-	if gc.Prot.TPValue <= 0 {
-		gc.Prot.TPMode = TPNone
-	}
-	// Break-even: the UI sends BreakEvenPct (profit % at which to lock in no-loss);
-	// convert to R for the percentage stop. API callers may set BreakEvenAtR directly.
-	if bePct := floatOr(p, "BreakEvenPct", 0); bePct > 0 && gc.Prot.StopMode == StopPct && gc.Prot.StopValue > 0 {
-		gc.Prot.BreakEvenAtR = bePct / gc.Prot.StopValue
-	} else {
-		gc.Prot.BreakEvenAtR = floatOr(p, "BreakEvenAtR", 0)
-	}
-	// Partial take-profit: UI sends PartialTPPct (profit % to bank a fraction);
-	// convert to R for the percentage stop. Fraction defaults to half.
-	if ptPct := floatOr(p, "PartialTPPct", 0); ptPct > 0 && gc.Prot.StopMode == StopPct && gc.Prot.StopValue > 0 {
-		gc.Prot.PartialTPAtR = ptPct / gc.Prot.StopValue
-	} else {
-		gc.Prot.PartialTPAtR = floatOr(p, "PartialTPAtR", 0)
-	}
-	gc.Prot.PartialTPFraction = floatOr(p, "PartialTPFraction", 0.5)
 	for _, v := range sliceOr(p, "AlertLevels") {
 		if f, ok := asFloat(v); ok {
 			gc.AlertLevels = append(gc.AlertLevels, f)

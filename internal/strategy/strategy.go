@@ -195,6 +195,14 @@ type StatusReporter interface {
 	Status() map[string]any
 }
 
+// LiveUpdatable is an optional interface a strategy implements to accept live
+// parameter changes on a running engine. The engine calls UpdateParams from its
+// own run-loop goroutine (never concurrently with OnBar/OnTick/OnFill), so
+// implementations need no extra locking.
+type LiveUpdatable interface {
+	UpdateParams(ctx *Context, params map[string]any) error
+}
+
 // StagedTP describes one level in a staged take-profit plan.
 type StagedTP struct {
 	Price float64

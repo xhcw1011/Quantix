@@ -278,6 +278,30 @@ func (s *Server) recentLogs(w http.ResponseWriter, r *http.Request) {
 //	@Failure		404		{object}	errorResp
 //	@Failure		500		{object}	errorResp
 //	@Router			/api/engines/{id}/close-position [post]
+//
+// updateEngineParams applies live parameter changes to a running engine's
+// strategy (currently the guardian's protective config).
+func (s *Server) updateEngineParams(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromCtx(r)
+	engineID := r.PathValue("id")
+	if engineID == "" {
+		jsonError(w, "engine id is required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Params map[string]any `json:"params"`
+	}
+	if err := decodeJSON(r, &body); err != nil || len(body.Params) == 0 {
+		jsonError(w, "params object is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.manager.UpdateParams(userID, engineID, body.Params); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonOK(w, map[string]any{"status": "updated", "engine_id": engineID})
+}
+
 func (s *Server) closeEnginePosition(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromCtx(r)
 	engineID := r.PathValue("id")

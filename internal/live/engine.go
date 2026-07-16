@@ -74,6 +74,7 @@ type Engine struct {
 	notifier  *notify.Notifier        // may be nil
 	marginMon *MarginMonitor          // may be nil; active only for futures/swap exchanges
 	tickCh    chan float64            // real-time price from ticker WS
+	updateCh  chan map[string]any     // live parameter updates applied in the run loop
 	log       *zap.Logger
 
 	// engineLive flips true once the startup backfill replay is drained, so the
@@ -213,6 +214,7 @@ func NewEngine(
 		equityQuerier: eq,
 		org:           org,
 		tickCh:        make(chan float64, 512),
+		updateCh:      make(chan map[string]any, 4),
 		stratFillCh:   make(chan strategy.Fill, 16),
 		log:           log,
 	}, nil

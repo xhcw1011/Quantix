@@ -103,6 +103,43 @@ func NewEntryGuardian(symbol, side string, qty float64, cfg ProtectionConfig, at
 	return g
 }
 
+// UpdateParams applies a live change to the protective setup (止损/止盈/移动止损/
+// 落袋 等) on a running guardian — without stopping the engine or touching the
+// position. The stop recomputes (tighten-only once trailing; free before), the
+// take-profit updates immediately, and the exchange resting stop is re-placed at
+// the new level. Implements strategy.LiveUpdatable; the engine calls it from its
+// run-loop goroutine, so no extra locking is needed.
+func (g *Guardian) UpdateParams(ctx *strategy.Context, params map[string]any) error {
+	newCfg := parseProtection(params)
+	g.cfg = newCfg // future re-arm (adopt/restart) uses the new config
+	if g.prot == nil {
+		return nil // not armed yet — applies when protection arms
+	}
+	g.prot.UpdateConfig(newCfg, g.atr.Value())
+	g.forceResyncRestingStop(ctx) // exchange stop must match the new level (either direction)
+	tp := "不设"
+	if g.prot.TPPrice() > 0 {
+		tp = fmt.Sprintf("%.4g", g.prot.TPPrice())
+	}
+	g.log.Info("guardian: params updated live",
+		zap.String("symbol", g.symbol),
+		zap.Float64("stop", g.prot.Stop), zap.Float64("tp", g.prot.TPPrice()))
+	g.notifyAction("updated", fmt.Sprintf("已更新守护参数:止损→%.4g,止盈→%s", g.prot.Stop, tp))
+	return nil
+}
+
+// forceResyncRestingStop re-places the exchange resting stop at the current
+// protection stop regardless of direction (a live edit may widen or tighten it).
+// No-op outside resting mode, where the tick-based close reads g.prot.Stop live.
+func (g *Guardian) forceResyncRestingStop(ctx *strategy.Context) {
+	if !g.restingMode || g.stopOrderID == "" {
+		return
+	}
+	_ = ctx.CancelOrder(g.stopOrderID)
+	g.stopOrderID = ""
+	g.placeRestingStop(ctx)
+}
+
 // SetLimitEntry switches arm-with-entry to a resting LIMIT order at price (0 or
 // non-"limit" type keeps the default market entry). The protective exit stays
 // market regardless.
@@ -616,6 +653,10 @@ func (g *Guardian) Status() map[string]any {
 	} else if g.closePlaced {
 		state = "closing"
 	}
+	tpPct := 0.0
+	if g.cfg.TPMode == TPPct {
+		tpPct = g.cfg.TPValue * 100
+	}
 	return map[string]any{
 		"state":        state,
 		"symbol":       g.symbol,
@@ -628,6 +669,14 @@ func (g *Guardian) Status() map[string]any {
 		"peak_r":       g.prot.PeakR,
 		"trail_active": g.prot.Activated(),
 		"bars_held":    g.barsHeld,
+		// Current editable risk levels as plain percentages, for pre-filling the
+		// live "修改参数" form so a save preserves the fields the user didn't change.
+		"edit": map[string]any{
+			"StopValue":    g.cfg.StopValue * 100,
+			"BreakEvenPct": g.cfg.BreakEvenAtR * g.cfg.StopValue * 100,
+			"PartialTPPct": g.cfg.PartialTPAtR * g.cfg.StopValue * 100,
+			"TPValue":      tpPct,
+		},
 	}
 }
 

@@ -179,6 +179,31 @@ func (p *Protection) UpdateStop(price, atr float64) {
 	}
 }
 
+// UpdateConfig applies a live change to the protective setup on an already-armed
+// position. Before trailing engages the base stop moves freely (the user is still
+// setting up); once trailing has engaged the stop can only tighten — a live edit
+// never gives back locked-in profit. Take-profit and R recompute immediately.
+func (p *Protection) UpdateConfig(newCfg ProtectionConfig, atr float64) {
+	dist := stopDistance(newCfg.StopMode, newCfg.StopValue, p.Entry, atr)
+	var base float64
+	if p.Side == SideLong {
+		base = p.Entry - dist
+	} else {
+		base = p.Entry + dist
+	}
+	switch {
+	case !p.activated:
+		p.Stop = base // still setting up — free to widen or tighten the initial stop
+	case p.Side == SideLong && base > p.Stop:
+		p.Stop = base // trailing engaged — tighten only
+	case p.Side == SideShort && base < p.Stop:
+		p.Stop = base
+	}
+	p.R = math.Abs(p.Entry - base)
+	p.tp = takeProfitPrice(p.Side, p.Entry, p.R, newCfg)
+	p.cfg = newCfg
+}
+
 // StopHit reports whether price has reached or passed the current stop.
 func (p *Protection) StopHit(price float64) bool {
 	if p.Side == SideLong {
