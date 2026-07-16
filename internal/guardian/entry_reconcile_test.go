@@ -76,6 +76,27 @@ func TestGuardian_AdoptsRecoveredPositionWithoutEntryPrice(t *testing.T) {
 	}
 }
 
+// TestGuardian_WarmupBarsDontTriggerExit is the regression test for the real-money
+// incident: after adopting, the guardian ran its exit/trail logic on historical
+// warmup-replay prices and false-triggered a stop. Warmup bars must not exit.
+func TestGuardian_WarmupBarsDontTriggerExit(t *testing.T) {
+	cfg := ProtectionConfig{StopMode: StopPct, StopValue: 0.03}
+	// Short @2000, stop = 2060. A warmup bar spiking to 2100 would "hit" it.
+	g := NewGuardian("ETHUSDT", NewProtection(SideShort, 2000, 0.1, cfg, 0), 14, zap.NewNop())
+	b := &gBroker{}
+	ctx := strategy.NewContext(&gPortfolio{qty: -0.1, avg: 2000}, b, zap.NewNop())
+
+	g.OnBar(ctx, exchange.Kline{Open: 2100, High: 2100, Low: 2100, Close: 2100, Warmup: true})
+	if len(b.orders) != 0 {
+		t.Fatalf("expected NO close on a warmup replay bar, got %d: %+v", len(b.orders), b.orders)
+	}
+	// A live bar at the same adverse price legitimately closes.
+	g.OnBar(ctx, exchange.Kline{Open: 2100, High: 2100, Low: 2100, Close: 2100, Warmup: false})
+	if len(b.orders) != 1 {
+		t.Fatalf("expected 1 close on the live bar, got %d", len(b.orders))
+	}
+}
+
 // TestGuardian_UpdateParamsLive verifies live "修改参数" on a running guardian:
 // the stop recomputes from the new value without stopping/rearming.
 func TestGuardian_UpdateParamsLive(t *testing.T) {

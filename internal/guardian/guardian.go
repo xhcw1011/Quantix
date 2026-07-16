@@ -488,6 +488,13 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			return
 		}
 	}
+	// During the startup backfill replay, only prime indicators / adopt — never run
+	// the trail/exit logic on historical prices (it would false-trigger a stop and
+	// submit a suppressed close, leaving the guardian stuck "closing"). Live ticks
+	// (OnTick) place the resting stop and enforce protection right after warmup.
+	if bar.Warmup {
+		return
+	}
 	g.maybeRestore()
 	if g.resyncPosition(ctx) { // position closed externally → retired
 		return
