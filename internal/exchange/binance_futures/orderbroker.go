@@ -26,6 +26,12 @@ type OrderBroker struct {
 	client *goBinance.Client
 	log    *zap.Logger
 
+	// demo/testnet pin this broker's network mode so its user-data WS stream
+	// binds to the right endpoint via exchange.ServeBinanceFuturesWS, even when a
+	// live broker and a demo broker run in the same process. See binance_auth.go.
+	demo    bool
+	testnet bool
+
 	// Per-symbol LOT_SIZE/PRICE_FILTER precision, loaded lazily from
 	// exchangeInfo on first order. Guards against -1111 "precision over maximum"
 	// rejections for symbols other than the ones the formatting was hardcoded to.
@@ -112,6 +118,13 @@ func NewOrderBrokerWithConfig(apiKey, apiSecret string, testnet bool, cfg config
 
 	client := goBinance.NewClient(apiKey, apiSecret)
 
+	// Pin the REST base URL per-instance instead of relying on the shared global
+	// network flags (ApplyBinanceNetworkMode above sets them process-wide). This
+	// lets a live engine and a demo engine coexist: each client's REST calls go to
+	// the right host regardless of what another engine set the globals to. WS
+	// streams are handled separately via exchange.ServeBinanceFuturesWS.
+	client.BaseURL = exchange.BinanceFuturesRESTBaseURL(cfg.Demo, cfg.Testnet)
+
 	// Apply private-key auth if configured
 	if err := exchange.ConfigureBinanceFuturesAuth(client, cfg); err != nil {
 		return nil, fmt.Errorf("binance futures auth config: %w", err)
@@ -125,7 +138,7 @@ func NewOrderBrokerWithConfig(apiKey, apiSecret string, testnet bool, cfg config
 	}
 
 	log.Info("Binance Futures order broker ready", zap.String("key_type", client.KeyType))
-	return &OrderBroker{client: client, log: log}, nil
+	return &OrderBroker{client: client, log: log, demo: cfg.Demo, testnet: cfg.Testnet}, nil
 }
 
 // PlaceMarketOrder submits a market order. qty is in base-asset units (e.g. BTC).
@@ -696,82 +709,84 @@ func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill e
 		// Keepalive ticker: renew every 30 minutes
 		keepalive := time.NewTicker(30 * time.Minute)
 
-		doneC, stopC, err := goBinance.WsUserDataServe(listenKey, func(event *goBinance.WsUserDataEvent) {
-			if event == nil {
-				return
-			}
-
-			// ACCOUNT_UPDATE: balance + position changes
-			if event.Event == goBinance.UserDataEventTypeAccountUpdate {
-				reason := string(event.AccountUpdate.Reason)
-				if accountHandler != nil {
-					for _, bal := range event.AccountUpdate.Balances {
-						if bal.Asset == "USDT" {
-							wb, _ := strconv.ParseFloat(bal.Balance, 64)
-							accountHandler(wb, 0, reason) // unrealized PnL sourced from position updates, not balance
-							break
-						}
-					}
+		doneC, stopC, err := exchange.ServeBinanceFuturesWS(b.demo, b.testnet, func() (chan struct{}, chan struct{}, error) {
+			return goBinance.WsUserDataServe(listenKey, func(event *goBinance.WsUserDataEvent) {
+				if event == nil {
+					return
 				}
-				if positionHandler != nil {
-					for _, p := range event.AccountUpdate.Positions {
-						amt, _ := strconv.ParseFloat(p.Amount, 64)
-						ep, _ := strconv.ParseFloat(p.EntryPrice, 64)
-						side := string(p.Side)
-						if side == "" || side == "BOTH" {
-							if amt > 0 {
-								side = "LONG"
-							} else if amt < 0 {
-								side = "SHORT"
-							} else {
-								// amt == 0 (position closed) in BOTH mode:
-								// notify both sides so syncer can detect which was open
-								positionHandler(p.Symbol, "LONG", 0, ep)
-								positionHandler(p.Symbol, "SHORT", 0, ep)
-								continue
+
+				// ACCOUNT_UPDATE: balance + position changes
+				if event.Event == goBinance.UserDataEventTypeAccountUpdate {
+					reason := string(event.AccountUpdate.Reason)
+					if accountHandler != nil {
+						for _, bal := range event.AccountUpdate.Balances {
+							if bal.Asset == "USDT" {
+								wb, _ := strconv.ParseFloat(bal.Balance, 64)
+								accountHandler(wb, 0, reason) // unrealized PnL sourced from position updates, not balance
+								break
 							}
 						}
-						positionHandler(p.Symbol, side, amt, ep)
 					}
+					if positionHandler != nil {
+						for _, p := range event.AccountUpdate.Positions {
+							amt, _ := strconv.ParseFloat(p.Amount, 64)
+							ep, _ := strconv.ParseFloat(p.EntryPrice, 64)
+							side := string(p.Side)
+							if side == "" || side == "BOTH" {
+								if amt > 0 {
+									side = "LONG"
+								} else if amt < 0 {
+									side = "SHORT"
+								} else {
+									// amt == 0 (position closed) in BOTH mode:
+									// notify both sides so syncer can detect which was open
+									positionHandler(p.Symbol, "LONG", 0, ep)
+									positionHandler(p.Symbol, "SHORT", 0, ep)
+									continue
+								}
+							}
+							positionHandler(p.Symbol, side, amt, ep)
+						}
+					}
+					return
 				}
-				return
-			}
 
-			// ORDER_TRADE_UPDATE: fill notifications
-			if event.Event != goBinance.UserDataEventTypeOrderTradeUpdate {
-				return
-			}
-			o := event.OrderTradeUpdate
+				// ORDER_TRADE_UPDATE: fill notifications
+				if event.Event != goBinance.UserDataEventTypeOrderTradeUpdate {
+					return
+				}
+				o := event.OrderTradeUpdate
 
-			// Use LastFilledQty (incremental for this event), NOT AccumulatedFilledQty
-			// which is cumulative and would cause double-counting on partial fills.
-			qty, _ := strconv.ParseFloat(o.LastFilledQty, 64)
-			lastPrice, _ := strconv.ParseFloat(o.LastFilledPrice, 64)
-			avgPrice, _ := strconv.ParseFloat(o.AveragePrice, 64)
-			if lastPrice > 0 {
-				avgPrice = lastPrice
-			} // prefer exact fill price for this event
-			commission, _ := strconv.ParseFloat(o.Commission, 64)
-			if commission < 0 {
-				commission = -commission
-			}
+				// Use LastFilledQty (incremental for this event), NOT AccumulatedFilledQty
+				// which is cumulative and would cause double-counting on partial fills.
+				qty, _ := strconv.ParseFloat(o.LastFilledQty, 64)
+				lastPrice, _ := strconv.ParseFloat(o.LastFilledPrice, 64)
+				avgPrice, _ := strconv.ParseFloat(o.AveragePrice, 64)
+				if lastPrice > 0 {
+					avgPrice = lastPrice
+				} // prefer exact fill price for this event
+				commission, _ := strconv.ParseFloat(o.Commission, 64)
+				if commission < 0 {
+					commission = -commission
+				}
 
-			fill := exchange.OrderFill{
-				ExchangeID:   strconv.FormatInt(o.ID, 10),
-				FilledQty:    qty,
-				AvgPrice:     avgPrice,
-				Fee:          commission,
-				Status:       string(o.Status),
-				Symbol:       o.Symbol,
-				Side:         string(o.Side),
-				PositionSide: string(o.PositionSide),
-				IsReduceOnly: o.IsReduceOnly,
-			}
+				fill := exchange.OrderFill{
+					ExchangeID:   strconv.FormatInt(o.ID, 10),
+					FilledQty:    qty,
+					AvgPrice:     avgPrice,
+					Fee:          commission,
+					Status:       string(o.Status),
+					Symbol:       o.Symbol,
+					Side:         string(o.Side),
+					PositionSide: string(o.PositionSide),
+					IsReduceOnly: o.IsReduceOnly,
+				}
 
-			handler(fill, o.ClientOrderID, string(o.Status))
-		}, func(err error) {
-			// Binance disconnects idle UDS every ~60s — this is normal, not an error
-			b.log.Debug("user data stream: ws event", zap.Error(err))
+				handler(fill, o.ClientOrderID, string(o.Status))
+			}, func(err error) {
+				// Binance disconnects idle UDS every ~60s — this is normal, not an error
+				b.log.Debug("user data stream: ws event", zap.Error(err))
+			})
 		})
 
 		if err != nil {

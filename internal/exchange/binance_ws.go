@@ -27,17 +27,23 @@ type BinanceWSClient struct {
 	staleCheck     time.Duration
 	reconnectDelay time.Duration
 	openErrorDelay time.Duration
+	// demo/testnet pin this client's WS endpoint per-instance so a live engine
+	// and a demo engine can run concurrently; every Ws*Serve call goes through
+	// ServeBinanceSpotWS with these flags. See binance_auth.go for why.
+	demo    bool
+	testnet bool
 }
 
 // NewBinanceWSClient creates a new WebSocket client.
 func NewBinanceWSClient(cfg config.BinanceConfig, wsCfg config.WSConfig, log *zap.Logger) *BinanceWSClient {
-	ApplyBinanceNetworkMode(cfg)
 	return &BinanceWSClient{
 		log:            log,
 		staleTimeout:   wsCfg.StaleTimeout,
 		staleCheck:     wsCfg.StaleCheckInterval,
 		reconnectDelay: wsCfg.ReconnectDelay,
 		openErrorDelay: wsCfg.OpenErrorDelay,
+		demo:           cfg.Demo,
+		testnet:        cfg.Testnet,
 	}
 }
 
@@ -149,7 +155,9 @@ func (w *BinanceWSClient) openKlineStreams(ctx context.Context, symbols, interva
 					zap.Error(err))
 			}
 
-			doneC, stopC, err := binance.WsKlineServe(sym, itv, wsHandler, errHandler)
+			doneC, stopC, err := ServeBinanceSpotWS(w.demo, w.testnet, func() (chan struct{}, chan struct{}, error) {
+				return binance.WsKlineServe(sym, itv, wsHandler, errHandler)
+			})
 			if err != nil {
 				for _, sc := range stopCs {
 					close(sc)
@@ -236,7 +244,9 @@ func (w *BinanceWSClient) openTickerStreams(ctx context.Context, symbols []strin
 				zap.Error(err))
 		}
 
-		doneC, stopC, err := binance.WsBookTickerServe(sym, wsHandler, errHandler)
+		doneC, stopC, err := ServeBinanceSpotWS(w.demo, w.testnet, func() (chan struct{}, chan struct{}, error) {
+			return binance.WsBookTickerServe(sym, wsHandler, errHandler)
+		})
 		if err != nil {
 			for _, sc := range stopCs {
 				close(sc)

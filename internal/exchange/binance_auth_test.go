@@ -7,6 +7,7 @@ import (
 
 	binance "github.com/adshao/go-binance/v2"
 	"github.com/adshao/go-binance/v2/common"
+	futures "github.com/adshao/go-binance/v2/futures"
 
 	"github.com/Quantix/quantix/internal/config"
 )
@@ -109,5 +110,98 @@ func TestConfigureBinanceAuth_MissingPath(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error when RSA specified without private_key_path")
+	}
+}
+
+// TestBinanceRESTBaseURLRouting locks the per-instance REST host mapping. A wrong
+// host here means a "live" order routed to demo (or vice versa) — real money.
+func TestBinanceRESTBaseURLRouting(t *testing.T) {
+	tests := []struct {
+		name          string
+		demo, testnet bool
+		futures, spot string
+	}{
+		{"live", false, false, "https://fapi.binance.com", "https://api.binance.com"},
+		{"testnet", false, true, "https://testnet.binancefuture.com", "https://testnet.binance.vision"},
+		{"demo", true, false, "https://testnet.binancefuture.com", "https://demo-api.binance.com"},
+		// demo takes priority when both set (matches ApplyBinanceNetworkMode).
+		{"demo+testnet", true, true, "https://testnet.binancefuture.com", "https://demo-api.binance.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := BinanceFuturesRESTBaseURL(tt.demo, tt.testnet); got != tt.futures {
+				t.Errorf("futures: got %q, want %q", got, tt.futures)
+			}
+			if got := BinanceSpotRESTBaseURL(tt.demo, tt.testnet); got != tt.spot {
+				t.Errorf("spot: got %q, want %q", got, tt.spot)
+			}
+		})
+	}
+}
+
+// TestServeBinanceFuturesWSSetsModeBeforeConnect proves the helper sets the
+// package-global network flags to the requested mode *before* running connect —
+// which is the moment go-binance captures the WS endpoint. This is what lets a
+// live and a demo engine dial the right endpoints concurrently.
+func TestServeBinanceFuturesWSSetsModeBeforeConnect(t *testing.T) {
+	tests := []struct {
+		name          string
+		demo, testnet bool
+		wantDemo      bool
+		wantTestnet   bool
+	}{
+		{"live", false, false, false, false},
+		{"testnet", false, true, false, true},
+		{"demo", true, false, true, false},
+		{"demo priority", true, true, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sawDemo, sawTestnet bool
+			_, _, err := ServeBinanceFuturesWS(tt.demo, tt.testnet, func() (chan struct{}, chan struct{}, error) {
+				sawDemo = futures.UseDemo
+				sawTestnet = futures.UseTestnet
+				return nil, nil, nil
+			})
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if sawDemo != tt.wantDemo || sawTestnet != tt.wantTestnet {
+				t.Errorf("flags at connect: demo=%v testnet=%v, want demo=%v testnet=%v",
+					sawDemo, sawTestnet, tt.wantDemo, tt.wantTestnet)
+			}
+		})
+	}
+}
+
+// TestServeBinanceSpotWSSetsModeBeforeConnect is the Spot counterpart.
+func TestServeBinanceSpotWSSetsModeBeforeConnect(t *testing.T) {
+	tests := []struct {
+		name          string
+		demo, testnet bool
+		wantDemo      bool
+		wantTestnet   bool
+	}{
+		{"live", false, false, false, false},
+		{"testnet", false, true, false, true},
+		{"demo", true, false, true, false},
+		{"demo priority", true, true, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sawDemo, sawTestnet bool
+			_, _, err := ServeBinanceSpotWS(tt.demo, tt.testnet, func() (chan struct{}, chan struct{}, error) {
+				sawDemo = binance.UseDemo
+				sawTestnet = binance.UseTestnet
+				return nil, nil, nil
+			})
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if sawDemo != tt.wantDemo || sawTestnet != tt.wantTestnet {
+				t.Errorf("flags at connect: demo=%v testnet=%v, want demo=%v testnet=%v",
+					sawDemo, sawTestnet, tt.wantDemo, tt.wantTestnet)
+			}
+		})
 	}
 }

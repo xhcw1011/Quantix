@@ -21,17 +21,23 @@ type BinanceFuturesWSClient struct {
 	staleCheck     time.Duration
 	reconnectDelay time.Duration
 	openErrorDelay time.Duration
+	// demo/testnet pin this client's WS endpoint per-instance so a live engine
+	// and a demo engine can run concurrently; every Ws*Serve call goes through
+	// ServeBinanceFuturesWS with these flags. See binance_auth.go for why.
+	demo    bool
+	testnet bool
 }
 
 // NewBinanceFuturesWSClient creates a new Futures WebSocket client.
 func NewBinanceFuturesWSClient(cfg config.BinanceConfig, wsCfg config.WSConfig, log *zap.Logger) *BinanceFuturesWSClient {
-	ApplyBinanceNetworkMode(cfg)
 	return &BinanceFuturesWSClient{
 		log:            log,
 		staleTimeout:   wsCfg.StaleTimeout,
 		staleCheck:     wsCfg.StaleCheckInterval,
 		reconnectDelay: wsCfg.ReconnectDelay,
 		openErrorDelay: wsCfg.OpenErrorDelay,
+		demo:           cfg.Demo,
+		testnet:        cfg.Testnet,
 	}
 }
 
@@ -154,7 +160,9 @@ func (w *BinanceFuturesWSClient) openKlineStreams(ctx context.Context, symbols, 
 					zap.String("symbol", sym), zap.String("interval", itv), zap.Error(err))
 			}
 
-			doneC, stopC, err := futures.WsKlineServe(sym, itv, wsHandler, errHandler)
+			doneC, stopC, err := ServeBinanceFuturesWS(w.demo, w.testnet, func() (chan struct{}, chan struct{}, error) {
+				return futures.WsKlineServe(sym, itv, wsHandler, errHandler)
+			})
 			if err != nil {
 				for _, sc := range stopCs {
 					close(sc)
@@ -239,7 +247,9 @@ func (w *BinanceFuturesWSClient) openTickerStreams(ctx context.Context, symbols 
 			w.log.Error("futures ticker websocket error", zap.String("symbol", sym), zap.Error(err))
 		}
 
-		doneC, stopC, err := futures.WsBookTickerServe(sym, wsHandler, errHandler)
+		doneC, stopC, err := ServeBinanceFuturesWS(w.demo, w.testnet, func() (chan struct{}, chan struct{}, error) {
+			return futures.WsBookTickerServe(sym, wsHandler, errHandler)
+		})
 		if err != nil {
 			for _, sc := range stopCs {
 				close(sc)
