@@ -5,9 +5,20 @@ import (
 	"math"
 
 	"github.com/Quantix/quantix/internal/exchange"
+	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/strategy"
 	"go.uber.org/zap"
 )
+
+// livePositionSource reports the live account position per side. The live
+// engine's *position.Syncer satisfies it and is injected via
+// ctx.Extra["position_syncer"]; absent in backtests. The guardian uses it to
+// detect an already-open position on restart (so arm-with-entry adopts instead
+// of re-placing the market entry).
+type livePositionSource interface {
+	GetLong() *position.StrategyPosition
+	GetShort() *position.StrategyPosition
+}
 
 // Guardian is a protective strategy: it never opens (the user does) and never
 // re-enters. It watches one position, ratchets a trailing stop, closes on stop
@@ -87,6 +98,62 @@ func NewEntryGuardian(symbol, side string, qty float64, cfg ProtectionConfig, at
 	g.entrySide = side
 	g.entryQty = qty
 	return g
+}
+
+// livePosition returns the live account position for this symbol (preferring the
+// side we intended to open), or nil if none / no syncer. Used to detect an
+// already-open position on restart so arm-with-entry adopts instead of re-opening.
+func (g *Guardian) livePosition(ctx *strategy.Context) *position.StrategyPosition {
+	src, ok := ctx.Extra["position_syncer"].(livePositionSource)
+	if !ok || src == nil {
+		return nil
+	}
+	var pos *position.StrategyPosition
+	if g.entrySide == SideShort {
+		if pos = src.GetShort(); pos == nil {
+			pos = src.GetLong()
+		}
+	} else {
+		if pos = src.GetLong(); pos == nil {
+			pos = src.GetShort()
+		}
+	}
+	if pos == nil || pos.Qty <= 0 || pos.EntryPrice <= 0 {
+		return nil
+	}
+	return pos
+}
+
+// enterOrAdopt drives arm-with-entry idempotently. If the account already holds
+// the position (e.g. after a restart) it adopts it — arming protection from the
+// live position instead of re-placing the market entry (the "re-orders on every
+// deploy" bug). Otherwise it opens once and arms later from the fill.
+//
+// Returns true only when protection is now armed (caller continues guarding);
+// false means "wait" — either the entry was just placed (pending fill) or a
+// position exists but ATR is still warming up before an ATR-based stop.
+func (g *Guardian) enterOrAdopt(ctx *strategy.Context, atr float64) bool {
+	pos := g.livePosition(ctx)
+	if pos == nil {
+		g.placeEntry(ctx) // first run: no existing position → open it
+		return false
+	}
+	// Restart: position already open → adopt, never re-enter.
+	if g.cfg.StopMode == StopATR && !g.atr.Ready() {
+		return false // ATR warming up; retry next bar (still no new entry)
+	}
+	side := SideLong
+	sideCN := "多"
+	if pos.Side == "SHORT" {
+		side, sideCN = SideShort, "空"
+	}
+	g.prot = NewProtection(side, pos.EntryPrice, pos.Qty, g.cfg, atr)
+	g.log.Info("guardian: adopted existing position instead of re-entering",
+		zap.String("symbol", g.symbol), zap.String("side", side),
+		zap.Float64("entry", pos.EntryPrice), zap.Float64("qty", pos.Qty),
+		zap.Float64("stop", g.prot.Stop))
+	g.notifyAction("adopt", fmt.Sprintf("检测到账户已有%s仓,直接接管保护(未重复开仓)", sideCN))
+	return true
 }
 
 // placeEntry submits the market entry order once (armed later via OnFill).
@@ -334,13 +401,15 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	g.lastPrice = bar.Close
 
 	if g.prot == nil {
-		if g.wantEntry { // open first, arm from the fill
+		if g.wantEntry { // open first (or adopt if already open), arm from there
 			if !g.entryPlaced {
-				g.placeEntry(ctx)
+				if !g.enterOrAdopt(ctx, atr) {
+					return
+				}
+			} else {
+				return // entry placed, waiting for its fill to arm
 			}
-			return
-		}
-		if !g.tryArm(ctx, atr) {
+		} else if !g.tryArm(ctx, atr) {
 			return
 		}
 	}
