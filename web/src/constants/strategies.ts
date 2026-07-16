@@ -43,9 +43,28 @@ export function strategiesForMarket(market: MarketKind): StrategyMeta[] {
 }
 
 // A common-symbols list to power the searchable symbol picker (a fuller list than
-// the old hardcoded four). Users can also type any valid symbol.
+// the old hardcoded four). Users can also type any valid symbol. All *USDT pairs,
+// uppercase, deduplicated.
 export const COMMON_SYMBOLS = [
+  // Majors
   'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT',
-  'AVAXUSDT', 'LINKUSDT', 'DOTUSDT', 'MATICUSDT', 'LTCUSDT', 'TRXUSDT', 'ATOMUSDT',
-  'UNIUSDT', 'APTUSDT', 'ARBUSDT', 'OPUSDT', 'SUIUSDT', 'TONUSDT', 'NEARUSDT', 'FILUSDT',
+  'TRXUSDT', 'TONUSDT', 'DOTUSDT', 'LTCUSDT', 'BCHUSDT', 'ETCUSDT', 'XLMUSDT',
+  'AVAXUSDT', 'LINKUSDT', 'ATOMUSDT', 'UNIUSDT', 'MATICUSDT',
+  // Layer-1 / Layer-2 / infra
+  'NEARUSDT', 'APTUSDT', 'SUIUSDT', 'ARBUSDT', 'OPUSDT', 'INJUSDT', 'TIAUSDT',
+  'SEIUSDT', 'RUNEUSDT', 'STXUSDT', 'IMXUSDT', 'FILUSDT', 'ICPUSDT', 'HBARUSDT',
+  'ALGOUSDT', 'VETUSDT', 'EGLDUSDT', 'FTMUSDT', 'THETAUSDT', 'KAVAUSDT', 'ROSEUSDT',
+  'FLOWUSDT', 'MINAUSDT', 'ZILUSDT', 'ONEUSDT', 'QNTUSDT', 'XTZUSDT', 'EOSUSDT',
+  'NEOUSDT', 'IOTAUSDT', 'KSMUSDT', 'CFXUSDT', 'KASUSDT',
+  // DeFi
+  'LDOUSDT', 'AAVEUSDT', 'MKRUSDT', 'CRVUSDT', 'DYDXUSDT', 'GMXUSDT', 'PENDLEUSDT',
+  'COMPUSDT', 'SNXUSDT', 'SUSHIUSDT', '1INCHUSDT', 'CAKEUSDT', 'ENSUSDT', 'GRTUSDT',
+  // AI / new narratives
+  'WLDUSDT', 'PYTHUSDT', 'JUPUSDT', 'FETUSDT', 'AGIXUSDT', 'RNDRUSDT', 'ARKMUSDT',
+  'ORDIUSDT', 'JTOUSDT', 'STRKUSDT', 'DYMUSDT', 'MANTAUSDT', 'WUSDT',
+  // Meme
+  'PEPEUSDT', 'WIFUSDT', 'BONKUSDT', 'FLOKIUSDT', 'SHIBUSDT',
+  // Gaming / metaverse / NFT
+  'GALAUSDT', 'SANDUSDT', 'MANAUSDT', 'AXSUSDT', 'CHZUSDT', 'APEUSDT', 'ENJUSDT',
+  'GMTUSDT', 'MAGICUSDT',
 ]

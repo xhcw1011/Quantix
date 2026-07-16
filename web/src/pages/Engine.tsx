@@ -4,6 +4,7 @@ import { useTradeSocket } from '../hooks/useTradeSocket'
 import { COMMON_SYMBOLS, strategiesForMarket, strategyLabel, strategyMeta } from '../constants/strategies'
 import type { MarketKind } from '../constants/strategies'
 import { fieldsForStrategy } from '../constants/strategyFields'
+import SymbolPicker from '../components/SymbolPicker'
 
 interface Preset {
   name: string
@@ -440,16 +441,12 @@ export default function Engine() {
                 </div>
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">交易对</label>
-                  <input
-                    list="symbol-list"
+                  <SymbolPicker
                     value={form.symbol}
-                    onChange={(e) => setForm({ ...form, symbol: e.target.value })}
-                    className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                    placeholder="e.g. BTCUSDT"
+                    onChange={(v) => setForm({ ...form, symbol: v })}
+                    options={COMMON_SYMBOLS}
+                    placeholder="搜索或输入交易对,如 BTCUSDT"
                   />
-                  <datalist id="symbol-list">
-                    {COMMON_SYMBOLS.map((s) => <option key={s} value={s} />)}
-                  </datalist>
                 </div>
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">检查频率(K线)</label>
