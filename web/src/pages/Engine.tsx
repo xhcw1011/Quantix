@@ -682,13 +682,13 @@ export default function Engine() {
                           <div className="flex items-center justify-between mb-1">
                             <label className="text-xs text-slate-400">数量</label>
                             {symbolPriceNum && (
-                              <div className="inline-flex rounded border border-slate-600 overflow-hidden text-[10px]">
+                              <div className="inline-flex rounded-md border border-slate-600 overflow-hidden text-xs">
                                 {([['notional', '名义U'], ['margin', '保证金U'], ['coin', '币']] as const).map(([m, lbl]) => (
                                   <button
                                     key={m}
                                     type="button"
                                     onClick={() => setGuardianQtyMode(m)}
-                                    className={`px-1.5 py-0.5 ${guardianQtyMode === m ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`}
+                                    className={`px-2 py-1 ${guardianQtyMode === m ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`}
                                   >{lbl}</button>
                                 ))}
                               </div>
@@ -716,12 +716,12 @@ export default function Engine() {
                           )}
                         </div>
                       </div>
-                      {/* 开仓方式:市价立即成交 / 限价挂单等价。平仓一律市价。 */}
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-xs text-slate-400">开仓方式</label>
-                          <div className="inline-flex rounded border border-slate-600 overflow-hidden text-[10px]">
-                            {([['market', '市价(立即开)'], ['limit', '限价(挂单)']] as const).map(([m, lbl]) => (
+                      {/* 开仓方式 + 价格:整齐两列。平仓一律市价。 */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-slate-400 mb-1">开仓方式</label>
+                          <div className="inline-flex rounded-md border border-slate-600 overflow-hidden text-xs">
+                            {([['market', '市价'], ['limit', '限价']] as const).map(([m, lbl]) => (
                               <button
                                 key={m}
                                 type="button"
@@ -730,31 +730,36 @@ export default function Engine() {
                                   orderType: m,
                                   limitPrice: m === 'limit' && g.limitPrice <= 0 && symbolPriceNum ? symbolPriceNum : g.limitPrice,
                                 }))}
-                                className={`px-2 py-0.5 ${guardianEntry.orderType === m ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`}
+                                className={`px-3 py-1.5 ${guardianEntry.orderType === m ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`}
                               >{lbl}</button>
                             ))}
                           </div>
+                          <p className="text-[10px] text-slate-500 mt-0.5">
+                            {guardianEntry.orderType === 'market' ? '按当前价立即成交' : '挂单等成交,不到价就一直等'}
+                          </p>
                         </div>
-                        {guardianEntry.orderType === 'market' ? (
-                          <p className="text-[10px] text-slate-500">按当前价立即成交{symbolPriceNum ? `(≈ ${symbolPrice})` : ''}。</p>
-                        ) : (
-                          <>
+                        <div>
+                          <label className="block text-xs text-slate-400 mb-1">{guardianEntry.orderType === 'limit' ? '挂单价' : '成交价'}</label>
+                          {guardianEntry.orderType === 'limit' ? (
                             <input
                               type="number" min="0" step="any"
                               value={guardianEntry.limitPrice || ''}
                               onChange={(e) => setGuardianEntry((g) => ({ ...g, limitPrice: e.target.value === '' ? 0 : Number(e.target.value) }))}
                               className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                              placeholder={`挂单价,例如 ${symbolPrice ?? '64000'}`}
+                              placeholder={`例如 ${symbolPrice ?? '64000'}`}
                             />
-                            <p className="text-[10px] text-slate-500 mt-0.5">挂在这个价等成交,成交后才挂保护;不到价就一直等。</p>
-                          </>
-                        )}
+                          ) : (
+                            <div className="w-full bg-slate-800/40 border border-slate-700 rounded px-2 py-1.5 text-sm text-slate-400">
+                              当前价 ≈ {symbolPrice ?? '—'}
+                            </div>
+                          )}
+                        </div>
                       </div>
                       {/* 杠杆:只在开新仓时才相关,所以跟着"顺便帮我开仓"一起 */}
                       {showLeverage && (
                         <div>
                           <div className="flex items-center justify-between mb-1">
-                            <label className="text-xs text-slate-400">杠杆</label>
+                            <label className="text-xs text-slate-400">杠杆<span className="text-slate-500 font-normal">(只影响新开仓保证金,守护已有仓不用设)</span></label>
                             <span className="text-sm font-bold text-orange-300">{form.leverage}x</span>
                           </div>
                           <input
@@ -766,7 +771,6 @@ export default function Engine() {
                           <div className="flex justify-between text-xs text-slate-500 mt-0.5">
                             <span>1x</span><span>10x</span><span>20x</span>
                           </div>
-                          <p className="text-[10px] text-slate-500 mt-0.5">杠杆只影响这笔新开仓的保证金占用;守护已有仓位时不用设。</p>
                         </div>
                       )}
                     </>
