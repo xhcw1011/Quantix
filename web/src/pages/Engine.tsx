@@ -173,12 +173,17 @@ export default function Engine() {
   const [stratParams, setStratParams] = useState<Record<string, number | string>>({})
   // 交易对最新价:表单打开且选了交易对时展示,null = 加载中/取价失败
   const [symbolPrice, setSymbolPrice] = useState<string | null>(null)
+  const [symbolPriceNum, setSymbolPriceNum] = useState<number | null>(null) // 原始数值,用于盈亏估算
   // 自动守仓 "顺便帮我开仓" — off by default = 守护已有仓位.
   const [guardianEntry, setGuardianEntry] = useState<{ enabled: boolean; side: 'long' | 'short'; qty: number }>({
     enabled: false,
     side: 'long',
     qty: 0,
   })
+  // 自动守仓参数按 U 还是按 % 输入(默认按 U — U 本位用户想直接看会亏赚多少 U)。
+  const [guardianUMode, setGuardianUMode] = useState<boolean>(true)
+  // 守护"账户已有持仓"(没开顺便帮我开仓)时,用于估算盈亏的持仓数量;仅前端估算,不发后端。
+  const [guardianAdoptQty, setGuardianAdoptQty] = useState<number>(0)
 
   // Show ALL of the user's accounts in the credential picker — one exchange API
   // key usually works for both spot and futures, so we don't hard-filter by the
@@ -242,23 +247,27 @@ export default function Engine() {
   useEffect(() => {
     if (!showForm || !form.symbol) {
       setSymbolPrice(null)
+      setSymbolPriceNum(null)
       return
     }
     let cancelled = false
     setSymbolPrice(null) // 先显示"—",取到再更新
+    setSymbolPriceNum(null)
     getTicker(form.symbol)
       .then((r) => {
         if (cancelled) return
         const n = Number(r.data?.price)
         if (!isFinite(n)) {
           setSymbolPrice(null)
+          setSymbolPriceNum(null)
           return
         }
         const digits = n >= 1 ? 2 : 6
         setSymbolPrice(n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: digits }))
+        setSymbolPriceNum(n)
       })
       .catch(() => {
-        if (!cancelled) setSymbolPrice(null)
+        if (!cancelled) { setSymbolPrice(null); setSymbolPriceNum(null) }
       })
     return () => { cancelled = true }
   }, [form.symbol, showForm])
@@ -368,6 +377,23 @@ export default function Engine() {
     return { text: '真钱', cls: 'bg-red-900/50 text-red-300' }
   }
   const fields = fieldsForStrategy(form.strategy_id)
+
+  // ── 自动守仓:盈亏估算(U 本位)──────────────────────────────────────────
+  // 名义价值 = 数量 × 当前价。开仓时用表单数量,守护已有仓用用户填的预估数量。
+  // U 线性合约的盈亏 = 幅度% × 名义价值(与杠杆无关,方向只决定正负)。
+  const isGuardianForm = form.strategy_id === 'guardian'
+  const guardianQty = isGuardianForm
+    ? (guardianEntry.enabled ? guardianEntry.qty : guardianAdoptQty)
+    : 0
+  const guardianNotional =
+    symbolPriceNum && guardianQty > 0 ? symbolPriceNum * guardianQty : 0
+  const canEstimateU = guardianNotional > 0
+  // 规范存储始终是"百分比数字"(如 3 = 3%);提交时 /100。U 只是显示/输入的另一种视图。
+  const pctToU = (pct: number) => (canEstimateU ? (pct / 100) * guardianNotional : null)
+  const uToPct = (u: number) => (canEstimateU ? (u / guardianNotional) * 100 : 0)
+  const round2 = (x: number) => Math.round(x * 100) / 100
+  // 止损档=亏,其余(保本/落袋/全平)=赚。
+  const guardianFieldIsLoss = (key: string) => key === 'StopValue'
 
   return (
     <div className="space-y-6">
@@ -545,8 +571,8 @@ export default function Engine() {
                 </div>
               )}
 
-              {/* Dynamic strategy parameter fields — shown for spot strategies with a schema */}
-              {fields.length > 0 && (
+              {/* Dynamic strategy parameter fields — non-guardian strategies (generic) */}
+              {fields.length > 0 && !isGuardianForm && (
                 <div className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 space-y-3">
                   <span className="text-xs font-semibold text-slate-300">参数设置</span>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -587,6 +613,92 @@ export default function Engine() {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {/* 自动守仓 参数 — 支持按 U / 按 % 切换,实时显示预计盈亏(U 本位) */}
+              {isGuardianForm && fields.length > 0 && (
+                <div className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-300">参数设置</span>
+                    <div className="inline-flex rounded-md border border-slate-600 overflow-hidden text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setGuardianUMode(true)}
+                        className={`px-2.5 py-1 ${guardianUMode ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`}
+                      >按 U</button>
+                      <button
+                        type="button"
+                        onClick={() => setGuardianUMode(false)}
+                        className={`px-2.5 py-1 ${!guardianUMode ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`}
+                      >按 %</button>
+                    </div>
+                  </div>
+
+                  {guardianUMode && !canEstimateU && (
+                    <p className="text-[10px] text-amber-400/80">
+                      {guardianEntry.enabled ? '填好上面的「数量」' : '填上面的「持仓数量」'}后才能按 U 估算,暂时按 % 显示。
+                    </p>
+                  )}
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {fields.map((f) => {
+                      const raw = stratParams[f.key]
+                      const pct = Number(raw === '' || raw == null ? f.default : raw) || 0
+                      const useU = guardianUMode && canEstimateU
+                      const u = pctToU(pct)
+                      const uStr = u != null ? u.toLocaleString('en-US', { maximumFractionDigits: u >= 100 ? 0 : 2 }) : null
+                      const verb = guardianFieldIsLoss(f.key) ? '约亏' : '约赚'
+                      const displayVal = raw === '' ? '' : (useU ? round2(u ?? 0) : pct)
+                      return (
+                        <div key={f.key}>
+                          <label className="block text-xs text-slate-400 mb-1">
+                            {f.label}{useU ? ' (U)' : ' (%)'}
+                          </label>
+                          <input
+                            type="number"
+                            value={displayVal}
+                            step={useU ? 1 : f.step}
+                            min={0}
+                            onChange={(e) => {
+                              const val = e.target.value
+                              setStratParams((p) => ({
+                                ...p,
+                                [f.key]: val === '' ? '' : (useU ? uToPct(Number(val)) : Number(val)),
+                              }))
+                            }}
+                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                          />
+                          <div className="flex items-center justify-between mt-0.5 gap-2">
+                            <span className="text-[10px] text-slate-400">
+                              {pct <= 0
+                                ? '未设'
+                                : canEstimateU
+                                  ? (useU ? `≈ ${round2(pct)}% · ${verb} ${uStr} U` : `${verb} ${uStr} U`)
+                                  : `${round2(pct)}%`}
+                            </span>
+                            <span className="inline-flex gap-1">
+                              {[5, 10, 15].map((p) => (
+                                <button
+                                  key={p}
+                                  type="button"
+                                  onClick={() => setStratParams((s) => ({ ...s, [f.key]: p }))}
+                                  className="px-1.5 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-[10px] text-slate-300"
+                                >{p}%</button>
+                              ))}
+                            </span>
+                          </div>
+                          {f.help && <p className="text-[10px] text-slate-500 mt-0.5">{f.help}</p>}
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {canEstimateU && (
+                    <p className="text-[10px] text-slate-500">
+                      按 数量 {guardianQty} × 当前价 {symbolPrice} ≈ 名义 {guardianNotional.toLocaleString('en-US', { maximumFractionDigits: 0 })} U 估算,仅供参考(U 本位线性合约,与杠杆无关)。
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -633,6 +745,18 @@ export default function Engine() {
                           placeholder="例如 0.1"
                         />
                       </div>
+                    </div>
+                  )}
+                  {!guardianEntry.enabled && (
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">持仓数量(用于估算盈亏,可留空)</label>
+                      <input
+                        type="number" min="0" step="0.001"
+                        value={guardianAdoptQty || ''}
+                        onChange={(e) => setGuardianAdoptQty(e.target.value === '' ? 0 : Number(e.target.value))}
+                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                        placeholder="填上你账户里这个仓位的数量,上面各档就会显示 ≈ 多少 U"
+                      />
                     </div>
                   )}
                 </div>
