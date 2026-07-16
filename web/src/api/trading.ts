@@ -30,6 +30,9 @@ export const getFills = (
 
 export const getPositions = () => api.get('/positions')
 
+// Latest price — backend returns { symbol, price } (price is a string); 502 if unavailable.
+export const getTicker = (symbol: string) => api.get('/ticker', { params: { symbol } })
+
 export const getEquity = (strategyId?: string, limit = 200, period?: '1d' | '7d' | '30d' | 'all') =>
   api.get('/equity', { params: { strategy_id: strategyId, limit, period } })
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { listCredentials, listEngines, listStrategies, listStrategyPresets, startEngine, stopEngineById } from '../api/trading'
+import { getTicker, listCredentials, listEngines, listStrategies, listStrategyPresets, startEngine, stopEngineById } from '../api/trading'
 import { useTradeSocket } from '../hooks/useTradeSocket'
 import { COMMON_SYMBOLS, strategiesForMarket, strategyLabel, strategyMeta } from '../constants/strategies'
 import type { MarketKind } from '../constants/strategies'
@@ -170,6 +170,8 @@ export default function Engine() {
   const [selectedPresetIdx, setSelectedPresetIdx] = useState<number>(-1)
   const [extraParams, setExtraParams] = useState<string>('')  // JSON textarea
   const [stratParams, setStratParams] = useState<Record<string, number | string>>({})
+  // 交易对最新价:表单打开且选了交易对时展示,null = 加载中/取价失败
+  const [symbolPrice, setSymbolPrice] = useState<string | null>(null)
   // 自动守仓 "顺便帮我开仓" — off by default = 守护已有仓位.
   const [guardianEntry, setGuardianEntry] = useState<{ enabled: boolean; side: 'long' | 'short'; qty: number }>({
     enabled: false,
@@ -233,6 +235,32 @@ export default function Engine() {
       .then((r) => setPresets(Array.isArray(r.data) ? r.data : []))
       .catch(() => setPresets([]))
   }, [form.strategy_id])
+
+  // 取交易对最新价:表单打开且选了交易对时拉取,换交易对时重取。
+  // 用 cancelled 标记忽略过期响应(避免快速切换时旧价格覆盖新价格)。
+  useEffect(() => {
+    if (!showForm || !form.symbol) {
+      setSymbolPrice(null)
+      return
+    }
+    let cancelled = false
+    setSymbolPrice(null) // 先显示"—",取到再更新
+    getTicker(form.symbol)
+      .then((r) => {
+        if (cancelled) return
+        const n = Number(r.data?.price)
+        if (!isFinite(n)) {
+          setSymbolPrice(null)
+          return
+        }
+        const digits = n >= 1 ? 2 : 6
+        setSymbolPrice(n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: digits }))
+      })
+      .catch(() => {
+        if (!cancelled) setSymbolPrice(null)
+      })
+    return () => { cancelled = true }
+  }, [form.symbol, showForm])
 
   const handleStart = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -447,6 +475,9 @@ export default function Engine() {
                     options={COMMON_SYMBOLS}
                     placeholder="搜索或输入交易对,如 BTCUSDT"
                   />
+                  <p className="text-xs text-slate-400 mt-1">
+                    {symbolPrice ? `当前价 ≈ ${symbolPrice}` : '当前价 —'}
+                  </p>
                 </div>
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">检查频率(K线)</label>

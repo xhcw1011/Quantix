@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getOrders } from '../api/trading'
+import { getOrders, listCredentials } from '../api/trading'
 
 interface Order {
   id: string
@@ -15,7 +15,14 @@ interface Order {
   commission: number
   strategy_id: string
   mode: string
+  credential_id: number
   created_at: string
+}
+
+// 该订单对应账户的真钱属性(判断是否真金白银)
+interface CredMeta {
+  testnet: boolean
+  demo: boolean
 }
 
 const statusColor: Record<string, string> = {
@@ -34,12 +41,53 @@ const isGuardian = (strategyId: string) => (strategyId || '').includes('guardian
 // 方向的中文
 const sideLabel = (side: string) => (side === 'BUY' ? '买' : side === 'SELL' ? '卖' : side)
 
+// 订单类型的中文(未知类型原样显示)
+const typeLabel = (type: string): string => {
+  const map: Record<string, string> = {
+    MARKET: '市价单',
+    LIMIT: '限价单',
+    STOP_MARKET: '止损市价单',
+    STOP_LIMIT: '止损限价单',
+  }
+  return map[type] || type
+}
+
+// 订单状态的中文(未知状态原样显示)
+const statusLabel = (status: string): string => {
+  const map: Record<string, string> = {
+    OPEN: '挂单中',
+    NEW: '挂单中',
+    FILLED: '已成交',
+    PARTIALLY_FILLED: '部分成交',
+    CANCELLED: '已撤单',
+    CANCELED: '已撤单',
+    REJECTED: '被拒绝',
+    EXPIRED: '已过期',
+  }
+  return map[status] || status
+}
+
 export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([])
   const [loading, setLoading] = useState(true)
   const [offset, setOffset] = useState(0)
   const [apiError, setApiError] = useState<string | null>(null)
+  // credentialId -> { testnet, demo } —— 用来判断订单是真钱还是模拟资金
+  const [credMeta, setCredMeta] = useState<Record<number, CredMeta>>({})
   const limit = 50
+
+  // 只在挂载时拉一次凭证,建立 id -> 账户属性 的映射
+  useEffect(() => {
+    listCredentials()
+      .then((r) => {
+        const map: Record<number, CredMeta> = {}
+        for (const c of (r.data || [])) {
+          map[c.id] = { testnet: !!c.testnet, demo: !!c.demo }
+        }
+        setCredMeta(map)
+      })
+      .catch(() => {})
+  }, [])
 
   // Filters
   const [symbol, setSymbol] = useState('')
@@ -63,6 +111,28 @@ export default function Orders() {
     setSymbol(''); setStrategy(''); setMode(''); setFrom(''); setTo('')
   }
   const hasFilters = symbol || strategy || mode || from || to
+
+  // 资金属性:这笔订单动的是真钱还是模拟钱。
+  // 注意 mode==='live' 只代表"实时撮合",配的可能仍是 testnet/demo 账户(假钱),
+  // 所以要回查凭证的 testnet/demo 才能判断是不是真金白银。
+  const moneyBadge = (o: Order) => {
+    const title = `mode=${o.mode} · credential_id=${o.credential_id}`
+    // 回测/模拟:根本没真下过单
+    if (o.mode === 'paper') {
+      return { text: '回测/模拟', cls: 'bg-slate-600 text-slate-300', title }
+    }
+    const cred = credMeta[o.credential_id]
+    if (!cred) {
+      // 凭证查不到(引擎已停/凭证已删):无法判断,保守显示"实时"
+      return { text: '实时', cls: 'bg-slate-600 text-slate-300', title: `${title} · 账户未知` }
+    }
+    if (cred.testnet || cred.demo) {
+      // 实时撮合但用的是测试/模拟账户 = 假钱
+      return { text: '模拟盘', cls: 'bg-blue-900/50 text-blue-300', title }
+    }
+    // 正式账户 = 真金白银
+    return { text: '真钱', cls: 'bg-red-900/50 text-red-300', title }
+  }
 
   return (
     <div className="space-y-4">
@@ -131,7 +201,7 @@ export default function Orders() {
                   <th className="pb-2 text-right">均价</th>
                   <th className="pb-2 text-right">手续费</th>
                   <th className="pb-2">来源</th>
-                  <th className="pb-2">模式</th>
+                  <th className="pb-2">资金</th>
                   <th className="pb-2 text-right">时间</th>
                 </tr>
               </thead>
@@ -142,10 +212,10 @@ export default function Orders() {
                     <td className={`py-2 font-semibold ${o.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
                       {sideLabel(o.side)}
                     </td>
-                    <td className="py-2 text-slate-400">{o.type}</td>
+                    <td className="py-2 text-slate-400">{typeLabel(o.type)}</td>
                     <td className="py-2">
                       <span className={`text-xs px-1.5 py-0.5 rounded ${statusColor[o.status] || 'bg-slate-600 text-slate-300'}`}>
-                        {o.status}
+                        {statusLabel(o.status)}
                       </span>
                     </td>
                     <td className="py-2 text-right font-mono">{o.quantity.toFixed(6)}</td>
@@ -161,9 +231,14 @@ export default function Orders() {
                       </span>
                     </td>
                     <td className="py-2">
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${o.mode === 'live' ? 'bg-green-900/50 text-green-300' : 'bg-slate-600 text-slate-300'}`}>
-                        {o.mode === 'live' ? '实盘' : o.mode === 'paper' ? '模拟' : o.mode}
-                      </span>
+                      {(() => {
+                        const b = moneyBadge(o)
+                        return (
+                          <span title={b.title} className={`text-xs px-1.5 py-0.5 rounded ${b.cls}`}>
+                            {b.text}
+                          </span>
+                        )
+                      })()}
                     </td>
                     <td className="py-2 text-right text-xs text-slate-400">
                       {new Date(o.created_at).toLocaleString()}
