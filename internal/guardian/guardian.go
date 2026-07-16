@@ -129,13 +129,19 @@ func (g *Guardian) livePosition(ctx *strategy.Context) *position.StrategyPositio
 // live position instead of re-placing the market entry (the "re-orders on every
 // deploy" bug). Otherwise it opens once and arms later from the fill.
 //
+// isWarmup gates only the OPEN: during the startup backfill replay the broker
+// suppresses orders, so placing the entry then would latch entryPlaced without
+// ever really opening. Adoption is safe any time (it places no order).
+//
 // Returns true only when protection is now armed (caller continues guarding);
-// false means "wait" — either the entry was just placed (pending fill) or a
-// position exists but ATR is still warming up before an ATR-based stop.
-func (g *Guardian) enterOrAdopt(ctx *strategy.Context, atr float64) bool {
+// false means "wait" — the entry is pending/deferred, or ATR is still warming up.
+func (g *Guardian) enterOrAdopt(ctx *strategy.Context, atr float64, isWarmup bool) bool {
 	pos := g.livePosition(ctx)
 	if pos == nil {
-		g.placeEntry(ctx) // first run: no existing position → open it
+		if isWarmup {
+			return false // don't open during warmup replay — the order is suppressed
+		}
+		g.placeEntry(ctx) // first run, live bar: no existing position → open it
 		return false
 	}
 	// Restart: position already open → adopt, never re-enter.
@@ -403,7 +409,7 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if g.prot == nil {
 		if g.wantEntry { // open first (or adopt if already open), arm from there
 			if !g.entryPlaced {
-				if !g.enterOrAdopt(ctx, atr) {
+				if !g.enterOrAdopt(ctx, atr, bar.Warmup) {
 					return
 				}
 			} else {

@@ -54,6 +54,30 @@ func TestGuardian_EntryAdoptsExistingInsteadOfReopening(t *testing.T) {
 	}
 }
 
+// TestGuardian_EntryWaitsForLiveBar is the regression test for "选了帮我开仓但没下单":
+// the entry was placed on the first (warmup) bar, where the broker suppresses the
+// order and entryPlaced latches — so it never really opened. The open must wait
+// for a live bar (Warmup=false).
+func TestGuardian_EntryWaitsForLiveBar(t *testing.T) {
+	g := NewEntryGuardian("ETHUSDT", SideShort, 0.1, entryCfg(), 14, zap.NewNop())
+	b := &gBroker{}
+	ctx := strategy.NewContext(&gPortfolio{}, b, zap.NewNop())
+
+	// Warmup replay bar → must NOT place (would be suppressed + latched).
+	g.OnBar(ctx, exchange.Kline{Open: 2000, High: 2005, Low: 1995, Close: 2000, Warmup: true})
+	if len(b.orders) != 0 {
+		t.Fatalf("expected NO entry during warmup, got %d: %+v", len(b.orders), b.orders)
+	}
+	// First live bar → now it opens.
+	g.OnBar(ctx, exchange.Kline{Open: 2000, High: 2005, Low: 1995, Close: 2000, Warmup: false})
+	if len(b.orders) != 1 {
+		t.Fatalf("expected 1 entry order on the first live bar, got %d", len(b.orders))
+	}
+	if b.orders[0].PositionSide != strategy.PositionSideShort {
+		t.Fatalf("expected OpenShort entry, got %+v", b.orders[0])
+	}
+}
+
 // TestGuardian_EntryPlacesWhenFlat guards first-run behaviour: with no existing
 // position, arm-with-entry must still place the entry once.
 func TestGuardian_EntryPlacesWhenFlat(t *testing.T) {
