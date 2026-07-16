@@ -82,16 +82,17 @@ type runningEngine struct {
 	engine     *live.Engine  // set for live mode
 	paperEng   *paper.Engine // set for paper mode
 	cancel     context.CancelFunc
-	engineID   string
-	userID     int
-	strategyID string
-	symbol     string
-	interval   string
-	mode       string
-	leverage   int
-	startedAt  time.Time
-	lastErr    error
-	done       chan struct{}
+	engineID     string
+	userID       int
+	credentialID int
+	strategyID   string
+	symbol       string
+	interval     string
+	mode         string
+	leverage     int
+	startedAt    time.Time
+	lastErr      error
+	done         chan struct{}
 }
 
 // PositionView is an API-facing snapshot of a single open position,
@@ -107,10 +108,11 @@ type PositionView struct {
 
 // EnginePositions bundles all open positions for a single running engine.
 type EnginePositions struct {
-	EngineID   string         `json:"engine_id"`
-	StrategyID string         `json:"strategy_id"`
-	Symbol     string         `json:"symbol"`
-	Mode       string         `json:"mode"`
+	EngineID     string         `json:"engine_id"`
+	StrategyID   string         `json:"strategy_id"`
+	CredentialID int            `json:"credential_id"`
+	Symbol       string         `json:"symbol"`
+	Mode         string         `json:"mode"`
 	LastPrice  float64        `json:"last_price"`
 	Cash       float64        `json:"cash"`
 	Equity     float64        `json:"equity"`
@@ -447,10 +449,11 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 	klineCh := make(chan exchange.Kline, 2048)
 
 	re := &runningEngine{
-		cancel:     engineCancel,
-		engineID:   engineID,
-		userID:     userID,
-		strategyID: req.StrategyID,
+		cancel:       engineCancel,
+		engineID:     engineID,
+		userID:       userID,
+		credentialID: req.CredentialID,
+		strategyID:   req.StrategyID,
 		symbol:     req.Symbol,
 		interval:   req.Interval,
 		mode:       req.Mode,
@@ -1064,14 +1067,15 @@ func (m *EngineManager) GetPositions(userID int) []EnginePositions {
 		}
 
 		out = append(out, EnginePositions{
-			EngineID:   re.engineID,
-			StrategyID: re.strategyID,
-			Symbol:     re.symbol,
-			Mode:       re.mode,
-			LastPrice:  lastPrice,
-			Cash:       cash,
-			Equity:     equity,
-			Positions:  views,
+			EngineID:     re.engineID,
+			StrategyID:   re.strategyID,
+			CredentialID: re.credentialID,
+			Symbol:       re.symbol,
+			Mode:         re.mode,
+			LastPrice:    lastPrice,
+			Cash:         cash,
+			Equity:       equity,
+			Positions:    views,
 		})
 	}
 	return out
