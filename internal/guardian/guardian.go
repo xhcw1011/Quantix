@@ -168,7 +168,10 @@ func (g *Guardian) livePosition(ctx *strategy.Context) *position.StrategyPositio
 			pos = src.GetShort()
 		}
 	}
-	if pos == nil || pos.Qty <= 0 || pos.EntryPrice <= 0 {
+	// Accept even without an entry price — a position recovered from the exchange
+	// may lack a cost basis; enterOrAdopt falls back to the current price so we
+	// still adopt & protect it rather than trying to re-open.
+	if pos == nil || pos.Qty <= 0 {
 		return nil
 	}
 	return pos
@@ -203,7 +206,16 @@ func (g *Guardian) enterOrAdopt(ctx *strategy.Context, atr float64, isWarmup boo
 	if pos.Side == "SHORT" {
 		side, sideCN = SideShort, "空"
 	}
-	g.prot = NewProtection(side, pos.EntryPrice, pos.Qty, g.cfg, atr)
+	// A position recovered from the exchange may lack a cost basis; protect from
+	// the current price rather than leaving it unprotected.
+	entry := pos.EntryPrice
+	if entry <= 0 {
+		entry = g.lastPrice
+	}
+	if entry <= 0 {
+		return false // no price yet — retry next bar/tick
+	}
+	g.prot = NewProtection(side, entry, pos.Qty, g.cfg, atr)
 	g.log.Info("guardian: adopted existing position instead of re-entering",
 		zap.String("symbol", g.symbol), zap.String("side", side),
 		zap.Float64("entry", pos.EntryPrice), zap.Float64("qty", pos.Qty),

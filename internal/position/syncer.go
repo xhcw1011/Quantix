@@ -17,14 +17,14 @@ import (
 // Syncer keeps Redis + strategy in sync with exchange positions.
 // Exchange is the single source of truth.
 type Syncer struct {
-	redis    *RedisStore
-	store    *data.Store
-	log      *zap.Logger
+	redis *RedisStore
+	store *data.Store
+	log   *zap.Logger
 
-	mu       sync.RWMutex
-	long     *StrategyPosition
-	short    *StrategyPosition
-	equity   float64
+	mu     sync.RWMutex
+	long   *StrategyPosition
+	short  *StrategyPosition
+	equity float64
 
 	onChange func(PositionEvent)
 	userID   int
@@ -117,6 +117,31 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 		return
 	}
 
+	// GetMarginRatios carries size but not entry price. Fetch entry prices via the
+	// position query so a recovered (untracked) position gets a real cost basis —
+	// otherwise a strategy adopting it (e.g. guardian) can't compute the stop.
+	entryBySide := map[string]float64{}
+	if pq, ok := querier.(exchange.PositionQuerier); ok {
+		if positions, perr := pq.GetPositions(ctx); perr == nil {
+			for _, p := range positions {
+				if p.Symbol != s.symbol {
+					continue
+				}
+				side := p.PositionSide
+				if side == "" || side == "BOTH" {
+					if p.Amt >= 0 {
+						side = "LONG"
+					} else {
+						side = "SHORT"
+					}
+				}
+				entryBySide[side] = p.EntryPrice
+			}
+		} else {
+			s.log.Warn("syncer: entry-price query failed (recovered positions may lack cost basis)", zap.Error(perr))
+		}
+	}
+
 	exchangeLong := false
 	exchangeShort := false
 
@@ -159,7 +184,7 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 			pos := &StrategyPosition{
 				ExchangePosition: ExchangePosition{
 					Symbol: r.Symbol, Side: side,
-					Qty: math.Abs(r.Size), UpdatedAt: time.Now(),
+					Qty: math.Abs(r.Size), EntryPrice: entryBySide[side], UpdatedAt: time.Now(),
 				},
 				Mode:   "range", // default; strategy will adjust
 				Filled: true,
@@ -179,6 +204,12 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 			needsUpdate := false
 			if !current.Filled {
 				current.Filled = true
+				needsUpdate = true
+			}
+			// Backfill a missing cost basis (e.g. a position recovered before this
+			// fix cached entry=0 in Redis) so adopting strategies get a real entry.
+			if current.EntryPrice <= 0 && entryBySide[side] > 0 {
+				current.EntryPrice = entryBySide[side]
 				needsUpdate = true
 			}
 			if math.Abs(current.Qty-math.Abs(r.Size)) > 0.0001 {

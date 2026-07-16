@@ -54,6 +54,28 @@ func TestGuardian_EntryAdoptsExistingInsteadOfReopening(t *testing.T) {
 	}
 }
 
+// TestGuardian_AdoptsRecoveredPositionWithoutEntryPrice is the regression test
+// for the real-money incident: a position recovered from the exchange via the
+// margin-ratio query has no entry price, and the old code rejected it and tried
+// to re-open. It must adopt (protect from the current price), not re-open.
+func TestGuardian_AdoptsRecoveredPositionWithoutEntryPrice(t *testing.T) {
+	g := NewEntryGuardian("ETHUSDT", SideShort, 0.1, entryCfg(), 14, zap.NewNop())
+	b := &gBroker{}
+	ctx := strategy.NewContext(&gPortfolio{qty: -0.1, avg: 2000}, b, zap.NewNop())
+	recovered := &position.StrategyPosition{}
+	recovered.Symbol, recovered.Side, recovered.Qty = "ETHUSDT", "SHORT", 0.1 // NO EntryPrice
+	ctx.Extra["position_syncer"] = fakeLiveSource{short: recovered}
+
+	g.OnBar(ctx, exchange.Kline{Open: 2000, High: 2005, Low: 1995, Close: 2000, Warmup: false})
+
+	if len(b.orders) != 0 {
+		t.Fatalf("expected NO re-open — must adopt the recovered position, got %d: %+v", len(b.orders), b.orders)
+	}
+	if g.Prot() == nil || g.Prot().Entry != 2000 {
+		t.Fatalf("expected adopted SHORT protection with entry=2000 (fallback to current price), got %+v", g.Prot())
+	}
+}
+
 // TestGuardian_UpdateParamsLive verifies live "修改参数" on a running guardian:
 // the stop recomputes from the new value without stopping/rearming.
 func TestGuardian_UpdateParamsLive(t *testing.T) {
