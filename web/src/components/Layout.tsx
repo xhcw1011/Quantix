@@ -2,16 +2,18 @@ import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
 
+// 顺序按"日常看盘动线"排:先看整体→看现在持仓→去引擎开/停策略→再翻委托和成交流水,
+// 回测/账户/日志/设置这类偏配置的靠后。
 const navItems = [
-  { path: '/', label: 'Dashboard', icon: '📊' },
-  { path: '/fills', label: 'Fills', icon: '✅' },
-  { path: '/orders', label: 'Orders', icon: '📋' },
-  { path: '/credentials', label: 'Credentials', icon: '🔑' },
-  { path: '/engine', label: 'Engine', icon: '⚙️' },
-  { path: '/backtest', label: 'Backtest', icon: '🔬' },
-  { path: '/positions', label: 'Positions', icon: '📈' },
-  { path: '/logs', label: 'Logs', icon: '📜' },
-  { path: '/settings', label: 'Settings', icon: '🔧' },
+  { path: '/', label: '总览', icon: '📊' },
+  { path: '/positions', label: '持仓', icon: '📈' },
+  { path: '/engine', label: '引擎', icon: '⚙️' },
+  { path: '/orders', label: '委托', icon: '📋' },
+  { path: '/fills', label: '成交', icon: '✅' },
+  { path: '/backtest', label: '回测', icon: '🔬' },
+  { path: '/credentials', label: '账户', icon: '🔑' },
+  { path: '/logs', label: '日志', icon: '📜' },
+  { path: '/settings', label: '设置', icon: '🔧' },
 ]
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -26,7 +28,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   }
 
   const allNavItems = role === 'admin'
-    ? [...navItems, { path: '/admin', label: 'Admin', icon: '🛡️' }]
+    ? [...navItems, { path: '/admin', label: '管理', icon: '🛡️' }]
     : navItems
 
   const sidebarContent = (
