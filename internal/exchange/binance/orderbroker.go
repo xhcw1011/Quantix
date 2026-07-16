@@ -57,6 +57,11 @@ func NewOrderBrokerWithConfig(apiKey, apiSecret string, testnet bool, cfg config
 
 	client := goBinance.NewClient(apiKey, apiSecret)
 
+	// Pin the REST base URL per-instance so a live spot broker and a demo spot
+	// broker can coexist regardless of the shared global network flags. Spot has
+	// no user-data WS here (fills are REST-polled), so REST pinning is sufficient.
+	client.BaseURL = exchange.BinanceSpotRESTBaseURL(cfg.Demo, cfg.Testnet)
+
 	// Apply private-key auth if configured
 	if err := exchange.ConfigureBinanceAuth(client, cfg); err != nil {
 		return nil, fmt.Errorf("binance auth config: %w", err)

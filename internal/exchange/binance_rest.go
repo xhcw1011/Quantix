@@ -28,6 +28,9 @@ func NewBinanceRESTClient(apiKey, apiSecret string, useTestnet bool, log *zap.Lo
 func NewBinanceRESTClientWithConfig(apiKey, apiSecret string, useTestnet bool, cfg config.BinanceConfig, log *zap.Logger) (*BinanceRESTClient, error) {
 	ApplyBinanceNetworkMode(cfg)
 	c := binance.NewClient(apiKey, apiSecret)
+	// Pin the REST base URL per-instance so a live client and a demo client can
+	// coexist regardless of the shared global network flags. See binance_auth.go.
+	c.BaseURL = BinanceSpotRESTBaseURL(cfg.Demo, cfg.Testnet)
 	if err := ConfigureBinanceAuth(c, cfg); err != nil {
 		return nil, fmt.Errorf("binance REST auth config: %w", err)
 	}

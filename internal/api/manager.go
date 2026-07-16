@@ -142,11 +142,6 @@ type EngineManager struct {
 	openaiCfg   config.OpenAIConfig
 	wsCfg       config.WSConfig
 	redis       *redis.Client // nil if Redis not configured
-
-	// binanceNetworkMode tracks the first Binance network mode seen in this process.
-	// go-binance uses package-level globals (UseTestnet/UseDemo), so all Binance brokers
-	// in the same process MUST use the same mode. Empty = not yet set.
-	binanceNetworkMode string // "", "demo", "testnet", "live"
 }
 
 // NewEngineManager creates a manager backed by the given store.
@@ -328,21 +323,10 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 	excCfg := config.ExchangeConfig{Active: cred.Exchange}
 	switch cred.Exchange {
 	case "binance":
-		// go-binance uses package-level globals (UseTestnet/UseDemo), so all Binance
-		// brokers in the same process MUST use the same network mode.
-		// NOTE: m.mu is already held by the caller (Start locks at entry).
-		credMode := "live"
-		if cred.Demo {
-			credMode = "demo"
-		} else if cred.Testnet {
-			credMode = "testnet"
-		}
-		if m.binanceNetworkMode == "" {
-			m.binanceNetworkMode = credMode
-		} else if m.binanceNetworkMode != credMode {
-			return "", fmt.Errorf("all Binance engines must use the same network; first engine set %s mode, this credential is %s — cannot mix", m.binanceNetworkMode, credMode)
-		}
-
+		// Live and demo Binance engines can coexist in one process: REST clients
+		// pin client.BaseURL per-instance and WS streams dial through
+		// exchange.ServeBinanceFuturesWS/ServeBinanceSpotWS (which serialize the
+		// package-global network flags across the dial). No same-network guard.
 		excCfg.Binance = config.BinanceConfig{
 			APIKey: apiKey, APISecret: apiSecret,
 			Testnet: cred.Testnet, Demo: cred.Demo, MarketType: cred.MarketType,
