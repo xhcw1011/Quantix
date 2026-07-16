@@ -26,6 +26,16 @@ const initialForm = {
   market_type: 'spot',
 }
 
+// 市场类型的中文显示
+function marketTypeLabel(mt: string): string {
+  switch (mt) {
+    case 'spot': return '现货'
+    case 'swap': return '永续合约'
+    case 'futures': return '交割合约'
+    default: return mt
+  }
+}
+
 type HealthState = 'unknown' | 'testing' | 'ok' | 'fail'
 
 interface HealthInfo {
@@ -34,9 +44,13 @@ interface HealthInfo {
   usdt?: number     // balance from successful test
 }
 
+// 账户类型：正式实盘(真钱) vs 测试/模拟盘。提交时映射回后端的 testnet/demo 字段。
+type AccountType = 'live' | 'sim'
+
 export default function Credentials() {
   const [creds, setCreds] = useState<Credential[]>([])
   const [form, setForm] = useState(initialForm)
+  const [accountType, setAccountType] = useState<AccountType>('live')
   const [loading, setLoading] = useState(false)
   const [health, setHealth] = useState<Record<number, HealthInfo>>({})
   const [error, setError] = useState('')
@@ -74,19 +88,27 @@ export default function Credentials() {
     setError(''); setSuccess('')
     setLoading(true)
     try {
-      await createCredential(form)
-      setSuccess('Credential added successfully')
+      // 把"账户类型"映射回后端字段：
+      //  正式实盘        → testnet=false, demo=false
+      //  测试/模拟盘 + binance/bybit → testnet=true,  demo=false
+      //  测试/模拟盘 + okx           → demo=true,     testnet=false
+      const isSim = accountType === 'sim'
+      const demo = isSim && form.exchange === 'okx'
+      const testnet = isSim && !demo
+      await createCredential({ ...form, testnet, demo })
+      setSuccess('账户添加成功')
       setForm(initialForm)
+      setAccountType('live')
       load()
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to create credential')
+      setError(err.response?.data?.error || '添加账户失败')
     } finally {
       setLoading(false)
     }
   }
 
   const handleDelete = async (id: number) => {
-    if (!confirm('Delete this credential?')) return
+    if (!confirm('确定要删除这个账户吗?')) return
     await deleteCredential(id)
     load()
   }
@@ -96,13 +118,13 @@ export default function Credentials() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-bold">Exchange Credentials</h1>
+      <h1 className="text-xl font-bold">交易所账户</h1>
 
       {/* Existing credentials */}
       <div className="bg-slate-800 rounded-xl p-4 space-y-3">
-        <h2 className="text-sm font-semibold text-slate-300">Saved Credentials</h2>
+        <h2 className="text-sm font-semibold text-slate-300">已添加的账户</h2>
         {creds.length === 0 ? (
-          <p className="text-slate-500 text-sm">No credentials added yet.</p>
+          <p className="text-slate-500 text-sm">还没有添加任何账户。</p>
         ) : (
           creds.map((c) => {
             const h = health[c.id] || { state: 'unknown' as HealthState }
@@ -112,9 +134,9 @@ export default function Credentials() {
               : h.state === 'testing' ? 'bg-amber-400 animate-pulse'
               : 'bg-slate-500'
             const statusText =
-              h.state === 'ok' ? `✅ Connected — ${h.message ?? ''}`
-              : h.state === 'fail' ? `❌ ${h.message ?? 'Connection failed'}`
-              : h.state === 'testing' ? 'Testing…'
+              h.state === 'ok' ? `✅ 已连接 — ${h.message ?? ''}`
+              : h.state === 'fail' ? `❌ ${h.message ?? '连接失败'}`
+              : h.state === 'testing' ? '连接中…'
               : ''
             return (
             <div key={c.id} className="flex items-center gap-3 p-3 bg-slate-700/50 rounded-lg">
@@ -126,11 +148,12 @@ export default function Credentials() {
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-sm">{c.label}</span>
                   <span className="text-xs bg-slate-600 px-1.5 py-0.5 rounded">{c.exchange}</span>
-                  {c.testnet && <span className="text-xs bg-yellow-900/50 text-yellow-300 px-1.5 py-0.5 rounded">testnet</span>}
-                  {c.demo && <span className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded">demo</span>}
-                  <span className="text-xs text-slate-400">{c.market_type}</span>
+                  {c.testnet && <span className="text-xs bg-yellow-900/50 text-yellow-300 px-1.5 py-0.5 rounded">测试</span>}
+                  {c.demo && <span className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded">模拟</span>}
+                  {!c.testnet && !c.demo && <span className="text-xs bg-green-900/50 text-green-300 px-1.5 py-0.5 rounded">正式</span>}
+                  <span className="text-xs text-slate-400">{marketTypeLabel(c.market_type)}</span>
                 </div>
-                <p className="text-xs text-slate-400 mt-0.5">Key: {c.api_key_mask}</p>
+                <p className="text-xs text-slate-400 mt-0.5">密钥: {c.api_key_mask}</p>
                 {statusText && <p className={`text-xs mt-1 ${h.state === 'fail' ? 'text-red-400' : 'text-slate-300'}`}>{statusText}</p>}
               </div>
               <div className="flex gap-2">
@@ -139,13 +162,13 @@ export default function Credentials() {
                   disabled={h.state === 'testing'}
                   className="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded"
                 >
-                  {h.state === 'testing' ? 'Testing…' : 'Test'}
+                  {h.state === 'testing' ? '连接中…' : '测试连接'}
                 </button>
                 <button
                   onClick={() => handleDelete(c.id)}
                   className="text-xs px-2 py-1 bg-red-600/70 hover:bg-red-600 rounded"
                 >
-                  Delete
+                  删除
                 </button>
               </div>
             </div>
@@ -155,11 +178,11 @@ export default function Credentials() {
 
       {/* Add credential form */}
       <div className="bg-slate-800 rounded-xl p-4">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Add New Credential</h2>
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">添加账户</h2>
         <form onSubmit={handleCreate} className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs text-slate-400 mb-1">Exchange</label>
+              <label className="block text-xs text-slate-400 mb-1">交易所</label>
               <select
                 value={form.exchange}
                 onChange={(e) => setForm({ ...form, exchange: e.target.value })}
@@ -171,30 +194,48 @@ export default function Credentials() {
               </select>
             </div>
             <div>
-              <label className="block text-xs text-slate-400 mb-1">Market Type</label>
+              <label className="block text-xs text-slate-400 mb-1">市场类型</label>
               <select
                 value={form.market_type}
                 onChange={(e) => setForm({ ...form, market_type: e.target.value })}
                 className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
               >
-                <option value="spot">Spot</option>
-                <option value="swap">Swap (Perpetual)</option>
+                <option value="spot">现货</option>
+                <option value="swap">永续合约</option>
+                <option value="futures">交割合约</option>
               </select>
             </div>
           </div>
 
           <div>
-            <label className="block text-xs text-slate-400 mb-1">Label</label>
+            <label className="block text-xs text-slate-400 mb-1">账户类型</label>
+            <select
+              value={accountType}
+              onChange={(e) => setAccountType(e.target.value as AccountType)}
+              className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+            >
+              <option value="live">正式实盘</option>
+              <option value="sim">测试/模拟盘</option>
+            </select>
+            <p className="text-xs text-slate-500 mt-1">
+              正式实盘 = 你的真实交易所账户;测试/模拟盘 = 交易所提供的模拟环境(不涉及真钱)
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">备注名</label>
             <input
               value={form.label}
               onChange={(e) => setForm({ ...form, label: e.target.value })}
               className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-              placeholder="e.g. Binance Testnet"
+              placeholder="例如:我的币安账户"
               required
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-400 mb-1">API Key</label>
+            <label className="block text-xs text-slate-400 mb-1">
+              API Key <span className="text-slate-500">从交易所后台复制</span>
+            </label>
             <input
               value={form.api_key}
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
@@ -204,7 +245,9 @@ export default function Credentials() {
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-400 mb-1">API Secret</label>
+            <label className="block text-xs text-slate-400 mb-1">
+              API Secret <span className="text-slate-500">从交易所后台复制</span>
+            </label>
             <input
               type="password"
               value={form.api_secret}
@@ -216,7 +259,7 @@ export default function Credentials() {
           </div>
           {form.exchange === 'okx' && (
             <div>
-              <label className="block text-xs text-slate-400 mb-1">Passphrase (OKX)</label>
+              <label className="block text-xs text-slate-400 mb-1">Passphrase(OKX 口令)</label>
               <input
                 type="password"
                 value={form.passphrase}
@@ -226,26 +269,6 @@ export default function Credentials() {
               />
             </div>
           )}
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={form.testnet}
-                onChange={(e) => setForm({ ...form, testnet: e.target.checked })}
-                className="rounded"
-              />
-              Testnet (Binance)
-            </label>
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={form.demo}
-                onChange={(e) => setForm({ ...form, demo: e.target.checked })}
-                className="rounded"
-              />
-              Demo (OKX)
-            </label>
-          </div>
 
           {error && <p className="text-red-400 text-sm">{error}</p>}
           {success && <p className="text-green-400 text-sm">{success}</p>}
@@ -255,7 +278,7 @@ export default function Credentials() {
             disabled={loading}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-sm font-medium"
           >
-            {loading ? 'Saving...' : 'Add Credential'}
+            {loading ? '保存中...' : '添加账户'}
           </button>
         </form>
       </div>
