@@ -222,21 +222,13 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 	if req.Mode != "live" && req.Mode != "paper" {
 		return "", fmt.Errorf("mode must be \"live\" or \"paper\" (got %q)", req.Mode)
 	}
-	// 2. Kill-switch: reject live starts when live trading is disabled in config/env.
-	if req.Mode == "live" && !m.liveEnabled {
-		return "", fmt.Errorf("live trading is disabled (set live.enabled=true in config or QUANTIX_LIVE_ENABLED=true)")
-	}
-	// 3. Explicit confirmation gate for live mode (prevents accidental live starts).
+	// 2. Explicit per-engine confirmation gate for live mode (guards against an
+	// accidental live start from a UI bug or a fat-fingered request).
 	if req.Mode == "live" && !req.ConfirmLive {
 		return "", fmt.Errorf("confirm_live must be true to start a live engine")
 	}
-	// 3b. Environment-level confirmation: QUANTIX_LIVE_CONFIRM=true must be set
-	// in the process environment. This is a fail-closed safety net so that even
-	// if the config flag and JSON field are both set, the operator must also
-	// explicitly opt in at the OS level before any exchange connectivity occurs.
-	if req.Mode == "live" && os.Getenv("QUANTIX_LIVE_CONFIRM") != "true" {
-		return "", fmt.Errorf("live trading blocked: set QUANTIX_LIVE_CONFIRM=true in the environment to allow live engine starts")
-	}
+	// The real-money master switch (live + a REAL credential) is enforced after the
+	// credential loads below — testnet/demo (fake money) is always allowed.
 	// 3c. Normalize intervals: if Intervals is empty, use Interval as single-element list.
 	// Interval (primary) is authoritative for engineID and strategy params.
 	if len(req.Intervals) == 0 && req.Interval != "" {
@@ -303,6 +295,15 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 	cred, err := m.store.GetCredentialByID(credCtx, req.CredentialID, userID)
 	if err != nil {
 		return "", fmt.Errorf("get credential: %w", err)
+	}
+	// Real-money master switch: a live engine on a REAL (non-testnet/demo) credential
+	// requires the user to have explicitly enabled live trading in Settings. This is
+	// the fail-closed gate (default off); testnet/demo is fake money and always allowed.
+	if req.Mode == "live" && !cred.Testnet && !cred.Demo {
+		enabled, _ := m.store.GetUserBoolPref(credCtx, userID, "live_trading_enabled")
+		if !enabled {
+			return "", fmt.Errorf("实盘交易未启用:请先在「设置」页打开「启用实盘交易」,才能用真钱下单")
+		}
 	}
 	apiKey, err := m.enc.Decrypt(cred.APIKey)
 	if err != nil {

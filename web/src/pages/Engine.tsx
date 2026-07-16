@@ -397,11 +397,11 @@ export default function Engine() {
                           : 'bg-blue-600 border-blue-600 text-white'
                         : 'bg-transparent border-slate-600 text-slate-400 hover:border-slate-400'
                     }`}>
-                    {m === 'live' ? '⚡ Live' : '📋 Paper'}
+                    {m === 'live' ? '⚡ 实盘' : '📋 模拟'}
                   </button>
                 ))}
                 <span className="text-xs text-slate-500 ml-2 self-center">
-                  {form.mode === 'paper' ? 'Simulated fills — no real orders' : 'Real order execution'}
+                  {form.mode === 'paper' ? '模拟撮合,不涉及真钱' : '真钱下单(用正式账户前需先在「设置」里启用实盘交易)'}
                 </span>
               </div>
 

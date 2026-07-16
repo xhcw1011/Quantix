@@ -163,6 +163,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/users/me/notifications", auth(http.HandlerFunc(s.handleGetNotifications)))
 	mux.Handle("PUT /api/users/me/notifications", auth(http.HandlerFunc(s.handleUpdateNotifications)))
 	mux.Handle("POST /api/users/me/notifications/test", auth(http.HandlerFunc(s.handleTestNotification)))
+	mux.Handle("GET /api/users/me/live-trading", auth(http.HandlerFunc(s.handleGetLiveTrading)))
+	mux.Handle("PUT /api/users/me/live-trading", auth(http.HandlerFunc(s.handleSetLiveTrading)))
 
 	// Credentials
 	mux.Handle("GET /api/credentials", auth(http.HandlerFunc(s.handleListCredentials)))

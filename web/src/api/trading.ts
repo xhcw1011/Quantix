@@ -66,6 +66,11 @@ export const updateNotifications = (data: { tg_bot_token: string; tg_chat_id: nu
   api.put('/users/me/notifications', data)
 export const testNotification = () => api.post('/users/me/notifications/test')
 
+// Live-trading master switch (real-money gate)
+export const getLiveTrading = () => api.get('/users/me/live-trading')
+export const setLiveTrading = (enabled: boolean) =>
+  api.put('/users/me/live-trading', { enabled })
+
 // Backtest
 export const submitBacktest = (data: object) => api.post('/backtest', data)
 export const listBacktests = (limit = 20, offset = 0) =>

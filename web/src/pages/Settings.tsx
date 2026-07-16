@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import api from '../api/client'
-import { getNotifications, updateNotifications, testNotification } from '../api/trading'
+import { getNotifications, updateNotifications, testNotification, getLiveTrading, setLiveTrading } from '../api/trading'
 
 // ─── Password Section ─────────────────────────────────────────────────────────
 
@@ -171,12 +171,97 @@ function TelegramSection() {
   )
 }
 
+// ─── Live Trading Section (real-money master switch) ───────────────────────────
+
+const CONFIRM_PHRASE = '我要用真钱'
+
+function LiveTradingSection() {
+  const [enabled, setEnabled] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
+
+  useEffect(() => {
+    getLiveTrading()
+      .then(r => { setEnabled(r.data.enabled ?? false); setLoaded(true) })
+      .catch(() => setLoaded(true))
+  }, [])
+
+  const apply = async (val: boolean) => {
+    setLoading(true); setMsg(null)
+    try {
+      await setLiveTrading(val)
+      setEnabled(val)
+      setShowConfirm(false); setConfirmText('')
+      setMsg({ text: val ? '实盘交易已启用 — 现在可以用正式账户真钱下单了' : '实盘交易已关闭', ok: true })
+    } catch (err: any) {
+      setMsg({ text: err?.response?.data?.error ?? '操作失败', ok: false })
+    } finally { setLoading(false) }
+  }
+
+  const btn = 'font-medium py-2 px-4 rounded-lg text-sm transition-colors disabled:opacity-50'
+
+  return (
+    <div className="bg-slate-800 rounded-xl p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-semibold text-slate-200">实盘交易</h2>
+        <span className={`text-xs px-2 py-0.5 rounded ${enabled ? 'bg-red-900/50 text-red-300' : 'bg-slate-600/50 text-slate-300'}`}>
+          {enabled ? '已启用(真钱)' : '未启用'}
+        </span>
+      </div>
+      <p className="text-sm text-slate-400 mb-4">
+        真钱下单的总开关。<b className="text-slate-300">关闭时,正式账户无法真钱下单</b>;模拟盘/测试网(假钱)不受影响、随时能用。只有你确认要用真钱时才打开。
+      </p>
+
+      {loaded && !enabled && !showConfirm && (
+        <button onClick={() => setShowConfirm(true)} className={`bg-red-600 hover:bg-red-700 text-white ${btn}`}>
+          启用实盘交易…
+        </button>
+      )}
+
+      {!enabled && showConfirm && (
+        <div className="flex flex-col gap-3">
+          <div className="text-sm px-3 py-2 rounded-lg bg-red-900/40 text-red-300">
+            ⚠️ 开启后,用<b>正式账户</b>启动的策略会<b>用你的真钱真实下单</b>,可能造成亏损。确认请在下方输入 <b>{CONFIRM_PHRASE}</b>。
+          </div>
+          <input value={confirmText} onChange={e => setConfirmText(e.target.value)}
+            placeholder={`输入 ${CONFIRM_PHRASE}`}
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm" />
+          <div className="flex gap-3">
+            <button onClick={() => apply(true)} disabled={loading || confirmText !== CONFIRM_PHRASE}
+              className={`bg-red-600 hover:bg-red-700 text-white ${btn}`}>
+              {loading ? '处理中…' : '确认启用'}
+            </button>
+            <button onClick={() => { setShowConfirm(false); setConfirmText('') }}
+              className={`bg-slate-600 hover:bg-slate-500 text-white ${btn}`}>取消</button>
+          </div>
+        </div>
+      )}
+
+      {enabled && (
+        <button onClick={() => apply(false)} disabled={loading} className={`bg-slate-600 hover:bg-slate-500 text-white ${btn}`}>
+          {loading ? '处理中…' : '关闭实盘交易'}
+        </button>
+      )}
+
+      {msg && (
+        <div className={`mt-3 text-sm px-3 py-2 rounded-lg ${msg.ok ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400'}`}>
+          {msg.text}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Settings() {
   return (
     <div className="max-w-lg space-y-6">
-      <h1 className="text-2xl font-bold text-slate-100">Settings</h1>
+      <h1 className="text-2xl font-bold text-slate-100">设置</h1>
+      <LiveTradingSection />
       <PasswordSection />
       <TelegramSection />
     </div>
