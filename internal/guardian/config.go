@@ -16,8 +16,9 @@ func init() {
 
 // guardianConfig is the parsed, validated setup for one Guardian engine.
 type guardianConfig struct {
-	Symbol string
-	Adopt  bool
+	Symbol     string
+	Adopt      bool
+	PlaceEntry bool // open the position first, then arm from the fill
 
 	// explicit position (used when Adopt == false)
 	Side  string
@@ -44,9 +45,12 @@ func Factory(params map[string]any, log *zap.Logger) (strategy.Strategy, error) 
 		return nil, err
 	}
 	var g *Guardian
-	if gc.Adopt {
+	switch {
+	case gc.PlaceEntry:
+		g = NewEntryGuardian(gc.Symbol, gc.Side, gc.Qty, gc.Prot, gc.ATRWindow, log)
+	case gc.Adopt:
 		g = NewAdoptGuardian(gc.Symbol, gc.Prot, gc.ATRWindow, log)
-	} else {
+	default:
 		g = NewGuardian(gc.Symbol, NewProtection(gc.Side, gc.Entry, gc.Qty, gc.Prot, 0), gc.ATRWindow, log)
 	}
 	if gc.MAPeriod > 0 {
@@ -143,7 +147,16 @@ func parseGuardianConfig(p map[string]any) (guardianConfig, error) {
 			gc.AlertLevels = append(gc.AlertLevels, f)
 		}
 	}
-	if !gc.Adopt {
+	gc.PlaceEntry = boolOr(p, "PlaceEntry", false)
+	switch {
+	case gc.PlaceEntry: // open + protect in one action: need Side + Qty (entry price = fill)
+		gc.Adopt = false
+		gc.Side = normSide(strOr(p, "Side", ""))
+		gc.Qty = floatOr(p, "Qty", 0)
+		if (gc.Side != SideLong && gc.Side != SideShort) || gc.Qty <= 0 {
+			return gc, fmt.Errorf("guardian: PlaceEntry requires Side (long/short) and Qty>0")
+		}
+	case !gc.Adopt:
 		gc.Side = normSide(strOr(p, "Side", ""))
 		gc.Entry = floatOr(p, "Entry", 0)
 		gc.Qty = floatOr(p, "Qty", 0)

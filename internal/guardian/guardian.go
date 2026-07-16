@@ -51,6 +51,12 @@ type Guardian struct {
 
 	armNotified bool // arm-summary (risk preview) sent once
 	partialDone bool // partial take-profit already fired
+
+	// arm-with-entry (optional): place the entry, then arm from its fill.
+	wantEntry   bool
+	entrySide   string
+	entryQty    float64
+	entryPlaced bool
 }
 
 // NewGuardian builds a Guardian for an already-armed Protection.
@@ -70,6 +76,33 @@ func NewAdoptGuardian(symbol string, cfg ProtectionConfig, atrWindow int, log *z
 	g.cfg = cfg
 	g.adopt = true
 	return g
+}
+
+// NewEntryGuardian builds a Guardian that first PLACES the entry order, then arms
+// protection from its fill — open and protect in one action.
+func NewEntryGuardian(symbol, side string, qty float64, cfg ProtectionConfig, atrWindow int, log *zap.Logger) *Guardian {
+	g := NewGuardian(symbol, nil, atrWindow, log)
+	g.cfg = cfg
+	g.wantEntry = true
+	g.entrySide = side
+	g.entryQty = qty
+	return g
+}
+
+// placeEntry submits the market entry order once (armed later via OnFill).
+func (g *Guardian) placeEntry(ctx *strategy.Context) {
+	g.entryPlaced = true
+	var req strategy.OrderRequest
+	dir := "空"
+	if g.entrySide == SideLong {
+		req = strategy.OpenLong(g.symbol, g.entryQty)
+		dir = "多"
+	} else {
+		req = strategy.OpenShort(g.symbol, g.entryQty)
+	}
+	req.Reason = "guardian_entry"
+	ctx.PlaceOrder(req)
+	g.notifyAction("entry", fmt.Sprintf("已按你的指令开%s单 %.6g,成交后自动挂上保护", dir, g.entryQty))
 }
 
 // tryArm initialises Protection from the live account position; returns whether armed.
@@ -301,6 +334,12 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	g.lastPrice = bar.Close
 
 	if g.prot == nil {
+		if g.wantEntry { // open first, arm from the fill
+			if !g.entryPlaced {
+				g.placeEntry(ctx)
+			}
+			return
+		}
 		if !g.tryArm(ctx, atr) {
 			return
 		}
@@ -433,6 +472,14 @@ func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
 	// A partial take-profit fill shrinks the position but does NOT end the guardian;
 	// resyncPosition re-sizes the stop from the account qty on the next bar.
 	if fill.Reason == "guardian_partial_tp" {
+		return
+	}
+	// The entry fill (arm-with-entry) arms protection from the fill price/qty.
+	if fill.Reason == "guardian_entry" && g.prot == nil {
+		g.prot = NewProtection(g.entrySide, fill.Price, fill.Qty, g.cfg, g.atr.Value())
+		g.log.Info("guardian: armed from entry fill",
+			zap.String("symbol", g.symbol), zap.Float64("entry", fill.Price),
+			zap.Float64("qty", fill.Qty), zap.Float64("stop", g.prot.Stop))
 		return
 	}
 	if !g.done && (g.closePlaced || g.stopOrderID != "") {

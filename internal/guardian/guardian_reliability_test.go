@@ -210,6 +210,33 @@ func TestGuardian_PartialTakeProfit(t *testing.T) {
 	}
 }
 
+func TestGuardian_ArmWithEntry(t *testing.T) {
+	g := NewEntryGuardian("ETHUSDT", SideLong, 1, trailCfg(), 14, zap.NewNop())
+	b := &relBroker{}
+	pf := &gPortfolio{qty: 0} // no position yet
+	ctx := strategy.NewContext(pf, b, zap.NewNop())
+
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // place entry
+	ent := b.byReason("guardian_entry")
+	if len(ent) != 1 || ent[0].Side != strategy.SideBuy {
+		t.Fatalf("should place a market entry (BUY) once, got %+v", ent)
+	}
+	if g.prot != nil {
+		t.Fatal("must not arm until the entry fills")
+	}
+
+	g.OnFill(ctx, strategy.Fill{Reason: "guardian_entry", Qty: 1, Price: 100}) // entry fills
+	pf.qty = 1                                                                 // account now holds the position
+	if g.prot == nil || g.prot.Entry != 100 || g.prot.Qty != 1 {
+		t.Fatalf("should arm from the entry fill @100 qty1, got %+v", g.prot)
+	}
+
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
+	if len(b.byReason("guardian_entry")) != 1 {
+		t.Fatal("entry must be placed only once")
+	}
+}
+
 func TestGuardian_ResizesRestingStopWhenPositionChanges(t *testing.T) {
 	g := NewGuardian("ETHUSDT", NewProtection(SideLong, 100, 1, trailCfg(), 0), 14, zap.NewNop())
 	g.SetRestingStop(true)
