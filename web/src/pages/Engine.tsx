@@ -13,7 +13,7 @@ interface Preset {
 
 // LiveStatus subscribes to WS "status" messages and renders the latest snapshot
 // for the given engine_id. Server pushes once per minute from printStatus.
-function LiveStatus({ engineID }: { engineID: string }) {
+function LiveStatus({ engineID, strategyId }: { engineID: string; strategyId?: string }) {
   const [data, setData] = useState<Record<string, any> | null>(null)
   const [lastTs, setLastTs] = useState<number>(0)
 
@@ -34,6 +34,9 @@ function LiveStatus({ engineID }: { engineID: string }) {
   const ageS = Math.round((Date.now() - lastTs) / 1000)
   const num = (v: any, d = 2) => typeof v === 'number' ? v.toFixed(d) : String(v ?? '—')
   const stratFields = Object.entries(data).filter(([k]) => k.startsWith('strat_'))
+  // 自动守仓 has its own plain-language panel. Detect it by strategy id, or by the
+  // guardian-only `strat_state` key when the id isn't available.
+  const isGuardian = strategyId === 'guardian' || data.strat_state !== undefined
   return (
     <div className="mt-3 border-t border-slate-700 pt-2 text-xs">
       <div className="flex items-center justify-between text-slate-500 mb-1.5">
@@ -58,6 +61,43 @@ function LiveStatus({ engineID }: { engineID: string }) {
           <div><span className="text-slate-500">Hedge CD</span> <span className="font-mono">{data.strat_hedge_cooldown_remaining}</span></div>
         )}
       </div>
+
+      {/* 自动守仓 — 明白话面板 */}
+      {isGuardian && data.strat_state !== undefined && (() => {
+        const stateMap: Record<string, string> = {
+          watching: '守护中', closing: '平仓中', closed: '已结束', arming: '准备中',
+        }
+        const stateLabel = stateMap[data.strat_state] ?? String(data.strat_state)
+        const armed = data.strat_state !== 'arming'
+        const sideLabel = data.strat_side === 'long' ? '做多' : data.strat_side === 'short' ? '做空' : '—'
+        const pnlR = data.strat_pnl_r
+        const pnlText = typeof pnlR === 'number' ? `${pnlR >= 0 ? '+' : ''}${pnlR.toFixed(1)}R` : '—'
+        const pnlColor = typeof pnlR === 'number' ? (pnlR >= 0 ? 'text-green-300' : 'text-red-300') : 'text-slate-300'
+        return (
+          <div className="mt-2 border border-slate-700 rounded-lg bg-slate-900/40 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-slate-300">自动守仓 · {data.strat_symbol ?? ''}</span>
+              <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-200">{stateLabel}</span>
+            </div>
+            {armed ? (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-x-3 gap-y-1.5 text-slate-300">
+                <div><span className="block text-slate-500">方向</span>{sideLabel}</div>
+                <div><span className="block text-slate-500">成本价</span><span className="font-mono">{num(data.strat_entry)}</span></div>
+                <div><span className="block text-slate-500">数量</span><span className="font-mono">{num(data.strat_qty, 4)}</span></div>
+                <div><span className="block text-slate-500">当前止损价</span><span className="font-mono">{num(data.strat_stop)}</span></div>
+                <div><span className="block text-slate-500">浮盈</span><span className={`font-mono ${pnlColor}`}>{pnlText}</span></div>
+                <div><span className="block text-slate-500">止损保护</span>{data.strat_trail_active ? '已上移锁利' : '未激活'}</div>
+                {typeof data.strat_tp === 'number' && data.strat_tp > 0 && (
+                  <div><span className="block text-slate-500">止盈价</span><span className="font-mono">{num(data.strat_tp)}</span></div>
+                )}
+              </div>
+            ) : (
+              <p className="text-slate-400">正在准备守护你的仓位…</p>
+            )}
+          </div>
+        )
+      })()}
+
       {stratFields.length > 0 && (
         <details className="mt-2">
           <summary className="text-slate-500 cursor-pointer">Strategy detail ({stratFields.length} fields)</summary>
@@ -129,6 +169,12 @@ export default function Engine() {
   const [selectedPresetIdx, setSelectedPresetIdx] = useState<number>(-1)
   const [extraParams, setExtraParams] = useState<string>('')  // JSON textarea
   const [stratParams, setStratParams] = useState<Record<string, number | string>>({})
+  // 自动守仓 "顺便帮我开仓" — off by default = 守护已有仓位.
+  const [guardianEntry, setGuardianEntry] = useState<{ enabled: boolean; side: 'long' | 'short'; qty: number }>({
+    enabled: false,
+    side: 'long',
+    qty: 0,
+  })
 
   // Credentials and strategies filtered by the selected market tab.
   const filteredCreds = creds.filter((c) =>
@@ -178,6 +224,7 @@ export default function Engine() {
   useEffect(() => {
     setSelectedPresetIdx(-1)
     setExtraParams('')
+    setGuardianEntry({ enabled: false, side: 'long', qty: 0 })
     setStratParams(
       Object.fromEntries(fieldsForStrategy(form.strategy_id).map((f) => [f.key, f.default]))
     )
@@ -234,6 +281,12 @@ export default function Engine() {
         if (v === '' || v === undefined) continue
         if (f.type === 'number') { v = Number(v); if (f.pctOf1) v = v / 100 }
         params[f.key] = v
+      }
+      // 自动守仓 — 顺便帮我开仓: place + protect. Otherwise adopt the existing position.
+      if (form.strategy_id === 'guardian' && guardianEntry.enabled) {
+        params.PlaceEntry = true
+        params.Side = guardianEntry.side
+        params.Qty = guardianEntry.qty
       }
       if (form.strategy_id === 'macross') {
         if (showShortToggle && form.enable_short) {
@@ -498,6 +551,54 @@ export default function Engine() {
                 </div>
               )}
 
+              {/* 自动守仓 — 顺便帮我开仓 (否则守护已有仓位) */}
+              {form.strategy_id === 'guardian' && (
+                <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-lg p-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-semibold text-slate-300">顺便帮我开仓</span>
+                      <p className="text-xs text-slate-500">开启后先按下面的方向和数量下单,再自动守护;不开就守护你账户里已有的仓位</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setGuardianEntry((g) => ({ ...g, enabled: !g.enabled }))}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        guardianEntry.enabled ? 'bg-emerald-600' : 'bg-slate-600'
+                      }`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        guardianEntry.enabled ? 'translate-x-6' : 'translate-x-1'
+                      }`} />
+                    </button>
+                  </div>
+                  {guardianEntry.enabled && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">方向</label>
+                        <select
+                          value={guardianEntry.side}
+                          onChange={(e) => setGuardianEntry((g) => ({ ...g, side: e.target.value as 'long' | 'short' }))}
+                          className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                        >
+                          <option value="long">做多</option>
+                          <option value="short">做空</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">数量</label>
+                        <input
+                          type="number" min="0" step="0.001"
+                          value={guardianEntry.qty}
+                          onChange={(e) => setGuardianEntry((g) => ({ ...g, qty: e.target.value === '' ? 0 : Number(e.target.value) }))}
+                          className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                          placeholder="例如 0.1"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Leverage slider — futures mode only, live only */}
               {showLeverage && (
                 <div className="bg-orange-900/20 border border-orange-700/40 rounded-lg p-3">
@@ -695,7 +796,7 @@ export default function Engine() {
                   <div><span className="block text-slate-500">Interval</span>{eng.interval}</div>
                   <div><span className="block text-slate-500">Started</span>{new Date(eng.started_at).toLocaleString()}</div>
                 </div>
-                {eng.mode === 'live' && <LiveStatus engineID={eng.engine_id} />}
+                {eng.mode === 'live' && <LiveStatus engineID={eng.engine_id} strategyId={eng.strategy_id} />}
               </div>
               <button
                 onClick={() => handleStop(eng.engine_id)}
