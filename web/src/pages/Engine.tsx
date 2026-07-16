@@ -616,6 +616,87 @@ export default function Engine() {
                 </div>
               )}
 
+              {/* 自动守仓 — 顺便帮我开仓 (放最上面:先定开不开仓/方向/数量/杠杆,再设止损止盈) */}
+              {isGuardianForm && (
+                <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-lg p-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-semibold text-slate-300">顺便帮我开仓</span>
+                      <p className="text-xs text-slate-500">开启后先按下面的方向和数量下单,再自动守护;不开就守护你账户里已有的仓位</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setGuardianEntry((g) => ({ ...g, enabled: !g.enabled }))}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        guardianEntry.enabled ? 'bg-emerald-600' : 'bg-slate-600'
+                      }`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        guardianEntry.enabled ? 'translate-x-6' : 'translate-x-1'
+                      }`} />
+                    </button>
+                  </div>
+                  {guardianEntry.enabled && (
+                    <>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-slate-400 mb-1">方向</label>
+                          <select
+                            value={guardianEntry.side}
+                            onChange={(e) => setGuardianEntry((g) => ({ ...g, side: e.target.value as 'long' | 'short' }))}
+                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                          >
+                            <option value="long">做多</option>
+                            <option value="short">做空</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-400 mb-1">数量</label>
+                          <input
+                            type="number" min="0" step="0.001"
+                            value={guardianEntry.qty}
+                            onChange={(e) => setGuardianEntry((g) => ({ ...g, qty: e.target.value === '' ? 0 : Number(e.target.value) }))}
+                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                            placeholder="例如 0.1"
+                          />
+                        </div>
+                      </div>
+                      {/* 杠杆:只在开新仓时才相关,所以跟着"顺便帮我开仓"一起 */}
+                      {showLeverage && (
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-xs text-slate-400">杠杆</label>
+                            <span className="text-sm font-bold text-orange-300">{form.leverage}x</span>
+                          </div>
+                          <input
+                            type="range" min="1" max="20" step="1"
+                            value={form.leverage}
+                            onChange={(e) => setForm({ ...form, leverage: +e.target.value })}
+                            className="w-full accent-orange-500"
+                          />
+                          <div className="flex justify-between text-xs text-slate-500 mt-0.5">
+                            <span>1x</span><span>10x</span><span>20x</span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 mt-0.5">杠杆只影响这笔新开仓的保证金占用;守护已有仓位时不用设。</p>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {!guardianEntry.enabled && (
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">持仓数量(用于估算盈亏,可留空)</label>
+                      <input
+                        type="number" min="0" step="0.001"
+                        value={guardianAdoptQty || ''}
+                        onChange={(e) => setGuardianAdoptQty(e.target.value === '' ? 0 : Number(e.target.value))}
+                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                        placeholder="填上你账户里这个仓位的数量,下面各档就会显示 ≈ 多少 U"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 自动守仓 参数 — 支持按 U / 按 % 切换,实时显示预计盈亏(U 本位) */}
               {isGuardianForm && fields.length > 0 && (
                 <div className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 space-y-3">
@@ -702,68 +783,8 @@ export default function Engine() {
                 </div>
               )}
 
-              {/* 自动守仓 — 顺便帮我开仓 (否则守护已有仓位) */}
-              {form.strategy_id === 'guardian' && (
-                <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-lg p-3 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-semibold text-slate-300">顺便帮我开仓</span>
-                      <p className="text-xs text-slate-500">开启后先按下面的方向和数量下单,再自动守护;不开就守护你账户里已有的仓位</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setGuardianEntry((g) => ({ ...g, enabled: !g.enabled }))}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                        guardianEntry.enabled ? 'bg-emerald-600' : 'bg-slate-600'
-                      }`}
-                    >
-                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        guardianEntry.enabled ? 'translate-x-6' : 'translate-x-1'
-                      }`} />
-                    </button>
-                  </div>
-                  {guardianEntry.enabled && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs text-slate-400 mb-1">方向</label>
-                        <select
-                          value={guardianEntry.side}
-                          onChange={(e) => setGuardianEntry((g) => ({ ...g, side: e.target.value as 'long' | 'short' }))}
-                          className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                        >
-                          <option value="long">做多</option>
-                          <option value="short">做空</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-xs text-slate-400 mb-1">数量</label>
-                        <input
-                          type="number" min="0" step="0.001"
-                          value={guardianEntry.qty}
-                          onChange={(e) => setGuardianEntry((g) => ({ ...g, qty: e.target.value === '' ? 0 : Number(e.target.value) }))}
-                          className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                          placeholder="例如 0.1"
-                        />
-                      </div>
-                    </div>
-                  )}
-                  {!guardianEntry.enabled && (
-                    <div>
-                      <label className="block text-xs text-slate-400 mb-1">持仓数量(用于估算盈亏,可留空)</label>
-                      <input
-                        type="number" min="0" step="0.001"
-                        value={guardianAdoptQty || ''}
-                        onChange={(e) => setGuardianAdoptQty(e.target.value === '' ? 0 : Number(e.target.value))}
-                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                        placeholder="填上你账户里这个仓位的数量,上面各档就会显示 ≈ 多少 U"
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Leverage slider — futures mode only, live only */}
-              {showLeverage && (
+              {/* Leverage slider — futures mode only, live only. Guardian 的杠杆已并入"顺便帮我开仓"卡片。 */}
+              {showLeverage && !isGuardianForm && (
                 <div className="bg-orange-900/20 border border-orange-700/40 rounded-lg p-3">
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-xs text-slate-400">杠杆</label>
