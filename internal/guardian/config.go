@@ -130,6 +130,14 @@ func parseGuardianConfig(p map[string]any) (guardianConfig, error) {
 	} else {
 		gc.Prot.BreakEvenAtR = floatOr(p, "BreakEvenAtR", 0)
 	}
+	// Partial take-profit: UI sends PartialTPPct (profit % to bank a fraction);
+	// convert to R for the percentage stop. Fraction defaults to half.
+	if ptPct := floatOr(p, "PartialTPPct", 0); ptPct > 0 && gc.Prot.StopMode == StopPct && gc.Prot.StopValue > 0 {
+		gc.Prot.PartialTPAtR = ptPct / gc.Prot.StopValue
+	} else {
+		gc.Prot.PartialTPAtR = floatOr(p, "PartialTPAtR", 0)
+	}
+	gc.Prot.PartialTPFraction = floatOr(p, "PartialTPFraction", 0.5)
 	for _, v := range sliceOr(p, "AlertLevels") {
 		if f, ok := asFloat(v); ok {
 			gc.AlertLevels = append(gc.AlertLevels, f)

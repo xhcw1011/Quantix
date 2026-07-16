@@ -59,7 +59,8 @@ export const STRATEGY_FIELDS: Record<string, FieldDef[]> = {
   guardian: [
     { key: 'StopValue', label: '亏多少就自动平仓', type: 'number', default: 3, unit: '%', step: 0.5, pctOf1: true, min: 0.5, help: '亏到这个幅度就帮你平掉,保住本金。赚了之后它会自动把这条线往上抬,锁住利润。' },
     { key: 'BreakEvenPct', label: '赚多少就保本', type: 'number', default: 0, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '0 = 不设。赚到这个幅度后,止损自动移到成本价,这单就不会亏了。' },
-    { key: 'TPValue', label: '赚多少就落袋', type: 'number', default: 0, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '0 = 不设,让利润继续跑(靠自动上移的止损收尾)' },
+    { key: 'PartialTPPct', label: '赚多少就先落袋一半', type: 'number', default: 0, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '0 = 不设。赚到这个幅度先平掉一半锁利,剩下一半继续让止损守着跑。' },
+    { key: 'TPValue', label: '赚多少就全平落袋', type: 'number', default: 0, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '0 = 不设,让利润继续跑(靠自动上移的止损收尾)' },
   ],
 }
 

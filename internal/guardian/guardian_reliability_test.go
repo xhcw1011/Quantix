@@ -173,6 +173,43 @@ func TestGuardian_RetiresWhenPositionClosedExternally(t *testing.T) {
 	}
 }
 
+func (b *relBroker) byReason(reason string) []strategy.OrderRequest {
+	var out []strategy.OrderRequest
+	for _, o := range b.placed {
+		if o.Reason == reason {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func TestGuardian_PartialTakeProfit(t *testing.T) {
+	cfg := trailCfg() // R = 5 (5% of 100)
+	cfg.PartialTPAtR = 2
+	cfg.PartialTPFraction = 0.5
+	g := NewGuardian("ETHUSDT", NewProtection(SideLong, 100, 1, cfg, 0), 14, zap.NewNop())
+	b := &relBroker{}
+	ctx := strategy.NewContext(&gPortfolio{qty: 1, avg: 100}, b, zap.NewNop())
+
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
+	g.OnTick(ctx, 108) // pnlR 1.6 < 2: no partial yet
+	if len(b.byReason("guardian_partial_tp")) != 0 {
+		t.Fatal("partial must not fire before +2R")
+	}
+	g.OnTick(ctx, 110) // pnlR 2.0 >= 2: close half
+	pt := b.byReason("guardian_partial_tp")
+	if len(pt) != 1 || pt[0].Qty != 0.5 {
+		t.Fatalf("partial should close 0.5 once, got %+v", pt)
+	}
+	if g.done {
+		t.Fatal("a partial take-profit must not end the guardian")
+	}
+	g.OnTick(ctx, 112) // must not fire a second partial
+	if len(b.byReason("guardian_partial_tp")) != 1 {
+		t.Fatal("partial take-profit fires only once")
+	}
+}
+
 func TestGuardian_ResizesRestingStopWhenPositionChanges(t *testing.T) {
 	g := NewGuardian("ETHUSDT", NewProtection(SideLong, 100, 1, trailCfg(), 0), 14, zap.NewNop())
 	g.SetRestingStop(true)

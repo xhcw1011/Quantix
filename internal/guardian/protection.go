@@ -47,6 +47,9 @@ type ProtectionConfig struct {
 
 	BreakEvenAtR float64 // once P&L >= this many R, move the stop to entry (0 = off)
 
+	PartialTPAtR      float64 // once P&L >= this many R, close PartialTPFraction of the position (0 = off)
+	PartialTPFraction float64 // fraction to close on partial TP (default 0.5)
+
 	TPMode  TPMode
 	TPValue float64
 }
@@ -203,6 +206,20 @@ func (p *Protection) SetActivated(a bool) { p.activated = a }
 
 // TPPrice returns the computed take-profit price (0 if disabled).
 func (p *Protection) TPPrice() float64 { return p.tp }
+
+// PartialTPReady reports whether P&L has reached the partial take-profit trigger.
+func (p *Protection) PartialTPReady(price float64) bool {
+	return p.cfg.PartialTPAtR > 0 && p.PnlR(price) >= p.cfg.PartialTPAtR
+}
+
+// PartialTPQty is the quantity to close on a partial take-profit.
+func (p *Protection) PartialTPQty() float64 {
+	f := p.cfg.PartialTPFraction
+	if f <= 0 || f >= 1 {
+		f = 0.5
+	}
+	return p.Qty * f
+}
 
 // RiskUSD is the worst-case loss to the initial stop (qty × per-unit risk).
 func (p *Protection) RiskUSD() float64 { return p.Qty * p.R }

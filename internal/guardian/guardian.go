@@ -50,6 +50,7 @@ type Guardian struct {
 	restoreTried bool
 
 	armNotified bool // arm-summary (risk preview) sent once
+	partialDone bool // partial take-profit already fired
 }
 
 // NewGuardian builds a Guardian for an already-armed Protection.
@@ -172,6 +173,26 @@ func (g *Guardian) notifyAction(event, msg string) {
 	}
 }
 
+// maybePartialTP closes a fraction of the position once P&L reaches the partial
+// take-profit trigger (once). The account position then shrinks; resyncPosition
+// re-sizes the resting stop on the next bar (single source of truth = account qty).
+func (g *Guardian) maybePartialTP(ctx *strategy.Context, price float64) {
+	if g.partialDone || g.prot == nil || g.inactive() || !g.prot.PartialTPReady(price) {
+		return
+	}
+	g.partialDone = true
+	qty := g.prot.PartialTPQty()
+	var req strategy.OrderRequest
+	if g.prot.Side == SideLong {
+		req = strategy.CloseLong(g.symbol, qty)
+	} else {
+		req = strategy.CloseShort(g.symbol, qty)
+	}
+	req.Reason = "guardian_partial_tp"
+	ctx.PlaceOrder(req)
+	g.notifyAction("partial_tp", fmt.Sprintf("已到分批止盈点,先平掉 %.6g(约一半)落袋,剩下继续让止损守着跑", qty))
+}
+
 // notifyArmSummary sends the risk preview (and any sanity warnings) once, when the
 // guardian first starts protecting a position.
 func (g *Guardian) notifyArmSummary() {
@@ -292,6 +313,7 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	g.ensureRestingStop(ctx)
 	g.barsHeld++
 	g.evalAlerts(bar.Close)
+	g.maybePartialTP(ctx, bar.Close)
 
 	// Exit check first, using the stop as it stood during the bar.
 	if g.checkExitBar(ctx, bar) {
@@ -312,6 +334,7 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 	g.ensureRestingStop(ctx)
 	g.lastPrice = price
 	g.evalAlerts(price)
+	g.maybePartialTP(ctx, price)
 	if g.prot.TPHit(price) {
 		g.placeClose(ctx, "take_profit")
 		return
@@ -407,6 +430,11 @@ func (g *Guardian) evalAlerts(price float64) {
 // OnFill marks the guardian done once its protective order (resting stop or a
 // tick-based close) has filled.
 func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
+	// A partial take-profit fill shrinks the position but does NOT end the guardian;
+	// resyncPosition re-sizes the stop from the account qty on the next bar.
+	if fill.Reason == "guardian_partial_tp" {
+		return
+	}
 	if !g.done && (g.closePlaced || g.stopOrderID != "") {
 		g.done = true
 		g.stopOrderID = ""
