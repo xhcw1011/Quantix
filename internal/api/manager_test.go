@@ -1,7 +1,6 @@
 package api
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -19,81 +18,45 @@ func newTestManager(liveEnabled bool) *EngineManager {
 	return NewEngineManager(nil, nil, config.SMTPConfig{}, nil, cfg, nil, zap.NewNop())
 }
 
-func TestStart_LiveBlockedWithoutEnvConfirm(t *testing.T) {
-	// Ensure env var is unset.
-	os.Unsetenv("QUANTIX_LIVE_CONFIRM")
-
+// Live mode requires the per-engine confirm_live flag — an early gate that runs
+// before any credential/DB access.
+func TestStart_LiveRequiresConfirmLive(t *testing.T) {
 	m := newTestManager(true)
-	req := StartRequest{
-		Mode:        "live",
-		ConfirmLive: true,
-		StrategyID:  "macross",
-		Symbol:      "BTCUSDT",
-		Interval:    "1h",
-	}
-
-	_, err := m.Start(1, req)
-	if err == nil {
-		t.Fatal("expected error when QUANTIX_LIVE_CONFIRM is unset, got nil")
-	}
-	if !strings.Contains(err.Error(), "QUANTIX_LIVE_CONFIRM") {
-		t.Fatalf("unexpected error message: %s", err.Error())
+	_, err := m.Start(1, StartRequest{
+		Mode: "live", ConfirmLive: false,
+		StrategyID: "macross", Symbol: "BTCUSDT", Interval: "1h",
+	})
+	if err == nil || !strings.Contains(err.Error(), "confirm_live") {
+		t.Fatalf("expected confirm_live error, got: %v", err)
 	}
 }
 
-func TestStart_LiveAllowedWithEnvConfirm(t *testing.T) {
-	// Set env var — Start will pass the env gate. With nil store, the
-	// credential lookup panics, so we recover and verify that the error
-	// is NOT the env gate (i.e. we got past it).
-	t.Setenv("QUANTIX_LIVE_CONFIRM", "true")
-
+// With confirm_live set, Start passes the early pre-flight gates and proceeds to
+// credential loading (which panics on the nil test store). The real-money master
+// switch (live + a non-testnet/demo credential requires the user's
+// live_trading_enabled preference) is enforced after the credential loads and is
+// covered by integration, not this unit test.
+func TestStart_LiveWithConfirmPassesEarlyGates(t *testing.T) {
 	m := newTestManager(true)
-	req := StartRequest{
-		Mode:         "live",
-		ConfirmLive:  true,
-		StrategyID:   "macross",
-		Symbol:       "BTCUSDT",
-		Interval:     "1h",
-		CredentialID: 999,
+	defer func() { _ = recover() }() // nil store panics downstream — that's fine here
+	_, err := m.Start(1, StartRequest{
+		Mode: "live", ConfirmLive: true,
+		StrategyID: "macross", Symbol: "BTCUSDT", Interval: "1h", CredentialID: 999,
+	})
+	if err != nil && strings.Contains(err.Error(), "confirm_live") {
+		t.Fatalf("should have passed the confirm_live gate, got: %s", err.Error())
 	}
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// Panic from nil store means we passed all pre-flight gates.
-				t.Logf("passed env gate, panicked downstream (expected): %v", r)
-			}
-		}()
-		_, err := m.Start(1, req)
-		if err != nil && strings.Contains(err.Error(), "QUANTIX_LIVE_CONFIRM") {
-			t.Fatalf("should have passed env gate but got: %s", err.Error())
-		}
-	}()
 }
 
-func TestStart_PaperUnaffectedByEnvConfirm(t *testing.T) {
-	// Env var unset — paper mode must not be blocked.
-	os.Unsetenv("QUANTIX_LIVE_CONFIRM")
-
-	m := newTestManager(false) // live disabled, paper should still work
-	req := StartRequest{
-		Mode:         "paper",
-		StrategyID:   "macross",
-		Symbol:       "BTCUSDT",
-		Interval:     "1h",
-		CredentialID: 999,
+// Paper mode is never blocked by the live gates.
+func TestStart_PaperBypassesLiveGate(t *testing.T) {
+	m := newTestManager(false)
+	defer func() { _ = recover() }()
+	_, err := m.Start(1, StartRequest{
+		Mode:       "paper",
+		StrategyID: "macross", Symbol: "BTCUSDT", Interval: "1h", CredentialID: 999,
+	})
+	if err != nil && strings.Contains(err.Error(), "confirm_live") {
+		t.Fatalf("paper mode should bypass live gates, got: %s", err.Error())
 	}
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// Panic from nil store means we passed all pre-flight gates.
-				t.Logf("passed pre-flight gates, panicked downstream (expected): %v", r)
-			}
-		}()
-		_, err := m.Start(1, req)
-		if err != nil && strings.Contains(err.Error(), "QUANTIX_LIVE_CONFIRM") {
-			t.Fatalf("paper mode should bypass env gate but got: %s", err.Error())
-		}
-	}()
 }
