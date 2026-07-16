@@ -123,6 +123,13 @@ func parseGuardianConfig(p map[string]any) (guardianConfig, error) {
 	if gc.Prot.TPValue <= 0 {
 		gc.Prot.TPMode = TPNone
 	}
+	// Break-even: the UI sends BreakEvenPct (profit % at which to lock in no-loss);
+	// convert to R for the percentage stop. API callers may set BreakEvenAtR directly.
+	if bePct := floatOr(p, "BreakEvenPct", 0); bePct > 0 && gc.Prot.StopMode == StopPct && gc.Prot.StopValue > 0 {
+		gc.Prot.BreakEvenAtR = bePct / gc.Prot.StopValue
+	} else {
+		gc.Prot.BreakEvenAtR = floatOr(p, "BreakEvenAtR", 0)
+	}
 	for _, v := range sliceOr(p, "AlertLevels") {
 		if f, ok := asFloat(v); ok {
 			gc.AlertLevels = append(gc.AlertLevels, f)

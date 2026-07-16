@@ -45,6 +45,8 @@ type ProtectionConfig struct {
 	TrailMode    TrailMode
 	TrailValue   float64
 
+	BreakEvenAtR float64 // once P&L >= this many R, move the stop to entry (0 = off)
+
 	TPMode  TPMode
 	TPValue float64
 }
@@ -121,14 +123,26 @@ func (p *Protection) PnlR(price float64) float64 {
 	return (p.Entry - price) / p.R
 }
 
-// UpdateStop advances the trailing stop. Before activation the stop is fixed at
-// its initial protective level; once P&L crosses ActivateR the stop ratchets in
-// the trade's favour and never loosens.
+// UpdateStop applies break-even (independent of trailing) and then advances the
+// trailing stop. Before trail activation the stop is fixed at its initial level;
+// once P&L crosses ActivateR the stop ratchets in the trade's favour and never
+// loosens.
 func (p *Protection) UpdateStop(price, atr float64) {
+	pnlR := p.PnlR(price)
+
+	// Break-even: once far enough in profit, never let the stop sit worse than
+	// entry — the trade can no longer become a loss. Works with trailing off too.
+	if p.cfg.BreakEvenAtR > 0 && pnlR >= p.cfg.BreakEvenAtR {
+		if p.Side == SideLong && p.Stop < p.Entry {
+			p.Stop = p.Entry
+		} else if p.Side == SideShort && p.Stop > p.Entry {
+			p.Stop = p.Entry
+		}
+	}
+
 	if !p.cfg.TrailEnabled {
 		return
 	}
-	pnlR := p.PnlR(price)
 	if !p.activated {
 		if pnlR >= p.cfg.ActivateR {
 			p.activated = true

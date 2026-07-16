@@ -92,6 +92,33 @@ func TestProtection_TrailRatchetsAndNeverLoosens_Short(t *testing.T) {
 	}
 }
 
+func TestProtection_BreakEvenMovesStopToEntry(t *testing.T) {
+	cfg := ProtectionConfig{StopMode: StopPct, StopValue: 0.05, BreakEvenAtR: 1} // trailing OFF
+	p := NewProtection(SideLong, 100, 1, cfg, 0)                                 // stop 95, R 5
+
+	p.UpdateStop(104, 0) // pnlR 0.8 < 1: no break-even yet
+	if !approx(p.Stop, 95) {
+		t.Fatalf("before break-even stop=%v want 95", p.Stop)
+	}
+	p.UpdateStop(106, 0) // pnlR 1.2 >= 1: move stop to entry (break-even)
+	if !approx(p.Stop, 100) {
+		t.Fatalf("break-even should move stop to entry 100, got %v", p.Stop)
+	}
+	p.UpdateStop(103, 0) // pnlR 0.6: stop must not loosen back below entry
+	if !approx(p.Stop, 100) {
+		t.Fatalf("break-even stop must not loosen, got %v", p.Stop)
+	}
+}
+
+func TestProtection_BreakEvenShort(t *testing.T) {
+	cfg := ProtectionConfig{StopMode: StopPct, StopValue: 0.05, BreakEvenAtR: 1}
+	p := NewProtection(SideShort, 100, 1, cfg, 0) // stop 105, R 5
+	p.UpdateStop(94, 0)                           // pnlR 1.2 -> break-even to entry
+	if !approx(p.Stop, 100) {
+		t.Fatalf("short break-even should move stop to entry 100, got %v", p.Stop)
+	}
+}
+
 func TestProtection_TakeProfit(t *testing.T) {
 	// R-multiple TP, long: entry 100, R 5, TP 3R -> 115
 	p := NewProtection(SideLong, 100, 1, ProtectionConfig{
