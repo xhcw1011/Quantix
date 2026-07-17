@@ -722,6 +722,10 @@ func (g *Guardian) Status() map[string]any {
 	if g.cfg.TPMode == TPPct {
 		tpPct = g.cfg.TPValue * 100
 	}
+	trailPct := 0.0 // 0 = trailing off; else the profit % at which it starts
+	if g.cfg.TrailEnabled {
+		trailPct = g.cfg.ActivateR * g.cfg.StopValue * 100
+	}
 	return map[string]any{
 		"state":        state,
 		"symbol":       g.symbol,
@@ -737,10 +741,11 @@ func (g *Guardian) Status() map[string]any {
 		// Current editable risk levels as plain percentages, for pre-filling the
 		// live "修改参数" form so a save preserves the fields the user didn't change.
 		"edit": map[string]any{
-			"StopValue":    g.cfg.StopValue * 100,
-			"BreakEvenPct": g.cfg.BreakEvenAtR * g.cfg.StopValue * 100,
-			"PartialTPPct": g.cfg.PartialTPAtR * g.cfg.StopValue * 100,
-			"TPValue":      tpPct,
+			"StopValue":        g.cfg.StopValue * 100,
+			"BreakEvenPct":     g.cfg.BreakEvenAtR * g.cfg.StopValue * 100,
+			"TrailActivatePct": trailPct,
+			"PartialTPPct":     g.cfg.PartialTPAtR * g.cfg.StopValue * 100,
+			"TPValue":          tpPct,
 		},
 	}
 }

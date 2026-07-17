@@ -130,6 +130,17 @@ func parseProtection(p map[string]any) ProtectionConfig {
 	} else {
 		prot.BreakEvenAtR = floatOr(p, "BreakEvenAtR", 0)
 	}
+	// Trailing start: the UI sends TrailActivatePct (profit % at which the stop
+	// begins auto-advancing). 0 = fixed stop (no trailing); absent = keep the
+	// default (trailing on at 1R). Trail distance stays at the default (1R).
+	if taPct := floatOr(p, "TrailActivatePct", -1); taPct >= 0 {
+		if taPct == 0 {
+			prot.TrailEnabled = false
+		} else if prot.StopMode == StopPct && prot.StopValue > 0 {
+			prot.TrailEnabled = true
+			prot.ActivateR = taPct / prot.StopValue
+		}
+	}
 	// Partial take-profit: UI sends PartialTPPct (profit % to bank a fraction);
 	// convert to R for the percentage stop. Fraction defaults to half.
 	if ptPct := floatOr(p, "PartialTPPct", 0); ptPct > 0 && prot.StopMode == StopPct && prot.StopValue > 0 {
