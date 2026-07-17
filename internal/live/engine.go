@@ -106,8 +106,9 @@ type Engine struct {
 	equityAdjusted atomic.Value // float64; set by UDS goroutine, consumed by bar goroutine
 
 	// Stale bar detection
-	lastBarTime  time.Time // last time a kline was received
-	staleAlerted bool      // avoid repeated stale alerts
+	lastBarTime  time.Time    // last time a kline was received
+	lastTickNano atomic.Int64 // last real-time tick (UnixNano); liveness for tick-driven strategies
+	staleAlerted bool         // avoid repeated stale alerts
 
 	// Position syncer (Redis-backed, exchange is source of truth)
 	posSyncer *position.Syncer // nil if not configured

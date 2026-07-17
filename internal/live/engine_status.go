@@ -105,7 +105,17 @@ func (e *Engine) printStatus() {
 			staleThreshold = t
 		}
 	}
-	staleSince := time.Since(e.lastBarTime)
+	// Tick-driven strategies (guardian) stay alive on real-time ticks even when the
+	// kline feed is quiet — count the last tick so we don't cry "WS disconnect".
+	lastActivity := e.lastBarTime
+	if _, tickDriven := e.strategy.(strategy.TickReceiver); tickDriven {
+		if tn := e.lastTickNano.Load(); tn > 0 {
+			if t := time.Unix(0, tn); t.After(lastActivity) {
+				lastActivity = t
+			}
+		}
+	}
+	staleSince := time.Since(lastActivity)
 	if staleSince > staleThreshold && !e.staleAlerted {
 		e.staleAlerted = true
 		e.log.Error("no kline data received — possible WS disconnect",

@@ -148,9 +148,21 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				elapsed := time.Since(e.lastBarTime)
+				// Liveness = last bar. For tick-driven strategies (e.g. guardian,
+				// which enforces stops on real-time ticks, not bar closes) a stale
+				// KLINE feed alone must NOT kill the engine as long as ticks keep
+				// flowing — so count the last tick too.
+				lastActivity := e.lastBarTime
+				if _, tickDriven := e.strategy.(strategy.TickReceiver); tickDriven {
+					if tn := e.lastTickNano.Load(); tn > 0 {
+						if t := time.Unix(0, tn); t.After(lastActivity) {
+							lastActivity = t
+						}
+					}
+				}
+				elapsed := time.Since(lastActivity)
 				if elapsed > staleKill {
-					e.log.Error("WATCHDOG: no bar activity past stale threshold — stopping THIS engine only (feed likely dead); process + other engines keep running",
+					e.log.Error("WATCHDOG: no bar/tick activity past stale threshold — stopping THIS engine only (feed likely dead); process + other engines keep running",
 						zap.String("engine_id", e.cfg.StrategyID),
 						zap.Int("user_id", e.cfg.UserID),
 						zap.Duration("since_last_bar", elapsed),
@@ -386,6 +398,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				continue
 			}
 			e.broker.SetLastPrice(tickPrice)
+			e.lastTickNano.Store(time.Now().UnixNano()) // liveness for tick-driven strategies
 			if tr, ok := e.strategy.(strategy.TickReceiver); ok {
 				tr.OnTick(e.stratCtx, tickPrice)
 			}
