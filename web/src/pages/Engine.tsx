@@ -534,25 +534,18 @@ export default function Engine() {
             </p>
           ) : (
             <form onSubmit={handleStart} className="space-y-4">
-              {/* Mode toggle */}
-              <div className="flex gap-2">
-                {(['live', 'paper'] as const).map((m) => (
-                  <button key={m} type="button"
-                    onClick={() => setForm({ ...form, mode: m })}
-                    className={`px-4 py-1.5 rounded text-sm font-semibold border transition-colors ${
-                      form.mode === m
-                        ? m === 'live'
-                          ? 'bg-green-600 border-green-600 text-white'
-                          : 'bg-blue-600 border-blue-600 text-white'
-                        : 'bg-transparent border-slate-600 text-slate-400 hover:border-slate-400'
-                    }`}>
-                    {m === 'live' ? '⚡ 实盘' : '📋 模拟'}
-                  </button>
-                ))}
-                <span className="text-xs text-slate-500 ml-2 self-center">
-                  {form.mode === 'paper' ? '模拟撮合,不涉及真钱' : '真钱下单(用正式账户前需先在「设置」里启用实盘交易)'}
-                </span>
-              </div>
+              {/* 是不是真钱由所选账户决定 —— demo 账户=模拟盘不涉真钱,正式账户=真钱 */}
+              {(() => {
+                const c = credById[form.credential_id]
+                const isDemo = c ? (c.testnet || c.demo) : false
+                return (
+                  <p className="text-xs text-slate-500">
+                    {isDemo
+                      ? '📋 模拟盘账户 · 不涉及真钱,放心测试'
+                      : '⚡ 真钱账户 · 真钱下单(用真钱前需先在「设置」里启用实盘交易)'}
+                  </p>
+                )
+              })()}
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
@@ -1019,30 +1012,6 @@ export default function Engine() {
                 </div>
               )}
 
-              {/* Paper config */}
-              {form.mode === 'paper' && (
-                <div className="grid grid-cols-3 gap-3 bg-blue-900/20 border border-blue-700/40 rounded-lg p-3">
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">Initial Capital (USDT)</label>
-                    <input type="number" min="100" value={form.paper.initial_capital}
-                      onChange={(e) => setForm({ ...form, paper: { ...form.paper, initial_capital: +e.target.value } })}
-                      className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">Fee Rate</label>
-                    <input type="number" step="0.0001" min="0" value={form.paper.fee_rate}
-                      onChange={(e) => setForm({ ...form, paper: { ...form.paper, fee_rate: +e.target.value } })}
-                      className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">Slippage</label>
-                    <input type="number" step="0.0001" min="0" value={form.paper.slippage}
-                      onChange={(e) => setForm({ ...form, paper: { ...form.paper, slippage: +e.target.value } })}
-                      className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm" />
-                  </div>
-                </div>
-              )}
-
               {/* Risk override — collapsible */}
               <div>
                 <button type="button" onClick={() => setShowRisk(!showRisk)}
@@ -1078,22 +1047,21 @@ export default function Engine() {
 
               {error && <p className="text-red-400 text-sm">{error}</p>}
 
-              {form.mode === 'live' && (
-                <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg p-3">
-                  <p className="text-yellow-300 text-xs">
-                    ⚠️ <strong>Warning:</strong> Live mode executes real orders.
-                    Ensure you have selected the correct credential (testnet/demo) before proceeding.
-                  </p>
-                </div>
-              )}
+              {(() => {
+                const c = credById[form.credential_id]
+                const isReal = c ? !(c.testnet || c.demo) : false
+                return isReal ? (
+                  <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg p-3">
+                    <p className="text-yellow-300 text-xs">
+                      ⚠️ <strong>真钱账户</strong>:启动后会用真钱下单。确认参数无误、且已在「设置」里启用实盘交易。
+                    </p>
+                  </div>
+                ) : null
+              })()}
 
               <button type="submit" disabled={loading}
-                className={`px-5 py-2.5 disabled:opacity-50 rounded text-sm font-semibold ${
-                  form.mode === 'paper'
-                    ? 'bg-blue-600 hover:bg-blue-700'
-                    : 'bg-green-600 hover:bg-green-700'
-                }`}>
-                {loading ? 'Starting...' : form.mode === 'paper' ? '▶ Start Paper Engine' : '▶ Start Live Engine'}
+                className="px-5 py-2.5 disabled:opacity-50 rounded text-sm font-semibold bg-green-600 hover:bg-green-700">
+                {loading ? '启动中…' : '▶ 启动引擎'}
               </button>
             </form>
           )}
