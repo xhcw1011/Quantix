@@ -295,22 +295,40 @@ func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, f
 	if side != "LONG" && side != "SHORT" {
 		return 0, 0, fmt.Errorf("side must be LONG or SHORT (got %q)", side)
 	}
-	mq, ok := e.broker.orderClient.(exchange.MarginQuerier)
+	// Use the signed position query: GetMarginRatios abs's the size and reports
+	// PositionSide="BOTH" in one-way mode, so a short there can't be matched by
+	// side ("no open SHORT position" even though it's open). GetPositions keeps the
+	// signed amount, so we derive the side from the sign when the account is
+	// one-way, and close either hedge or one-way positions correctly.
+	pq, ok := e.broker.orderClient.(exchange.PositionQuerier)
 	if !ok {
 		return 0, 0, fmt.Errorf("exchange does not support position query (not a futures broker)")
 	}
-	positions, err := mq.GetMarginRatios(ctx)
+	positions, err := pq.GetPositions(ctx)
 	if err != nil {
 		return 0, 0, fmt.Errorf("query positions: %w", err)
 	}
-	var target *exchange.PositionMarginInfo
-	for i := range positions {
-		if positions[i].Symbol == symbol && positions[i].PositionSide == side {
-			target = &positions[i]
+	var amt float64      // signed size of the matched position
+	var posSide string   // exchange PositionSide to echo back on the close order
+	found := false
+	for _, p := range positions {
+		if p.Symbol != symbol || p.Amt == 0 {
+			continue
+		}
+		ps := p.PositionSide
+		if ps == "" || ps == "BOTH" { // one-way / net: derive side from the sign
+			if p.Amt > 0 {
+				ps = "LONG"
+			} else {
+				ps = "SHORT"
+			}
+		}
+		if ps == side {
+			amt, posSide, found = p.Amt, p.PositionSide, true
 			break
 		}
 	}
-	if target == nil || target.Size <= 0 {
+	if !found {
 		return 0, 0, fmt.Errorf("no open %s position for %s", side, symbol)
 	}
 
@@ -318,18 +336,19 @@ func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, f
 	if side == "LONG" {
 		closeSide = exchange.OrderSideSell
 	}
+	closeQty := math.Abs(amt)
 	clientOrderID := fmt.Sprintf("api-close-%d", time.Now().UnixNano())
-	fill, err := e.broker.orderClient.PlaceMarketOrder(ctx, symbol, closeSide, side, target.Size, clientOrderID)
+	fill, err := e.broker.orderClient.PlaceMarketOrder(ctx, symbol, closeSide, posSide, closeQty, clientOrderID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("place close order: %w", err)
 	}
 	e.log.Info("API close-position executed",
 		zap.String("symbol", symbol),
 		zap.String("side", side),
-		zap.Float64("qty", target.Size),
+		zap.Float64("qty", closeQty),
 		zap.Float64("avg_price", fill.AvgPrice),
 		zap.String("exchange_id", fill.ExchangeID))
-	return target.Size, fill.AvgPrice, nil
+	return closeQty, fill.AvgPrice, nil
 }
 
 // ─── livePortfolioView ────────────────────────────────────────────────────────
