@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -50,11 +51,20 @@ func NewWSHub(log *zap.Logger) *WSHub {
 	}
 }
 
-// checkOrigin returns true if the request origin is in the allowed list.
+// checkOrigin returns true if the request origin is allowed. Same-origin requests
+// are always allowed (the page was served from the same host it's connecting to),
+// which makes the WS work on any deployment host without configuring
+// QUANTIX_CORS_ORIGINS. We compare the hostname only — nginx forwards Host as the
+// bare hostname (no port), while the browser Origin includes the UI port.
 func (h *WSHub) checkOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true // non-browser client (curl, internal tools)
+	}
+	if u, err := url.Parse(origin); err == nil && u.Hostname() != "" {
+		if u.Hostname() == hostOnly(r.Host) {
+			return true // same host → same-origin, safe
+		}
 	}
 	for _, o := range h.allowedOrigins {
 		if o == "*" || o == origin {
@@ -62,6 +72,14 @@ func (h *WSHub) checkOrigin(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// hostOnly strips an optional :port from a Host header value.
+func hostOnly(host string) string {
+	if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		return host[:i]
+	}
+	return host
 }
 
 // Broadcast sends a message to all connections for the given userID.
@@ -166,7 +184,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Reader loop (keeps connection alive, discards incoming messages)
 	conn.SetReadLimit(512)
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))       //nolint:errcheck
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
 		return nil
