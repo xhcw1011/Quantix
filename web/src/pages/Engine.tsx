@@ -298,6 +298,10 @@ export default function Engine() {
     setSelectedPresetIdx(-1)
     setExtraParams('')
     setGuardianEntry({ enabled: false, side: 'long', qty: 0, orderType: 'market', limitPrice: 0 })
+    // Apply the strategy's preferred check frequency (e.g. guardian → 5m; a risk
+    // tool wants a responsive interval, not the global 1h default).
+    const di = strategyMeta(form.strategy_id)?.defaultInterval
+    if (di) setForm((f) => ({ ...f, interval: di }))
     setStratParams(
       Object.fromEntries(fieldsForStrategy(form.strategy_id).map((f) => [f.key, f.default]))
     )
