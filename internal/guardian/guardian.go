@@ -3,12 +3,46 @@ package guardian
 import (
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 
 	"github.com/Quantix/quantix/internal/exchange"
 	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/strategy"
 	"go.uber.org/zap"
 )
+
+// fmtPrice formats a price as a plain number with thousands separators (never
+// scientific notation), so user notifications read "64,127.70" not "6.413e+04".
+func fmtPrice(v float64) string {
+	dec := 2
+	if v > 0 && v < 1 {
+		dec = 6 // sub-$1 assets need more precision
+	}
+	s := strconv.FormatFloat(v, 'f', dec, 64)
+	dot := strings.IndexByte(s, '.')
+	if dot < 0 {
+		dot = len(s)
+	}
+	intPart, frac := s[:dot], s[dot:]
+	neg := strings.HasPrefix(intPart, "-")
+	if neg {
+		intPart = intPart[1:]
+	}
+	var b strings.Builder
+	n := len(intPart)
+	for i := 0; i < n; i++ {
+		if i > 0 && (n-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte(intPart[i])
+	}
+	out := b.String() + frac
+	if neg {
+		out = "-" + out
+	}
+	return out
+}
 
 // livePositionSource reports the live account position per side. The live
 // engine's *position.Syncer satisfies it and is injected via
@@ -119,12 +153,12 @@ func (g *Guardian) UpdateParams(ctx *strategy.Context, params map[string]any) er
 	g.forceResyncRestingStop(ctx) // exchange stop must match the new level (either direction)
 	tp := "不设"
 	if g.prot.TPPrice() > 0 {
-		tp = fmt.Sprintf("%.4g", g.prot.TPPrice())
+		tp = fmtPrice(g.prot.TPPrice())
 	}
 	g.log.Info("guardian: params updated live",
 		zap.String("symbol", g.symbol),
 		zap.Float64("stop", g.prot.Stop), zap.Float64("tp", g.prot.TPPrice()))
-	g.notifyAction("updated", fmt.Sprintf("已更新守护参数:止损→%.4g,止盈→%s", g.prot.Stop, tp))
+	g.notifyAction("updated", fmt.Sprintf("已更新守护参数:止损→%s,止盈→%s", fmtPrice(g.prot.Stop), tp))
 	return nil
 }
 
@@ -240,7 +274,7 @@ func (g *Guardian) placeEntry(ctx *strategy.Context) {
 	if g.entryType == "limit" && g.entryPrice > 0 {
 		req.Type = strategy.OrderLimit
 		req.Price = g.entryPrice
-		kind = fmt.Sprintf("限价%.6g", g.entryPrice)
+		kind = fmt.Sprintf("限价%s", fmtPrice(g.entryPrice))
 	}
 	req.Reason = "guardian_entry"
 	ctx.PlaceOrder(req)
@@ -381,8 +415,8 @@ func (g *Guardian) notifyArmSummary() {
 		dir = "空"
 	}
 	g.notifyAction("armed", fmt.Sprintf(
-		"开始守护 %s %s单 @%.4g,止损 @%.4g(%.1f%%),这单最多亏 ~$%.2f",
-		g.symbol, dir, p.Entry, p.Stop, p.RiskPct(), p.RiskUSD()))
+		"开始守护 %s %s单 @%s,止损 @%s(%.1f%%),这单最多亏 ~$%.2f",
+		g.symbol, dir, fmtPrice(p.Entry), fmtPrice(p.Stop), p.RiskPct(), p.RiskUSD()))
 	for _, warn := range RiskWarnings(p) {
 		g.notifyAction("warning", "⚠️ "+warn)
 	}
@@ -396,7 +430,7 @@ func (g *Guardian) ensureRestingStop(ctx *strategy.Context) {
 	g.restingTried = true
 	g.placeRestingStop(ctx)
 	if g.restingMode {
-		g.notifyAction("stop_placed", fmt.Sprintf("已挂交易所止损单 @ %.4g,即使程序掉线也会替你止损", g.prot.Stop))
+		g.notifyAction("stop_placed", fmt.Sprintf("已挂交易所止损单 @ %s,即使程序掉线也会替你止损", fmtPrice(g.prot.Stop)))
 	}
 }
 
@@ -436,7 +470,7 @@ func (g *Guardian) syncRestingStop(ctx *strategy.Context) {
 	_ = ctx.CancelOrder(g.stopOrderID)
 	g.stopOrderID = ""
 	g.placeRestingStop(ctx)
-	g.notifyAction("stop_advanced", fmt.Sprintf("止损已上移到 %.4g,锁住更多利润", g.prot.Stop))
+	g.notifyAction("stop_advanced", fmt.Sprintf("止损已上移到 %s,锁住更多利润", fmtPrice(g.prot.Stop)))
 }
 
 // stopReq builds the reduce-only STOP_MARKET order for the current stop.
@@ -669,7 +703,7 @@ func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
 		g.log.Info("guardian: protective exit filled",
 			zap.String("symbol", g.symbol),
 			zap.Float64("price", fill.Price))
-		g.notifyAction("closed", fmt.Sprintf("已按保护单平仓 @ %.4g,守护结束", fill.Price))
+		g.notifyAction("closed", fmt.Sprintf("已按保护单平仓 @ %s,守护结束", fmtPrice(fill.Price)))
 	}
 }
 
@@ -768,7 +802,7 @@ func (g *Guardian) placeClose(ctx *strategy.Context, reason string) {
 	if reason == "take_profit" {
 		verb = "止盈"
 	}
-	g.notifyAction("closing", fmt.Sprintf("已触发%s,正在平仓(约 %.4g)", verb, g.lastPrice))
+	g.notifyAction("closing", fmt.Sprintf("已触发%s,正在平仓(约 %s)", verb, fmtPrice(g.lastPrice)))
 	g.log.Info("guardian: protective close submitted",
 		zap.String("symbol", g.symbol),
 		zap.String("side", g.prot.Side),
