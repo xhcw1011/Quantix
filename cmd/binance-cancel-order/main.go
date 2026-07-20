@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Quantix/quantix/internal/api"
@@ -91,44 +92,40 @@ func main() {
 	fmt.Printf("account: cred=%d user=%d demo=%v testnet=%v  symbol=%s\n",
 		*credID, *userID, cred.Demo, cred.Testnet, *symbol)
 
-	before, err := broker.ListOpenOrders(ctx, *symbol)
-	if err != nil {
-		die("list open orders: %v", err)
-	}
-	fmt.Printf("\nopen orders BEFORE (%d):\n", len(before))
-	found := false
-	for _, o := range before {
-		mark := ""
-		if o.ExchangeID == *orderID {
-			mark = "  <-- target"
-			found = true
+	// Best-effort display of the regular open orders. NOTE: this endpoint does NOT
+	// include conditional/algo orders (STOP_MARKET placed via the algo API lives in
+	// a different ID space, e.g. 1000000...), so a protective stop may be absent
+	// here even while resting — which is exactly why we do NOT gate the cancel on it.
+	if before, err := broker.ListOpenOrders(ctx, *symbol); err == nil {
+		fmt.Printf("\nregular open orders (%d, excludes conditional/algo):\n", len(before))
+		for _, o := range before {
+			fmt.Printf("  %-16s %-4s %-5s %-12s qty=%.4g stop=%.2f status=%s\n",
+				o.ExchangeID, o.Side, o.PositionSide, o.Type, o.Qty, o.StopPrice, o.Status)
 		}
-		fmt.Printf("  %-16s %-4s %-5s %-12s qty=%.4g stop=%.2f status=%s%s\n",
-			o.ExchangeID, o.Side, o.PositionSide, o.Type, o.Qty, o.StopPrice, o.Status, mark)
 	}
-	if !found {
-		fmt.Printf("\ntarget order %s is NOT in the open-order list — already gone. Nothing to do.\n", *orderID)
+
+	// Attempt the cancel directly. CancelOrder tries a normal cancel first, then an
+	// algo cancel — so it covers both regular and conditional/algo orders.
+	fmt.Printf("\ncancelling %s (normal → algo fallback) ...\n", *orderID)
+	err = broker.CancelOrder(ctx, *symbol, *orderID)
+	if err == nil {
+		fmt.Printf("\n✓ order %s cancelled.\n", *orderID)
 		return
 	}
+	if isAlreadyGone(err) {
+		fmt.Printf("\n✓ order %s not found on the exchange (already cancelled/filled) — nothing to do.\n", *orderID)
+		return
+	}
+	die("cancel failed: %v", err)
+}
 
-	fmt.Printf("\ncancelling %s ...\n", *orderID)
-	if err := broker.CancelOrder(ctx, *symbol, *orderID); err != nil {
-		die("cancel failed: %v", err)
-	}
-	fmt.Println("✓ cancel request accepted")
-
-	time.Sleep(1 * time.Second)
-	after, err := broker.ListOpenOrders(ctx, *symbol)
-	if err != nil {
-		die("re-list: %v", err)
-	}
-	for _, o := range after {
-		if o.ExchangeID == *orderID {
-			fmt.Printf("\n⚠ order %s still present after cancel — check manually\n", *orderID)
-			os.Exit(1)
-		}
-	}
-	fmt.Printf("\n✓ order %s is gone. open orders remaining: %d\n", *orderID, len(after))
+// isAlreadyGone reports whether the cancel error means the order no longer exists
+// on the exchange (Binance -2011 "Unknown order sent." / -2013 "Order does not
+// exist."), i.e. there is nothing left to cancel.
+func isAlreadyGone(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "-2011") || strings.Contains(s, "-2013") ||
+		strings.Contains(s, "Unknown order") || strings.Contains(s, "does not exist")
 }
 
 func die(f string, a ...any) {
