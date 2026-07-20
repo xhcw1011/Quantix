@@ -3,8 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>web</title>
+    <!-- Pin a desktop layout viewport: the app has no dedicated mobile UI (only a
+         cramped md-breakpoint fallback), so on phones we render the full PC layout
+         zoomed-to-fit and pannable instead of the broken narrow reflow. 1024 clears
+         the md (768px) breakpoint so the desktop sidebar + tables render, while
+         staying as large as possible on a phone. -->
+    <meta name="viewport" content="width=1024" />
+    <title>Quantix</title>
   </head>
   <body>
     <div id="root"></div>
