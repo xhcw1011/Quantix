@@ -66,7 +66,7 @@ type Engine struct {
 	positions *oms.PositionManager
 	omsInst   *oms.OMS
 	risk      *risk.Manager
-	org       *orgateway.Gateway // Order Risk Gateway (Layer-1 validation); shadow in V1
+	org       *orgateway.Gateway // Order Risk Gateway (Layer-1 validation); enforcing
 	strategy  strategy.Strategy
 	stratCtx  *strategy.Context
 	bus       *bus.Bus                // may be nil
@@ -150,8 +150,9 @@ func NewEngine(
 	// order-rate limit. Portfolio-relative caps (position %, single-trade %, account
 	// drawdown) deliberately do NOT live here — they belong in the portfolio/account
 	// engine, which decides per-strategy exposure; putting them in the per-strategy
-	// order gateway wrongly kills single-symbol strategies. Runs in Shadow (evaluate
-	// + log + count, never block) until validated, then Enforce.
+	// order gateway wrongly kills single-symbol strategies. The shadow rollout is
+	// complete (0 DENYs on live traffic); the gate now runs in Enforce and blocks
+	// risk-increasing orders that trip its limits.
 	orgRules := []orgateway.Rule{
 		orgateway.MaxGrossLeverageRule{Frac: defaultMaxGrossExposureFrac},
 		orgateway.MaxNotionalPerOrderRule{Max: orgMaxNotionalPerOrder},
@@ -164,7 +165,11 @@ func NewEngine(
 		broker,
 		orgRules,
 		&orgLiveState{broker: broker, positions: pm, risk: rm, pool: cfg.Pool, stratID: cfg.StrategyID},
-		orgateway.Shadow,
+		// Enforce: after the shadow rollout showed 0 DENYs on live traffic, the
+		// Layer-1 gate now actually blocks orders that open/increase risk past its
+		// runaway/fat-finger limits (max gross leverage, per-order notional, order
+		// rate). Risk-reducing (closing) orders and cancels always pass through.
+		orgateway.Enforce,
 		log,
 	)
 
@@ -348,6 +353,18 @@ func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, f
 		zap.Float64("qty", closeQty),
 		zap.Float64("avg_price", fill.AvgPrice),
 		zap.String("exchange_id", fill.ExchangeID))
+
+	// Cancel the paired protective stop/TP for this position. This close path fires
+	// the market order straight at the exchange client, bypassing the broker's
+	// normal closing-fill flow (broker.go) where cancelProtectiveOrders runs — so
+	// without this the resting stop-loss is orphaned after a web "close position".
+	// Normalize one-way "BOTH" to "" so it matches the tracked protective key.
+	protPosSide := posSide
+	if protPosSide == "BOTH" {
+		protPosSide = ""
+	}
+	e.broker.cancelProtectiveOrders(ctx, symbol, protPosSide)
+
 	return closeQty, fill.AvgPrice, nil
 }
 
