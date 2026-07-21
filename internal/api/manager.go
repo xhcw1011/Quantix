@@ -747,6 +747,11 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 		defer close(re.done)
 		defer engineCancel()
 
+		// Fan-in gate: the WS kline stream, the REST-poll fallback, and the warmup
+		// backfill all feed klineCh through this deduper, so the engine never
+		// processes the same bar twice (which would corrupt indicators / re-fire).
+		dedup := newKlineDeduper(klineCh, m.log)
+
 		// Backfill all intervals (longer intervals first for warmup order)
 		for i := len(req.Intervals) - 1; i >= 0; i-- {
 			iv := req.Intervals[i]
@@ -758,10 +763,7 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 			for _, k := range klines {
 				k.IsClosed = true
 				k.Warmup = true // prime indicators; engine suppresses orders for these
-				select {
-				case klineCh <- k:
-				default:
-				}
+				dedup.emit(k)
 			}
 			m.log.Info("backfill done", zap.String("interval", iv), zap.Int("bars", len(klines)))
 		}
@@ -784,11 +786,7 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 							zap.String("symbol", k.Symbol),
 							zap.String("interval", k.Interval),
 							zap.Float64("close", k.Close))
-						select {
-						case klineCh <- k:
-						default:
-							m.log.Warn("kline channel full, dropping bar")
-						}
+						dedup.emit(k)
 					},
 				)
 				// SubscribeKlines returned unexpectedly — restart after delay
@@ -801,6 +799,15 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 				}
 			}
 		}()
+
+		// REST-poll fallback (one goroutine per interval): fills klineCh when the
+		// kline WS delivers nothing — e.g. on this host the live market-data WS is
+		// silent while the tick stream flows, so a live/real engine would otherwise
+		// never get a bar. The deduper makes this a no-op whenever the WS works.
+		for _, iv := range req.Intervals {
+			iv := iv
+			go pollClosedKlines(ctx, restClient, req.Symbol, iv, func(k exchange.Kline) { dedup.emit(k) }, m.log)
+		}
 
 		// Real-time ticker for precise TP/SL (live engine only)
 		if re.engine != nil {
