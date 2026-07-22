@@ -55,6 +55,7 @@ import (
 	_ "github.com/Quantix/quantix/internal/strategy/rebalance"
 	_ "github.com/Quantix/quantix/internal/strategy/spotgrid"
 	_ "github.com/Quantix/quantix/internal/strategy/spottrend"
+	_ "github.com/Quantix/quantix/internal/strategy/trendradar"
 )
 
 func main() {

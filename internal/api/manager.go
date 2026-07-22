@@ -30,6 +30,7 @@ import (
 	"github.com/Quantix/quantix/internal/strategy"
 	"github.com/Quantix/quantix/internal/strategy/macross"
 	"github.com/Quantix/quantix/internal/strategy/registry"
+	"github.com/Quantix/quantix/internal/strategy/trendradar"
 )
 
 // RiskOverride allows per-engine risk parameter customization.
@@ -513,6 +514,12 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 	// can clean up a still-resting limit order rather than leave it orphaned.
 	if mc, ok := strat.(*macross.MACross); ok && req.Mode == "live" && m.store != nil {
 		mc.SetStateStore(newMacrossStateStore(m.store, userID, engineID))
+	}
+
+	// Trend radar: alert-only decision aid — wire the notifier so its Telegram
+	// alerts reach the user. It never places orders.
+	if r, ok := strat.(*trendradar.Radar); ok {
+		r.SetDispatcher(trendradar.NewNotifyDispatcher(notifier))
 	}
 
 	if req.Mode == "paper" {
