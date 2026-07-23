@@ -5,11 +5,101 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/exchange"
+	"github.com/Quantix/quantix/internal/oms"
 )
+
+// closePosMock is a mockOrderClient that also answers position queries
+// (PositionQuerier) and records which exchange order IDs were cancelled — enough
+// to verify Engine.ClosePosition cancels the position's paired protective stop.
+type closePosMock struct {
+	*mockOrderClient
+	positions    []exchange.PositionInfo
+	positionsSeq [][]exchange.PositionInfo // if set, GetPositions returns the next slice per call
+	posCall      int
+	cancelledIDs []string
+}
+
+func (c *closePosMock) GetPositions(context.Context) ([]exchange.PositionInfo, error) {
+	if c.positionsSeq != nil {
+		i := c.posCall
+		if i >= len(c.positionsSeq) {
+			i = len(c.positionsSeq) - 1
+		}
+		c.posCall++
+		return c.positionsSeq[i], nil
+	}
+	return c.positions, nil
+}
+
+func (c *closePosMock) CancelOrder(_ context.Context, _, id string) error {
+	c.mu.Lock()
+	c.cancelledIDs = append(c.cancelledIDs, id)
+	c.mu.Unlock()
+	return c.cancelErr
+}
+
+// The web "close position" button routes through Engine.ClosePosition, which fires
+// a market close directly at the exchange client — bypassing the broker's normal
+// closing-fill flow where cancelProtectiveOrders runs. Without an explicit cancel
+// here, the resting stop-loss is orphaned on the exchange after the position closes.
+func TestEngineClosePositionCancelsProtectiveStop(t *testing.T) {
+	log := zap.NewNop()
+	mock := &closePosMock{
+		mockOrderClient: &mockOrderClient{
+			marketFill: exchange.OrderFill{ExchangeID: "close-1", FilledQty: 0.043, AvgPrice: 64000, Status: "filled"},
+		},
+		positions: []exchange.PositionInfo{
+			{Symbol: "BTCUSDT", PositionSide: "LONG", Amt: 0.043, EntryPrice: 64884},
+		},
+	}
+	o := oms.New(oms.ModeLive, log)
+	pm := oms.NewPositionManager()
+	b := New(mock, o, pm, nil, log)
+	b.SetEngineCtx(context.Background())
+	b.protectiveOrders[brokerPosKey("BTCUSDT", "LONG")] = protectiveIDs{stopID: "stop-abc"}
+
+	e := &Engine{broker: b, log: log, positions: pm}
+	_, _, err := e.ClosePosition(context.Background(), "BTCUSDT", "LONG")
+	require.NoError(t, err)
+
+	assert.Contains(t, mock.cancelledIDs, "stop-abc",
+		"web close-position must cancel the position's paired stop-loss (else it orphans on the exchange)")
+}
+
+// After a full close, the OMS position manager must no longer show the position —
+// otherwise the UI keeps displaying the (already-closed) position and a repeat
+// close fails with "no open position". The exchange reports the position on the
+// first query (for the close) and flat on the reconcile query.
+func TestEngineClosePositionRemovesFromPositionManager(t *testing.T) {
+	log := zap.NewNop()
+	mock := &closePosMock{
+		mockOrderClient: &mockOrderClient{
+			marketFill: exchange.OrderFill{ExchangeID: "close-1", FilledQty: 0.011, Status: "filled"},
+		},
+		positionsSeq: [][]exchange.PositionInfo{
+			{{Symbol: "BTCUSDT", PositionSide: "SHORT", Amt: -0.011, EntryPrice: 66300}}, // for the close
+			{}, // reconcile: exchange now flat
+		},
+	}
+	o := oms.New(oms.ModeLive, log)
+	pm := oms.NewPositionManager()
+	pm.SeedPosition("BTCUSDT", "SHORT", 0.011, 66300) // bot believes it holds the short
+	b := New(mock, o, pm, nil, log)
+	b.SetEngineCtx(context.Background())
+
+	e := &Engine{broker: b, log: log, positions: pm}
+	_, _, err := e.ClosePosition(context.Background(), "BTCUSDT", "SHORT")
+	require.NoError(t, err)
+
+	_, ok := pm.ShortPosition("BTCUSDT")
+	require.False(t, ok, "a fully-closed short must be removed from the position manager")
+}
 
 // TestClosePosition_PersistsOrderRecord reproduces a 2026-08-17 real-money
 // incident: closing a position via the web UI's "平仓" button places the

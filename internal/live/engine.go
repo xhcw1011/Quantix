@@ -394,7 +394,53 @@ func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, f
 		CreatedAt:     time.Now(),
 	}})
 
+	// Reconcile the in-memory position from the exchange so the UI reflects the
+	// close immediately: the close order is placed directly on the broker (not
+	// echoed through the OMS fill path), and on live the user-data stream can be
+	// silent — without this the closed position lingers and a repeat close fails.
+	e.reconcileClosedPosition(ctx, pq, symbol, side, posSide)
+
 	return closeQty, fill.AvgPrice, nil
+}
+
+// reconcileClosedPosition re-reads the exchange after a close and updates the OMS
+// position manager to match: it removes the side if now flat, or re-seeds the
+// remaining size on a partial close.
+func (e *Engine) reconcileClosedPosition(ctx context.Context, pq exchange.PositionQuerier, symbol, side, posSide string) {
+	if e.positions == nil {
+		return
+	}
+	positions, err := pq.GetPositions(ctx)
+	if err != nil {
+		return
+	}
+	var remaining, entry float64
+	for _, p := range positions {
+		if p.Symbol != symbol || p.Amt == 0 {
+			continue
+		}
+		ps := p.PositionSide
+		if ps == "" || ps == "BOTH" { // one-way / net: derive from the sign
+			if p.Amt > 0 {
+				ps = "LONG"
+			} else {
+				ps = "SHORT"
+			}
+		}
+		if ps == side {
+			remaining = math.Abs(p.Amt)
+			entry = p.EntryPrice
+		}
+	}
+	key := posSide
+	if key == "BOTH" {
+		key = ""
+	}
+	if remaining <= 0 {
+		e.positions.Remove(symbol, key)
+	} else if entry > 0 {
+		e.positions.SeedPosition(symbol, key, remaining, entry)
+	}
 }
 
 // Flatten cancels every resting order for `symbol` and market-closes any open

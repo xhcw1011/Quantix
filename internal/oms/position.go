@@ -127,6 +127,17 @@ func (pm *PositionManager) SeedPosition(symbol, positionSide string, qty, avgEnt
 	}
 }
 
+// Remove deletes all record of a position — used after a full close so the
+// in-memory view matches the exchange. The close order is placed directly on the
+// broker (not echoed through the OMS fill path), and on live the user-data stream
+// may be silent, so without this the closed position lingers and a repeat close
+// fails with "no open position".
+func (pm *PositionManager) Remove(symbol, positionSide string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	delete(pm.positions, posKey(symbol, positionSide))
+}
+
 // Position returns a copy of the net/long position for the given symbol.
 // Use LongPosition / ShortPosition for hedge-mode futures.
 // ok is false if no position exists.
