@@ -338,6 +338,28 @@ func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, f
 		}
 	}
 	if !found {
+		// The exchange has no such position. If the OMS still shows one, it's a
+		// stale display (the close fill was never echoed back — on live the
+		// user-data stream can be silent). Clear it and report success so the
+		// close button heals the UI instead of erroring with "no open position".
+		if e.positions != nil {
+			had := false
+			if side == "LONG" {
+				_, had = e.positions.LongPosition(symbol)
+			} else {
+				_, had = e.positions.ShortPosition(symbol)
+			}
+			if !had {
+				_, had = e.positions.Position(symbol) // net / one-way slot
+			}
+			if had {
+				e.positions.Remove(symbol, side)
+				e.positions.Remove(symbol, "")
+				e.log.Info("close-position: exchange flat, cleared stale in-memory position",
+					zap.String("symbol", symbol), zap.String("side", side))
+				return 0, 0, nil
+			}
+		}
 		return 0, 0, fmt.Errorf("no open %s position for %s", side, symbol)
 	}
 

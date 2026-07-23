@@ -174,3 +174,25 @@ func TestClosePosition_PersistsOrderRecord(t *testing.T) {
 		t.Errorf("exchange_id = %q, want 1105049620912", got.ExchangeID)
 	}
 }
+
+// Closing a stale phantom (bot shows a position the exchange no longer has) must
+// clear the display and succeed — not error with "no open position", which would
+// leave the user stuck with an uncloseable ghost.
+func TestEngineClosePositionClearsStalePhantom(t *testing.T) {
+	log := zap.NewNop()
+	mock := &closePosMock{
+		mockOrderClient: &mockOrderClient{},
+		positions:       []exchange.PositionInfo{}, // exchange is FLAT
+	}
+	pm := oms.NewPositionManager()
+	pm.SeedPosition("BTCUSDT", "SHORT", 0.011, 66300) // stale: bot shows it, exchange doesn't
+	b := New(mock, oms.New(oms.ModeLive, log), pm, nil, log)
+	b.SetEngineCtx(context.Background())
+
+	e := &Engine{broker: b, log: log, positions: pm}
+	_, _, err := e.ClosePosition(context.Background(), "BTCUSDT", "SHORT")
+	require.NoError(t, err, "closing a stale phantom should clear it and succeed")
+
+	_, ok := pm.ShortPosition("BTCUSDT")
+	require.False(t, ok, "stale phantom short must be cleared")
+}
