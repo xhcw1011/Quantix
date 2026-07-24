@@ -578,34 +578,41 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 			return "", fmt.Errorf("create order client: %w", err)
 		}
 
-		// Validate and configure leverage for futures/swap exchanges
+		// Validate leverage range.
 		if req.Leverage < 0 || req.Leverage > 125 {
 			engineCancel()
 			return "", fmt.Errorf("leverage must be between 0 and 125 (got %d)", req.Leverage)
 		}
-		// Futures requires explicit leverage. Without it, the engine's internal cash
-		// accounting falls back to leverage=1 (spot semantics), making cash field
-		// log values wildly wrong (full notional locked instead of 1/leverage margin).
-		// Real exchange-side margin is unaffected, but monitoring/log values become
-		// untrustworthy. spot already rejected above (lines 307-317).
+		// Futures requires explicit leverage for engines that open a NEW leveraged
+		// position. Without it, the engine's internal cash accounting falls back to
+		// leverage=1 (spot semantics), making cash field log values wildly wrong
+		// (full notional locked instead of 1/leverage margin). Real exchange-side
+		// margin is unaffected, but monitoring/log values become untrustworthy.
+		// spot already rejected above (lines 307-317).
 		//
-		// Exception: a guardian in adopt-only mode (no PlaceEntry) never opens a
-		// new position — it manages whatever the account already holds, using
-		// whatever leverage is ALREADY set for that position. It doesn't need an
-		// explicit leverage value, and this code must NOT call SetLeverage on its
-		// behalf either: changing a symbol's leverage while adopting an already-
-		// open position is unnecessary, can needlessly fail on account-tier caps
-		// that have nothing to do with guardian's own protective logic (e.g. a
-		// sub-account capped below the value the user happened to pick), and some
-		// exchanges reject a leverage change outright while a position is open
-		// (2026-08-06 finding).
+		// Exception: engines that never open a new position don't need an explicit
+		// leverage value, and this code must NOT call SetLeverage on their behalf
+		// either — the trend radar never trades at all, and a guardian in
+		// adopt-only mode (no PlaceEntry) manages whatever the account already
+		// holds, using whatever leverage is ALREADY set for that position.
+		// Changing a symbol's leverage while adopting an already-open position is
+		// unnecessary, can needlessly fail on account-tier caps that have nothing
+		// to do with guardian's own protective logic (e.g. a sub-account capped
+		// below the value the user happened to pick), and some exchanges reject a
+		// leverage change outright while a position is open (2026-08-06 finding).
 		isFutures := !isSpotMarket
-		adoptOnly := guardianAdoptOnly(req)
-		if isFutures && req.Leverage <= 0 && !adoptOnly {
+		opensNewPosition := req.StrategyID != "trendradar" && !guardianAdoptOnly(req)
+		if isFutures && req.Leverage <= 0 && opensNewPosition {
 			engineCancel()
 			return "", fmt.Errorf("leverage is required for %s/%s (got %d); futures engines need explicit leverage to compute correct margin", cred.Exchange, effMarket, req.Leverage)
 		}
-		if req.Leverage > 0 && !adoptOnly {
+		if req.Leverage <= 0 {
+			req.Leverage = 1 // accounting default for non-opening engines; no leveraged open occurs
+		}
+		// Only set exchange-side leverage when actually opening a new position — an
+		// adopt-guardian (or the radar, which never trades) must not disturb an
+		// already-open position's leverage.
+		if req.Leverage > 0 && opensNewPosition {
 			leverageCtx, leverageCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			lvErr := orderClient.SetLeverage(leverageCtx, req.Symbol, req.Leverage)
 			leverageCancel()
