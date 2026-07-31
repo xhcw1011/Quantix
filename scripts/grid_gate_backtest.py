@@ -25,13 +25,40 @@ def volume_gate(kl, interval, W):
     return sig["score"]
 
 
-def run_grid(closes, gate=None, exit_thresh=0.5, enter_thresh=0.5,
-             cooldown=0, persistence=1, spacing=0.01, fee=0.0005, max_inv=10):
-    """逐 close 跑网格。gate=None 即裸网格(永远开)。开关闸状态机(三机制):
+def gate_timeline(score, exit_thresh=0.5, enter_thresh=0.5, cooldown=0, persistence=1):
+    """逐 bar 的开关闸状态(三机制,因果、滞后1根,无前视),从 TED 分数序列算出:
       ① 迟滞 Hysteresis:量分 ≥ exit_thresh 才退出;<enter_thresh 才考虑回来(exit>enter=死区)。
       ② 冷却 Cooldown:退出后至少等 cooldown 根才允许回来。
       ③ 持续 Persistence:要连续 persistence 根 Low(<enter_thresh)才真回来。
     单阈退化:exit=enter, cooldown=0, persistence=1。
+    返回 list[bool],长度=len(score),True=该 bar 网格开。独立于 run_grid,
+    是 grid_no_vol_decline_gauge.py 复用的那部分,避免重新照抄一份、和 Go 版(volgate.go)
+    的行为漂移。"""
+    n = len(score)
+    state_on = True     # 闸门状态:True=开网,False=收网中
+    since_exit = 0      # 退出后过了几根
+    low_streak = 0      # 连续 Low 计数
+    on = [True] * n
+    for i in range(n):
+        s = score[i - 1] if i - 1 >= 0 else None
+        if state_on:
+            if s is None or s >= exit_thresh:      # ① 迟滞:高于退出阈 → 收网
+                state_on = False
+                since_exit = 0
+                low_streak = 0
+        else:
+            since_exit += 1
+            low_streak = low_streak + 1 if (s is not None and s < enter_thresh) else 0
+            # ②冷却够 + ③连续 Low 够 + 迟滞(低于回入阈,已含在 low_streak 里)→ 回来
+            if since_exit >= cooldown and low_streak >= persistence:
+                state_on = True
+        on[i] = state_on
+    return on
+
+
+def run_grid(closes, gate=None, exit_thresh=0.5, enter_thresh=0.5,
+             cooldown=0, persistence=1, spacing=0.01, fee=0.0005, max_inv=10):
+    """逐 close 跑网格。gate=None 即裸网格(永远开)。开关闸状态用 gate_timeline()。
     返回 dict: pnl, ret(相对 max_inv*p0 资本), maxdd, trades, on_frac。"""
     n = len(closes)
     p0 = closes[0]
@@ -49,9 +76,7 @@ def run_grid(closes, gate=None, exit_thresh=0.5, enter_thresh=0.5,
     peak = 0.0
     maxdd = 0.0
     on_bars = 0
-    state_on = True     # 闸门状态:True=开网,False=收网中
-    since_exit = 0      # 退出后过了几根
-    low_streak = 0      # 连续 Low 计数
+    on = gate_timeline(gate, exit_thresh, enter_thresh, cooldown, persistence) if gate is not None else [True] * n
 
     def fill(price, dqty):
         nonlocal pos, cash, fees, trades
@@ -62,23 +87,7 @@ def run_grid(closes, gate=None, exit_thresh=0.5, enter_thresh=0.5,
 
     for i in range(n):
         p = closes[i]
-        active = True
-        if gate is not None:
-            s = gate[i - 1] if i - 1 >= 0 else None
-            if state_on:
-                if s is None or s >= exit_thresh:      # ① 迟滞:高于退出阈 → 收网
-                    state_on = False
-                    since_exit = 0
-                    low_streak = 0
-                    active = False
-            else:
-                since_exit += 1
-                low_streak = low_streak + 1 if (s is not None and s < enter_thresh) else 0
-                # ②冷却够 + ③连续 Low 够 + 迟滞(低于回入阈,已含在 low_streak 里)→ 回来
-                if since_exit >= cooldown and low_streak >= persistence:
-                    state_on = True
-                else:
-                    active = False
+        active = on[i]
 
         if not active:
             if pos != 0.0:            # 收网:按现价平掉库存
