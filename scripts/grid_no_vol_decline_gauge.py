@@ -235,11 +235,13 @@ def gauge(symbol, interval, start_ms, end_ms, window=100, abs_pct=15.0, min_run_
         # fill(p, -pos) on the OFF bar itself (grid_gate_backtest.py's
         # `if not active: fill(p, -pos)`), i.e. one bar past this on-stretch's `end`.
         # That's where the stretch's damage is actually realized in cash, so
-        # excluding it would understate the episode's true equity impact — for
-        # BTC/ETH 5m the strategy's actual global-worst equity point lands exactly
-        # on this bar. [start, end] alone is also a defensible boundary; this is a
-        # deliberate, more-conservative choice for a risk-quantification script, not
-        # an oversight.
+        # excluding it would understate the episode's true equity impact — for BTC
+        # 5m the strategy's actual global-worst equity point lands exactly on this
+        # bar (ETH 5m's analogous worst point sits on a flatten bar too, but of a
+        # 3-bar stretch already excluded by min_run_len, so this extension happens
+        # to have zero numerical effect there). [start, end] alone is also a
+        # defensible boundary; this is a deliberate, more-conservative choice for a
+        # risk-quantification script, not an oversight.
         dd_end = min(e + 1, n - 1)
         dd = episode_equity_dd(gated["equity_curve"], s, dd_end, capital)
         stats_by_key[(s, e)] = {
