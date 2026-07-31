@@ -33,7 +33,9 @@ def gate_timeline(score, exit_thresh=0.5, enter_thresh=0.5, cooldown=0, persiste
     单阈退化:exit=enter, cooldown=0, persistence=1。
     返回 list[bool],长度=len(score),True=该 bar 网格开。独立于 run_grid,
     是 grid_no_vol_decline_gauge.py 复用的那部分,避免重新照抄一份、和 Go 版(volgate.go)
-    的行为漂移。"""
+    的行为漂移(暖机例外:score[i-1] is None 时本函数判 gate OFF,Go 生产版
+    volgate.go 暖机期保持 gate ON;暖机后状态机一致,细节见
+    grid_no_vol_decline_gauge.py 模块 docstring)。"""
     n = len(score)
     state_on = True     # 闸门状态:True=开网,False=收网中
     since_exit = 0      # 退出后过了几根

@@ -148,14 +148,35 @@ def episode_pinned(pos_curve, start, end, max_inv):
 
 
 def max_inv_bound_pct(spacing, max_inv):
-    """Price decline (%) needed to walk the grid down exactly max_inv levels and
-    genuinely exhaust long-side inventory, using the same log-spaced level math
-    run_grid/gate_timeline's caller uses (level_of(p) = floor(log(p/p0)/step),
-    step = log(1+spacing)): max_inv levels down corresponds to a price ratio of
-    (1+spacing)^-max_inv. At defaults (spacing=0.01, max_inv=10) this is ~9.47%,
-    slightly less than the naive linear estimate max_inv*spacing=10% (log-spacing
-    compounds a bit cheaper on the way down)."""
+    """SUFFICIENT (not exact) price decline (%) that guarantees walking the grid down
+    max_inv levels and exhausting long-side inventory, using the same log-spaced level
+    math run_grid/gate_timeline's caller uses (level_of(p) = floor(log(p/p0)/step),
+    step = log(1+spacing)).
+
+    This is NOT a single fixed bound: level_of floors, so wherever an on-stretch's
+    reference price sits within its own level (not necessarily at the boundary)
+    changes how far price actually has to move to cross max_inv more level
+    boundaries. The true requirement is a RANGE — see max_inv_bound_range_pct() for
+    both ends. This function returns only the sufficient (upper, worst-alignment)
+    end, ~9.47% at defaults (spacing=0.01, max_inv=10), for callers that just want a
+    single conservative number; do not cite it as an exact threshold."""
     return (1 - (1 + spacing) ** -max_inv) * 100
+
+
+def max_inv_bound_range_pct(spacing, max_inv):
+    """(necessary_pct, sufficient_pct) price-decline range needed to reach
+    pos==max_inv, per max_inv_bound_pct's docstring:
+      - necessary (best case: reference price already at the bottom of its level,
+        so only max_inv-1 more boundary crossings are needed):
+        1 - (1+spacing)^-(max_inv-1)  (~8.57% at defaults)
+      - sufficient (worst case: reference price at the top of its level, a full
+        max_inv boundary crossings needed): 1 - (1+spacing)^-max_inv (~9.47%)
+    The actual bound for any given on-stretch falls somewhere in this range
+    depending on where its reference price landed within its level; this range is
+    the honest bracket, not a point estimate."""
+    necessary = (1 - (1 + spacing) ** -(max_inv - 1)) * 100
+    sufficient = (1 - (1 + spacing) ** -max_inv) * 100
+    return necessary, sufficient
 
 
 def find_no_volume_declines(closes, on_timeline, abs_pct=15.0, min_run_len=5):
@@ -205,53 +226,94 @@ def gauge(symbol, interval, start_ms, end_ms, window=100, abs_pct=15.0, min_run_
     capital = max_inv * closes[0]           # same capital base run_grid uses
     gated_maxdd = gated["maxdd"]            # fraction of capital (global running-peak dd)
 
+    n = len(closes)
     all_runs = on_stretches(on, min_run_len)
     stats_by_key = {}
     for s, e in all_runs:
-        dd = episode_equity_dd(gated["equity_curve"], s, e, capital)
+        # Extend the equity-dd window to include the flatten bar (end+1, clamped to
+        # n-1): when the gate flips off, run_grid closes the position with
+        # fill(p, -pos) on the OFF bar itself (grid_gate_backtest.py's
+        # `if not active: fill(p, -pos)`), i.e. one bar past this on-stretch's `end`.
+        # That's where the stretch's damage is actually realized in cash, so
+        # excluding it would understate the episode's true equity impact — for
+        # BTC/ETH 5m the strategy's actual global-worst equity point lands exactly
+        # on this bar. [start, end] alone is also a defensible boundary; this is a
+        # deliberate, more-conservative choice for a risk-quantification script, not
+        # an oversight.
+        dd_end = min(e + 1, n - 1)
+        dd = episode_equity_dd(gated["equity_curve"], s, dd_end, capital)
         stats_by_key[(s, e)] = {
             "equity_dd_pct": dd * 100,
             "equity_dd_ratio": (dd / gated_maxdd) if gated_maxdd > 0 else float("nan"),
             "pinned": episode_pinned(gated["pos_curve"], s, e, max_inv),
         }
-    bound_pct = max_inv_bound_pct(spacing, max_inv)
+    bound_necessary_pct, bound_sufficient_pct = max_inv_bound_range_pct(spacing, max_inv)
 
+    # Price-decline-ranked subset (top abs_pct% by raw price move) — kept for its own
+    # purpose (showing the biggest raw market moves as context) but is a DIFFERENT,
+    # smaller population than stats_by_key/all_runs below; see the print labels.
     episodes = find_no_volume_declines(closes, on, abs_pct, min_run_len)
     for ep in episodes:
         ep.update(stats_by_key[(ep["start"], ep["end"])])
-        ep["bound_frac_pct"] = (ep["decline_pct"] / bound_pct * 100) if bound_pct > 0 else float("nan")
+        ep["bound_frac_pct"] = (ep["decline_pct"] / bound_sufficient_pct * 100) \
+            if bound_sufficient_pct > 0 else float("nan")
 
+    # Everything below this line is computed over stats_by_key / all_runs — ALL
+    # candidate on-stretches, not just the price-decline top-abs_pct% subset above.
     abs_count = sum(1 for st in stats_by_key.values()
                      if not math.isnan(st["equity_dd_ratio"]) and st["equity_dd_ratio"] >= ABS_DD_FRAC)
     pinned_count = sum(1 for st in stats_by_key.values() if st["pinned"])
+    all_ratios = [st["equity_dd_ratio"] for st in stats_by_key.values()
+                  if not math.isnan(st["equity_dd_ratio"])]
+    stretch_lengths = [e - s + 1 for s, e in all_runs]
+    median_stretch_len = median(stretch_lengths) if stretch_lengths else 0.0
+    # Global max |pos| reached ANYWHERE in the run (on-stretch or off), not just
+    # within on-stretches — gives "how much of the max_inv budget did the grid ever
+    # actually use" independent of the gate.
+    global_max_pos = max((abs(p) for p in gated["pos_curve"]), default=0.0)
 
     days = len(closes) * ih / 24
     residual_dd = gated_maxdd * 100
     print(f"# {symbol} {interval}  {len(closes)}根 ~{days:.0f}天  "
           f"gated maxdd={residual_dd:.2f}%  on_frac={gated['on_frac']*100:.0f}%  "
           f"on-stretches(>={min_run_len}b)={len(all_runs)}")
-    print(f"  percentile-ranked episodes (top {abs_pct:.0f}% of on-stretch PRICE declines, "
-          f">= {min_run_len} bars): {len(episodes)}  [count is tautological by construction, context only]")
-    print(f"  falsifiable count (equity-dd >= {ABS_DD_FRAC*100:.0f}% of gated maxdd, "
-          f"among all {len(all_runs)} on-stretches >= {min_run_len} bars): {abs_count}")
-    print(f"  max_inv inventory bound: ~{bound_pct:.2f}% price move needed to pin pos==max_inv "
-          f"(spacing={spacing*100:.1f}%, max_inv={max_inv}); "
-          f"{pinned_count}/{len(all_runs)} on-stretches actually pinned there")
+    print(f"  [population: ALL {len(all_runs)} on-stretches >= {min_run_len} bars]  "
+          f"falsifiable count (equity-dd >= {ABS_DD_FRAC*100:.0f}% of gated maxdd): {abs_count}   "
+          f"median on-stretch length: {median_stretch_len:.1f} bars")
+    if all_ratios:
+        print(f"  [population: ALL {len(all_runs)} on-stretches, same population as above — "
+              f"NOT the price-decline-ranked list printed below]  "
+              f"equity-dd ratio vs global gated maxdd (the real comparison, always <= 1.0x): "
+              f"worst={max(all_ratios):.3f}x  median={median(all_ratios):.3f}x")
+    print(f"  max_inv inventory bound: {bound_necessary_pct:.2f}%-{bound_sufficient_pct:.2f}% price move "
+          f"needed to pin pos==max_inv depending on level alignment (sufficient/conservative bound: "
+          f"{bound_sufficient_pct:.2f}%; spacing={spacing*100:.1f}%, max_inv={max_inv})")
+    print(f"  [population: ALL {len(all_runs)} on-stretches]  {pinned_count}/{len(all_runs)} actually "
+          f"pinned there  |  global max |pos| reached anywhere in the run (on-stretch or off, "
+          f"i.e. even less selective a population than 'all on-stretches'): {global_max_pos:.0f}/{max_inv} "
+          f"({global_max_pos / max_inv * 100:.0f}% of inventory budget) — read together with the median "
+          f"on-stretch length above: short stretches have little power to ever reach the bound regardless "
+          f"of how small the underlying risk is")
+    print(f"  [population: top {abs_pct:.0f}% BY PRICE DECLINE only — {len(episodes)} of the "
+          f"{len(all_runs)} on-stretches above, a DIFFERENT/smaller subset than the ratios/counts "
+          f"printed above, shown below purely as 'here are the biggest raw price moves' context; "
+          f"count is tautological by construction (~{abs_pct:.0f}% of on-stretch count, always) and this "
+          f"subset need NOT contain the worst equity-dd stretch found above]")
     if episodes:
-        eq_ratios = [e["equity_dd_ratio"] for e in episodes if not math.isnan(e["equity_dd_ratio"])]
         price_mags = [e["decline_pct"] for e in episodes]
         print(f"  price-decline (market-move context, NOT comparable to equity maxdd — see docstring): "
               f"worst={price_mags[0]:.2f}%  median={median(price_mags):.2f}%")
-        if eq_ratios:
-            print(f"  equity-dd ratio vs global gated maxdd (the real comparison, always <= 1.0x): "
-                  f"worst={max(eq_ratios):.3f}x  median={median(eq_ratios):.3f}x")
         for e in episodes[:5]:
             print(f"    bars {e['start']}-{e['end']} ({e['bars']} bars): price -{e['decline_pct']:.2f}% "
-                  f"(={e['bound_frac_pct']:.0f}% of max_inv bound, pinned={e['pinned']})  "
+                  f"(={e['bound_frac_pct']:.0f}% of max_inv sufficient bound, pinned={e['pinned']})  "
                   f"equity-dd {e['equity_dd_pct']:.3f}% ({e['equity_dd_ratio']:.3f}x gated maxdd)")
     return {"symbol": symbol, "interval": interval, "residual_dd": residual_dd,
             "episodes": episodes, "abs_count": abs_count, "on_stretch_count": len(all_runs),
-            "pinned_count": pinned_count, "bound_pct": bound_pct}
+            "pinned_count": pinned_count, "bound_pct": bound_sufficient_pct,
+            "bound_necessary_pct": bound_necessary_pct, "bound_sufficient_pct": bound_sufficient_pct,
+            "worst_ratio": max(all_ratios) if all_ratios else float("nan"),
+            "median_ratio": median(all_ratios) if all_ratios else float("nan"),
+            "median_stretch_len": median_stretch_len, "global_max_pos": global_max_pos}
 
 
 def main():
