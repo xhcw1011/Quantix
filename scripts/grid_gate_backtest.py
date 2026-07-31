@@ -76,6 +76,15 @@ def run_grid(closes, gate=None, exit_thresh=0.5, enter_thresh=0.5,
     peak = 0.0
     maxdd = 0.0
     on_bars = 0
+    equity_curve = []  # per-bar equity (cash + pos*p - fees), same units as pnl/capital
+    pos_curve = []     # per-bar inventory (档), for episode-level "did we pin ±max_inv" checks
+    # precondition: `on` must be the same length as `closes` (indexed 0..n-1 below).
+    # gate_timeline(gate, ...) always returns len(gate) entries, so this holds whenever
+    # `gate` is the same TED score array as `closes`' klines (every real call site passes
+    # exactly that). Unreachable in practice, but note: the pre-refactor inline version
+    # indexed gate[i-1] directly (guarded by i-1>=0) rather than pre-materializing a
+    # same-length array, so it was slightly more tolerant of a mismatched-length `gate`
+    # than this is — this refactor does not defensively pad/truncate `on`.
     on = gate_timeline(gate, exit_thresh, enter_thresh, cooldown, persistence) if gate is not None else [True] * n
 
     def fill(price, dqty):
@@ -106,12 +115,15 @@ def run_grid(closes, gate=None, exit_thresh=0.5, enter_thresh=0.5,
         equity = cash + pos * p - fees
         peak = max(peak, equity)
         maxdd = max(maxdd, peak - equity)
+        equity_curve.append(equity)
+        pos_curve.append(pos)
 
     final_p = closes[-1]
     pnl = cash + pos * final_p - fees
     return {
         "pnl": pnl, "ret": pnl / capital, "maxdd": maxdd / capital,
         "trades": trades, "fees": fees, "on_frac": on_bars / n,
+        "equity_curve": equity_curve, "pos_curve": pos_curve,
     }
 
 

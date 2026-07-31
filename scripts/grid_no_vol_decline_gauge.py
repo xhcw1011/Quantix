@@ -9,13 +9,34 @@ that blind spot before anyone builds a second (trend/structure) gate signal for 
 how often does the gate stay "on" through a large decline, and how large are those
 declines relative to the strategy's already-tiny residual drawdown.
 
-Note on units: episode magnitude is measured in raw price % (peak-to-trough close
-decline while the gate stayed on). The strategy's reported maxdd is an EQUITY %
-(scaled by how much of the ±max-inv grid inventory was actually filled at that
-point). The two are not the same unit — an episode's price-decline % is an upper
-bound on its equity impact (equality only if inventory happened to be fully built
-before the decline started), not a literal "this episode caused N% of the drawdown"
-figure. Treat the comparison as orientation, not a precise attribution.
+Note on units (bug found + fixed 2026-07-31, during final review, before this line
+moved on): an early draft of this script compared each episode's raw PRICE decline
+% (peak-to-trough close move) directly against the strategy's EQUITY maxdd % —
+different units, and since maxdd is the GLOBAL running-peak drawdown, no single
+sub-window's contribution can ever exceed it, so any reported ratio above 1.0x was
+not just imprecise but logically impossible. Fixed: episode_equity_dd() computes
+each episode's own EQUITY drawdown (peak reset to the window's start, same capital
+base run_grid uses: max_inv * closes[0]) and compares that to the strategy's global
+equity maxdd — bounded <= 1.0x by construction (see episode_equity_dd's docstring
+for the proof sketch). Raw price decline_pct is still reported, but only as
+market-move context (and against the max_inv inventory bound, see
+max_inv_bound_pct), never as an equity proxy.
+
+Note on episode counts: find_no_volume_declines always selects the top abs_pct% of
+on-stretch declines by construction — so its episode COUNT is tautological (~abs_pct%
+of on-stretch count, true regardless of whether anything in the data is actually big).
+gauge() additionally reports a count of on-stretches clearing an ABSOLUTE, falsifiable
+bar (equity-dd >= ABS_DD_FRAC of the strategy's own gated maxdd) that can legitimately
+come out at zero — see ABS_DD_FRAC below for why 20% was chosen.
+
+Note on warmup: gate_timeline treats "no lagged score yet" (bar 0, or any bar whose
+score[i-1] is None because compute_signals hasn't warmed up) as gate-OFF. The Go
+production gate (internal/strategy/grid/volgate.go's volGate.update) does the
+opposite during warmup — insufficient history keeps the gate ON. Same 3-mechanism
+state machine (hysteresis/cooldown/persistence) once both are warmed up, but this is
+not a byte-for-byte equivalent implementation — the warmup edge case differs.
+Immaterial to this gauge's conclusion (warmup is ~50-100 bars out of 8640+ per run)
+but don't cite this script as proof the two never diverge.
 
 See docs/superpowers/specs/2026-07-31-grid-no-vol-decline-gauge-design.md.
 
@@ -23,13 +44,45 @@ Usage:
   python3 scripts/grid_no_vol_decline_gauge.py --symbol BTCUSDT --interval 15m
   python3 scripts/grid_no_vol_decline_gauge.py --all   # BTC+ETH x 15m+5m, the TED-validated set
   python3 scripts/grid_no_vol_decline_gauge.py --all --start 2026-05-01 --end 2026-07-30
+
+Note on the sanity check (see repo's implementation-plan Task 2 Step 2 for the
+copy-pasteable command): it exercises find_no_volume_declines() directly against a
+hand-built on_timeline, not the full compute_signals -> gate_timeline pipeline —
+it's a scanner-logic check, not an end-to-end signal test. Only gauge()'s real
+network run exercises the full pipeline.
 """
 import argparse
+import math
 from datetime import datetime, timedelta, timezone
 
 from breakout_score import compute_signals, interval_hours
 from grid_gate_backtest import gate_timeline, run_grid
-from grid_trend_switch import fetch_range, to_ms
+from grid_trend_switch import fetch_range
+
+# Falsifiable episode bar: an on-stretch "counts" only if its own equity drawdown is
+# at least this fraction of the strategy's GLOBAL gated maxdd. 20% is a materiality
+# bar, not a significance test: it means a single episode alone explains at least a
+# fifth of the strategy's entire sample-period worst-case pain — clearly non-trivial
+# — while still being far below 100%, so it doesn't require an episode to literally
+# BE the global worst moment to count. Below this, an episode's equity contribution
+# is noise-level relative to the number that actually matters to a trader (the
+# realized worst drawdown). Unlike the percentile-ranked list below (which always
+# returns ~abs_pct% of on-stretches by construction, true or not), this count can
+# legitimately come out as zero if the data doesn't support it.
+ABS_DD_FRAC = 0.20
+
+
+def median(vals):
+    """Proper averaged median — mags[len(mags)//2] alone is an upper-median and is
+    wrong for even-length lists (e.g. [1,2,3,4] -> mags[2]=3, not the true median 2.5)."""
+    s = sorted(vals)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    if n % 2 == 0:
+        return (s[mid - 1] + s[mid]) / 2
+    return s[mid]
 
 
 def on_runs(on_timeline):
@@ -47,8 +100,15 @@ def on_runs(on_timeline):
     return runs
 
 
+def on_stretches(on_timeline, min_run_len=5):
+    """All on-stretches (start, end) inclusive with length >= min_run_len."""
+    return [(s, e) for s, e in on_runs(on_timeline) if e - s + 1 >= min_run_len]
+
+
 def max_decline_in_run(closes, start, end):
-    """Worst peak-to-trough decline (positive fraction) within closes[start..end]."""
+    """Worst peak-to-trough PRICE decline (positive fraction) within closes[start..end].
+    Market-move context only — NOT directly comparable to equity maxdd, see module
+    docstring and episode_equity_dd()."""
     peak = closes[start]
     worst = 0.0
     for i in range(start, end + 1):
@@ -57,17 +117,63 @@ def max_decline_in_run(closes, start, end):
     return worst
 
 
+def episode_equity_dd(equity_curve, start, end, capital):
+    """Worst peak-to-trough EQUITY drawdown within [start, end], as a fraction of the
+    same capital base run_grid uses (max_inv * closes[0]).
+
+    The peak resets to equity_curve[start] (window-local), not the all-time running
+    peak run_grid's global maxdd uses — and that's exactly why this is directly
+    comparable to (and always <= ) the global maxdd: at any bar i inside the window,
+    the GLOBAL running peak (which already incorporates all history up to i, both
+    before and during the window) is >= this window-local peak, so
+    global_dd(i) = global_peak(i) - equity(i) >= window_peak(i) - equity(i) = window_dd(i)
+    for every i in the window. Hence max(window_dd) <= max(global_dd over the window)
+    <= max(global_dd over all bars) = the strategy's reported maxdd. This is what
+    replaces the old, unit-mismatched "price-decline % vs equity maxdd %" comparison.
+    """
+    if capital <= 0:
+        return 0.0
+    peak = equity_curve[start]
+    worst = 0.0
+    for i in range(start, end + 1):
+        peak = max(peak, equity_curve[i])
+        worst = max(worst, peak - equity_curve[i])
+    return worst / capital
+
+
+def episode_pinned(pos_curve, start, end, max_inv):
+    """True if inventory ever hit the +-max_inv bound during [start, end] — i.e. the
+    grid genuinely ran out of room during this episode, not just moved through it."""
+    return any(abs(pos_curve[i]) >= max_inv for i in range(start, end + 1))
+
+
+def max_inv_bound_pct(spacing, max_inv):
+    """Price decline (%) needed to walk the grid down exactly max_inv levels and
+    genuinely exhaust long-side inventory, using the same log-spaced level math
+    run_grid/gate_timeline's caller uses (level_of(p) = floor(log(p/p0)/step),
+    step = log(1+spacing)): max_inv levels down corresponds to a price ratio of
+    (1+spacing)^-max_inv. At defaults (spacing=0.01, max_inv=10) this is ~9.47%,
+    slightly less than the naive linear estimate max_inv*spacing=10% (log-spacing
+    compounds a bit cheaper on the way down)."""
+    return (1 - (1 + spacing) ** -max_inv) * 100
+
+
 def find_no_volume_declines(closes, on_timeline, abs_pct=15.0, min_run_len=5):
-    """On-stretches whose worst peak-to-trough decline ranks in the top abs_pct%
-    of all on-stretch declines in this sample — a percentile-rank threshold on
-    absolute move size, same spirit as breakout_score.label_indices' abs_pct
-    (rank within the sample, not a fixed % or ATR-relative cutoff, per the
-    volume_gate_grid_2026-07-06 de-biasing lesson). min_run_len drops short
-    runs so the percentile pool isn't dominated by degenerate noise.
+    """On-stretches whose worst peak-to-trough PRICE decline ranks in the top
+    abs_pct% of all on-stretch declines in this sample — a percentile-rank
+    threshold on absolute move size, same spirit as breakout_score.label_indices'
+    abs_pct (rank within the sample, not a fixed % or ATR-relative cutoff, per the
+    volume_gate_grid_2026-07-06 de-biasing lesson). min_run_len drops short runs so
+    the percentile pool isn't dominated by degenerate noise.
+
+    This list's episode COUNT is tautological by construction (~abs_pct% of the
+    on-stretch count, always) — see gauge()'s separate ABS_DD_FRAC-based count for a
+    falsifiable alternative. This percentile list is still useful as "here are the
+    worst stretches in this sample" context, just not as evidence of frequency.
 
     Returns episodes sorted by decline_pct descending: [{start, end, decline_pct, bars}].
     """
-    runs = [(s, e) for s, e in on_runs(on_timeline) if e - s + 1 >= min_run_len]
+    runs = on_stretches(on_timeline, min_run_len)
     if not runs:
         return []
     declines = [(s, e, max_decline_in_run(closes, s, e)) for s, e in runs]
@@ -96,24 +202,56 @@ def gauge(symbol, interval, start_ms, end_ms, window=100, abs_pct=15.0, min_run_
 
     gated = run_grid(closes, score, exit_thresh, enter_thresh, cooldown, persistence,
                       spacing=spacing, fee=fee, max_inv=max_inv)
+    capital = max_inv * closes[0]           # same capital base run_grid uses
+    gated_maxdd = gated["maxdd"]            # fraction of capital (global running-peak dd)
+
+    all_runs = on_stretches(on, min_run_len)
+    stats_by_key = {}
+    for s, e in all_runs:
+        dd = episode_equity_dd(gated["equity_curve"], s, e, capital)
+        stats_by_key[(s, e)] = {
+            "equity_dd_pct": dd * 100,
+            "equity_dd_ratio": (dd / gated_maxdd) if gated_maxdd > 0 else float("nan"),
+            "pinned": episode_pinned(gated["pos_curve"], s, e, max_inv),
+        }
+    bound_pct = max_inv_bound_pct(spacing, max_inv)
+
     episodes = find_no_volume_declines(closes, on, abs_pct, min_run_len)
+    for ep in episodes:
+        ep.update(stats_by_key[(ep["start"], ep["end"])])
+        ep["bound_frac_pct"] = (ep["decline_pct"] / bound_pct * 100) if bound_pct > 0 else float("nan")
+
+    abs_count = sum(1 for st in stats_by_key.values()
+                     if not math.isnan(st["equity_dd_ratio"]) and st["equity_dd_ratio"] >= ABS_DD_FRAC)
+    pinned_count = sum(1 for st in stats_by_key.values() if st["pinned"])
 
     days = len(closes) * ih / 24
-    residual_dd = gated["maxdd"] * 100
-    worst_episode = episodes[0]["decline_pct"] if episodes else 0.0
+    residual_dd = gated_maxdd * 100
     print(f"# {symbol} {interval}  {len(closes)}根 ~{days:.0f}天  "
-          f"gated maxdd={residual_dd:.2f}%  on_frac={gated['on_frac']*100:.0f}%")
-    print(f"  no-volume decline episodes (top {abs_pct:.0f}% of on-stretch declines, "
-          f">= {min_run_len} bars): {len(episodes)}")
+          f"gated maxdd={residual_dd:.2f}%  on_frac={gated['on_frac']*100:.0f}%  "
+          f"on-stretches(>={min_run_len}b)={len(all_runs)}")
+    print(f"  percentile-ranked episodes (top {abs_pct:.0f}% of on-stretch PRICE declines, "
+          f">= {min_run_len} bars): {len(episodes)}  [count is tautological by construction, context only]")
+    print(f"  falsifiable count (equity-dd >= {ABS_DD_FRAC*100:.0f}% of gated maxdd, "
+          f"among all {len(all_runs)} on-stretches >= {min_run_len} bars): {abs_count}")
+    print(f"  max_inv inventory bound: ~{bound_pct:.2f}% price move needed to pin pos==max_inv "
+          f"(spacing={spacing*100:.1f}%, max_inv={max_inv}); "
+          f"{pinned_count}/{len(all_runs)} on-stretches actually pinned there")
     if episodes:
-        mags = sorted(e["decline_pct"] for e in episodes)
-        med = mags[len(mags) // 2]
-        print(f"  price-decline magnitude (upper bound on equity impact, see docstring): "
-              f"worst={worst_episode:.2f}%  median={med:.2f}%  vs strategy residual maxdd={residual_dd:.2f}%")
+        eq_ratios = [e["equity_dd_ratio"] for e in episodes if not math.isnan(e["equity_dd_ratio"])]
+        price_mags = [e["decline_pct"] for e in episodes]
+        print(f"  price-decline (market-move context, NOT comparable to equity maxdd — see docstring): "
+              f"worst={price_mags[0]:.2f}%  median={median(price_mags):.2f}%")
+        if eq_ratios:
+            print(f"  equity-dd ratio vs global gated maxdd (the real comparison, always <= 1.0x): "
+                  f"worst={max(eq_ratios):.3f}x  median={median(eq_ratios):.3f}x")
         for e in episodes[:5]:
-            print(f"    bars {e['start']}-{e['end']} ({e['bars']} bars): -{e['decline_pct']:.2f}%")
+            print(f"    bars {e['start']}-{e['end']} ({e['bars']} bars): price -{e['decline_pct']:.2f}% "
+                  f"(={e['bound_frac_pct']:.0f}% of max_inv bound, pinned={e['pinned']})  "
+                  f"equity-dd {e['equity_dd_pct']:.3f}% ({e['equity_dd_ratio']:.3f}x gated maxdd)")
     return {"symbol": symbol, "interval": interval, "residual_dd": residual_dd,
-            "episodes": episodes, "worst_episode": worst_episode}
+            "episodes": episodes, "abs_count": abs_count, "on_stretch_count": len(all_runs),
+            "pinned_count": pinned_count, "bound_pct": bound_pct}
 
 
 def main():
