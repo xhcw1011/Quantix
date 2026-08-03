@@ -5,10 +5,13 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	binance "github.com/adshao/go-binance/v2"
 	"github.com/adshao/go-binance/v2/common"
 	futures "github.com/adshao/go-binance/v2/futures"
+	"go.uber.org/zap"
 
 	"github.com/Quantix/quantix/internal/config"
 )
@@ -36,14 +39,40 @@ const (
 // the correct URL; the established socket keeps that endpoint for its lifetime.
 var binanceWSModeMu sync.Mutex
 
+// activeFuturesWSConnections counts currently-open futures WS connections
+// (kline, ticker, and user-data streams) across the whole process. Added
+// 2026-08-03 to diagnose a production reconnect storm: is the shared
+// binanceWSModeMu lock actually a bottleneck (lock_wait), are dials
+// themselves slow, or is the process simply holding more concurrent
+// connections than the network path can sustain (active_connections)? See
+// ServeBinanceFuturesWS's "binance futures ws dial" log line.
+var activeFuturesWSConnections atomic.Int64
+
+// ActiveBinanceFuturesWSConnections returns the current count of open futures
+// WS connections (read-only; for diagnostics/tests).
+func ActiveBinanceFuturesWSConnections() int64 {
+	return activeFuturesWSConnections.Load()
+}
+
 // ServeBinanceFuturesWS sets the Futures package network mode to (demo/testnet)
 // and dials a WS stream via connect() while holding a process-wide lock, so the
 // stream binds to the right endpoint even when live and demo engines run
 // concurrently. connect must perform the actual futures.Ws*Serve call and return
 // its (doneC, stopC, err) — the endpoint is captured inside that call.
-func ServeBinanceFuturesWS(demo, testnet bool, connect func() (chan struct{}, chan struct{}, error)) (chan struct{}, chan struct{}, error) {
+//
+// log receives one "binance futures ws dial" line per call recording lock_wait
+// (time spent waiting to acquire binanceWSModeMu) and dial (time inside connect,
+// i.e. the WS handshake) separately, plus the active_connections gauge — added
+// to distinguish "lock contention is slowing dials down" from "dials themselves
+// are slow" from "we just have more concurrent connections than this network
+// path can sustain" while investigating the 2026-08 reconnect storm. Pass
+// zap.NewNop() where diagnostic logging isn't needed (e.g. tests).
+func ServeBinanceFuturesWS(demo, testnet bool, log *zap.Logger, connect func() (chan struct{}, chan struct{}, error)) (chan struct{}, chan struct{}, error) {
+	waitStart := time.Now()
 	binanceWSModeMu.Lock()
 	defer binanceWSModeMu.Unlock()
+	lockWait := time.Since(waitStart)
+
 	if demo {
 		futures.UseTestnet = false
 		futures.UseDemo = true
@@ -54,7 +83,27 @@ func ServeBinanceFuturesWS(demo, testnet bool, connect func() (chan struct{}, ch
 		futures.UseTestnet = false
 		futures.UseDemo = false
 	}
-	return connect()
+
+	dialStart := time.Now()
+	doneC, stopC, err := connect()
+	dialDur := time.Since(dialStart)
+
+	if err == nil && doneC != nil {
+		activeFuturesWSConnections.Add(1)
+		go func() {
+			<-doneC
+			activeFuturesWSConnections.Add(-1)
+		}()
+	}
+
+	log.Info("binance futures ws dial",
+		zap.Duration("lock_wait", lockWait),
+		zap.Duration("dial", dialDur),
+		zap.Bool("demo", demo), zap.Bool("testnet", testnet),
+		zap.Int64("active_connections", activeFuturesWSConnections.Load()),
+		zap.Error(err))
+
+	return doneC, stopC, err
 }
 
 // BinanceFuturesRESTBaseURL returns the REST base URL for the given network mode,

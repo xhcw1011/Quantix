@@ -160,7 +160,7 @@ func (w *BinanceFuturesWSClient) openKlineStreams(ctx context.Context, symbols, 
 					zap.String("symbol", sym), zap.String("interval", itv), zap.Error(err))
 			}
 
-			doneC, stopC, err := ServeBinanceFuturesWS(w.demo, w.testnet, func() (chan struct{}, chan struct{}, error) {
+			doneC, stopC, err := ServeBinanceFuturesWS(w.demo, w.testnet, w.log, func() (chan struct{}, chan struct{}, error) {
 				return futures.WsKlineServe(sym, itv, wsHandler, errHandler)
 			})
 			if err != nil {
@@ -247,7 +247,7 @@ func (w *BinanceFuturesWSClient) openTickerStreams(ctx context.Context, symbols 
 			w.log.Error("futures ticker websocket error", zap.String("symbol", sym), zap.Error(err))
 		}
 
-		doneC, stopC, err := ServeBinanceFuturesWS(w.demo, w.testnet, func() (chan struct{}, chan struct{}, error) {
+		doneC, stopC, err := ServeBinanceFuturesWS(w.demo, w.testnet, w.log, func() (chan struct{}, chan struct{}, error) {
 			return futures.WsBookTickerServe(sym, wsHandler, errHandler)
 		})
 		if err != nil {

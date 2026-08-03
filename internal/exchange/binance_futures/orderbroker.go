@@ -709,7 +709,7 @@ func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill e
 		// Keepalive ticker: renew every 30 minutes
 		keepalive := time.NewTicker(30 * time.Minute)
 
-		doneC, stopC, err := exchange.ServeBinanceFuturesWS(b.demo, b.testnet, func() (chan struct{}, chan struct{}, error) {
+		doneC, stopC, err := exchange.ServeBinanceFuturesWS(b.demo, b.testnet, b.log, func() (chan struct{}, chan struct{}, error) {
 			return goBinance.WsUserDataServe(listenKey, func(event *goBinance.WsUserDataEvent) {
 				if event == nil {
 					return

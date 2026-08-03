@@ -4,10 +4,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	binance "github.com/adshao/go-binance/v2"
 	"github.com/adshao/go-binance/v2/common"
 	futures "github.com/adshao/go-binance/v2/futures"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/Quantix/quantix/internal/config"
 )
@@ -158,10 +162,12 @@ func TestServeBinanceFuturesWSSetsModeBeforeConnect(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var sawDemo, sawTestnet bool
-			_, _, err := ServeBinanceFuturesWS(tt.demo, tt.testnet, func() (chan struct{}, chan struct{}, error) {
+			doneC := make(chan struct{})
+			close(doneC)
+			_, _, err := ServeBinanceFuturesWS(tt.demo, tt.testnet, zap.NewNop(), func() (chan struct{}, chan struct{}, error) {
 				sawDemo = futures.UseDemo
 				sawTestnet = futures.UseTestnet
-				return nil, nil, nil
+				return doneC, nil, nil
 			})
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
@@ -172,6 +178,71 @@ func TestServeBinanceFuturesWSSetsModeBeforeConnect(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestServeBinanceFuturesWSLogsDialTiming proves ServeBinanceFuturesWS logs the
+// lock-wait duration, dial duration, and the current active-connection gauge on
+// every call — the diagnostic added to investigate the production WS reconnect
+// storm (is time being lost waiting for binanceWSModeMu, or in the dial itself?).
+func TestServeBinanceFuturesWSLogsDialTiming(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	log := zap.New(core)
+
+	doneC := make(chan struct{})
+	close(doneC) // already "closed" so the gauge decrements immediately, no leaked goroutine across tests
+
+	_, _, err := ServeBinanceFuturesWS(false, false, log, func() (chan struct{}, chan struct{}, error) {
+		return doneC, make(chan struct{}), nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	entries := logs.FilterMessage("binance futures ws dial").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 'binance futures ws dial' log entry, got %d", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	if _, ok := fields["lock_wait"]; !ok {
+		t.Errorf("expected a lock_wait field, got fields %v", fields)
+	}
+	if _, ok := fields["dial"]; !ok {
+		t.Errorf("expected a dial field, got fields %v", fields)
+	}
+	if _, ok := fields["active_connections"]; !ok {
+		t.Errorf("expected an active_connections field, got fields %v", fields)
+	}
+}
+
+// TestServeBinanceFuturesWSTracksActiveConnectionCount proves the gauge
+// increments on a successful connect and decrements once that connection's
+// doneC closes — this is what lets the diagnostic log line answer "how many
+// concurrent futures WS connections does this process actually have open."
+func TestServeBinanceFuturesWSTracksActiveConnectionCount(t *testing.T) {
+	before := ActiveBinanceFuturesWSConnections()
+
+	doneC := make(chan struct{})
+	_, _, err := ServeBinanceFuturesWS(false, false, zap.NewNop(), func() (chan struct{}, chan struct{}, error) {
+		return doneC, make(chan struct{}), nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	if got := ActiveBinanceFuturesWSConnections(); got != before+1 {
+		t.Fatalf("after connect: got %d active connections, want %d", got, before+1)
+	}
+
+	close(doneC) // simulate the stream ending
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if ActiveBinanceFuturesWSConnections() == before {
+			return // decremented as expected
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("active connection count did not decrement back to %d after doneC closed, still %d", before, ActiveBinanceFuturesWSConnections())
 }
 
 // TestServeBinanceSpotWSSetsModeBeforeConnect is the Spot counterpart.
