@@ -56,7 +56,7 @@ func (s *AIStrategy) openHedgeScalp(ctx *strategy.Context, side string, currentP
 	}
 
 	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
-	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit, stopLoss)
+	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit, stopLoss, false) // hedge-scalp: mode=modeRange, no broker stop
 	if omsID == "" {
 		return
 	}
@@ -173,7 +173,7 @@ func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, 
 	}
 
 	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
-	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit, stopLoss)
+	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit, stopLoss, false) // grid: mode=modeRange, no broker stop (rides the range by design)
 	if omsID == "" {
 		return
 	}
@@ -307,7 +307,7 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	}
 
 	useLimit := math.Abs(entryPrice-currentPrice) > 0.01
-	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit, stopLoss)
+	omsID := s.placeOrder(ctx, side, entryPrice, qty, useLimit, stopLoss, true) // trend: mode=modeTrend, broker-enforced stop is intended
 	if omsID == "" {
 		return
 	}
@@ -339,7 +339,25 @@ func (s *AIStrategy) openTrend(ctx *strategy.Context, side string, currentPrice,
 	}
 }
 
-func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty float64, useLimit bool, stopLoss float64) string {
+// placeOrder submits an entry order. enforceBrokerStop controls whether stopLoss
+// is registered as a broker/exchange-enforced protective stop (req.StopLoss,
+// which both the backtest SimBroker and the live exchange act on independently
+// of this strategy's own bar/tick-level checks) or only recorded for MFE/MAE-in-R
+// bookkeeping (req.Meta["entry_stop"]).
+//
+// Range/grid positions must pass false: openGrid's own management deliberately
+// has no SL ("rides the range" — see manageGrid/manageRange), but stopLoss is
+// still computed and needed as the R-basis for position sizing and for MFE/MAE.
+// Passing that same value into req.StopLoss would silently register a REAL
+// broker-enforced stop the strategy never intended, and because aistrat's OnFill
+// has no path to detect a close it didn't itself initiate, a broker-triggered
+// close desyncs the strategy's position state from the portfolio's — it keeps
+// managing (and later re-closing) a position that's already flat. Found via a
+// real backtest run: a SHORT grid position force-closed by the broker's stop
+// simulation on an intrabar High/Low touch the strategy's own close-price-based
+// checks never saw, while aistrat kept tracking it live for another 14 bars
+// until its own catastrophic-stop fired on stale state.
+func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty float64, useLimit bool, stopLoss float64, enforceBrokerStop bool) string {
 	psSide := strategy.PositionSideLong
 	orderSide := strategy.SideBuy
 	if side == "SHORT" {
@@ -348,16 +366,18 @@ func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty f
 	}
 	req := strategy.OrderRequest{
 		Symbol: s.cfg.Symbol, Side: orderSide, PositionSide: psSide, Qty: qty,
-		// entry protective stop → the backtest engine derives MFE/MAE in R multiples from it.
-		StopLoss: stopLoss,
 		// Entry-context snapshot for post-trade scenario attribution (regime × exit_reason).
 		// efficiency + its margin to TrendEfficiencyMin distinguish "clean range read" from
 		// "knife-edge regime call that a trend confirmed a few bars later" — see
-		// scripts/trade_diagnose.py's efficiency-margin bucketing.
+		// scripts/trade_diagnose.py's efficiency-margin bucketing. entry_stop is always
+		// recorded (for MFE/MAE-in-R) regardless of enforceBrokerStop.
 		Meta: map[string]float64{
-			"regime": regimeCode(s.lastRegime), "atr": s.calcATR(),
+			"regime": regimeCode(s.lastRegime), "atr": s.calcATR(), "entry_stop": stopLoss,
 			"efficiency": s.lastEfficiency, "efficiency_margin": s.cfg.TrendEfficiencyMin - s.lastEfficiency,
 		},
+	}
+	if enforceBrokerStop {
+		req.StopLoss = stopLoss
 	}
 	if useLimit {
 		req.Type = strategy.OrderLimit
