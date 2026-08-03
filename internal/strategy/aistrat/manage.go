@@ -291,7 +291,7 @@ func (s *AIStrategy) manageGrid(ctx *strategy.Context, bar exchange.Kline, p *po
 	if totalQty > p.initQty*2 { return }
 
 	// Use limit order for grid layers (maker fee, 60% cheaper than market)
-	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, true)
+	omsID := s.placeOrder(ctx, p.side, gridEntry, gridQty, true, p.stopLoss)
 	if omsID == "" { return }
 
 	g := &gridOrder{

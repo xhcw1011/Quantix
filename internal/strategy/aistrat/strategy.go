@@ -77,6 +77,7 @@ type AIStrategy struct {
 	cachedHourlyShort hourlyMode // cached 1h mode for SHORT positions
 	hourlyModeBars    int        // 15m bar count when cache was last updated
 	lastTrendDir    int       // +1 = bullish, -1 = bearish, 0 = neutral (from detectRegime)
+	lastEfficiency  float64   // |net move|/sum(|bar moves|) from detectRegime; margin to TrendEfficiencyMin distinguishes a clean-Range read from a knife-edge one
 	lastSLReplace   time.Time // throttle ReplaceSLOrder calls (max 1 per 3s)
 	// Signal accumulation: tracks rolling GPT confidence across bars
 	accumLong       float64   // accumulated long signal strength (decays each bar)

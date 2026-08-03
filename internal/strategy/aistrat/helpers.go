@@ -238,6 +238,7 @@ func (s *AIStrategy) detectRegime() Regime {
 	if totalMoves > 0 {
 		efficiency = math.Abs(priceChange) / totalMoves
 	}
+	s.lastEfficiency = efficiency
 	if efficiency < s.cfg.TrendEfficiencyMin {
 		return RegimeRange
 	}
