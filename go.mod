@@ -3,7 +3,7 @@ module github.com/Quantix/quantix
 go 1.24.5
 
 require (
-	github.com/adshao/go-binance/v2 v2.8.10
+	github.com/adshao/go-binance/v2 v2.8.12
 	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/google/uuid v1.6.0
