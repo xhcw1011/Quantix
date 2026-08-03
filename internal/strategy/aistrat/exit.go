@@ -192,7 +192,7 @@ func (s *AIStrategy) closePos(ctx *strategy.Context, p *posState, pptr **posStat
 	if reason == "grid_tp" {
 		useMarket = false
 	}
-	if !s.placeCloseOrder(ctx, p.side, qty, useMarket) {
+	if !s.placeCloseOrder(ctx, p.side, qty, useMarket, reason) {
 		// Close order FAILED. Check syncer: if exchange has no position,
 		// the position was already closed (manual, liquidation, TP fill, etc.) — safe to clear state.
 		if s.syncer != nil && !s.syncer.HasPosition(p.side) {
