@@ -211,6 +211,22 @@ func (s *AIStrategy) detectRegime() Regime {
 	if priceChange < -atr*0.5 { trendDir = -1 }  // bearish
 	s.lastTrendDir = trendDir
 
+	// ── Efficiency ratio = |net move| / sum(|bar moves|) ──
+	// Low efficiency = choppy market (big moves cancel out). Computed unconditionally
+	// (and before the Expansion early-return below) so s.lastEfficiency is always
+	// fresh for this bar's Meta snapshot, regardless of which regime actually gets
+	// returned — an Expansion or early-Range read must not leave a stale value from
+	// whatever earlier bar last reached this line.
+	totalMoves := 0.0
+	for i := 1; i < len(recentBars); i++ {
+		totalMoves += math.Abs(recentBars[i].Close - recentBars[i-1].Close)
+	}
+	efficiency := 0.0
+	if totalMoves > 0 {
+		efficiency = math.Abs(priceChange) / totalMoves
+	}
+	s.lastEfficiency = efficiency
+
 	// ── 1. Expansion check (breakout bar + confirmation + trend alignment) ──
 	barRange := lastBar.High - lastBar.Low
 	body := math.Abs(lastBar.Close - lastBar.Open)
@@ -228,17 +244,7 @@ func (s *AIStrategy) detectRegime() Regime {
 		return RegimeExpansion
 	}
 
-	// ── 2. Efficiency ratio = |net move| / sum(|bar moves|) ──
-	// Low efficiency = choppy market (big moves cancel out). Force RANGE.
-	totalMoves := 0.0
-	for i := 1; i < len(recentBars); i++ {
-		totalMoves += math.Abs(recentBars[i].Close - recentBars[i-1].Close)
-	}
-	efficiency := 0.0
-	if totalMoves > 0 {
-		efficiency = math.Abs(priceChange) / totalMoves
-	}
-	s.lastEfficiency = efficiency
+	// ── 2. Force RANGE when efficiency is low ──
 	if efficiency < s.cfg.TrendEfficiencyMin {
 		return RegimeRange
 	}
