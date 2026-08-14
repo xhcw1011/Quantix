@@ -44,6 +44,19 @@ func (e *Engine) persistOrdersLoop(ctx context.Context) {
 	}
 }
 
+// persistOrderEvent upserts one order snapshot into the DB. Deliberately
+// SYNCHRONOUS (unlike persistEquitySnapshot/processFills' fire-and-forget
+// goroutines below): UpsertOrder is keyed by client_order_id, so multiple
+// events for the SAME order (e.g. "NEW" right after submit, then "FILLED"
+// moments later once the exchange fill confirms) upsert the SAME row. Firing
+// each as an independent, unordered goroutine let a later-queued-but-
+// faster-executing "NEW" write race past and clobber an already-persisted
+// "FILLED" write — the order ends up stuck showing status=OPEN/filled_qty=0
+// in the DB forever despite having actually filled (confirmed via the fills
+// table and OMS logs; 2026-08-13 finding). persistOrdersLoop already
+// processes events for this engine one at a time from a channel, so making
+// this call synchronous is enough to guarantee correct per-order ordering —
+// no per-order locking needed.
 func (e *Engine) persistOrderEvent(event oms.OrderEvent) {
 	if e.cfg.Store == nil {
 		return
@@ -71,18 +84,14 @@ func (e *Engine) persistOrderEvent(event oms.OrderEvent) {
 		Mode:           "live",
 		CreatedAt:      ord.CreatedAt,
 	}
-	e.dbWg.Add(1)
-	go func(r *data.OrderRecord) {
-		defer e.dbWg.Done()
-		dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := e.cfg.Store.UpsertOrder(dbCtx, r); err != nil {
-			e.log.Error("persist order failed",
-				zap.String("client_order_id", r.ClientOrderID),
-				zap.String("status", r.Status),
-				zap.Error(err))
-		}
-	}(rec)
+	dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := e.cfg.Store.UpsertOrder(dbCtx, rec); err != nil {
+		e.log.Error("persist order failed",
+			zap.String("client_order_id", rec.ClientOrderID),
+			zap.String("status", rec.Status),
+			zap.Error(err))
+	}
 }
 
 func (e *Engine) persistEquitySnapshot() {
@@ -163,8 +172,8 @@ func (e *Engine) Summary() string {
 		ret = (equity/e.cfg.InitialCapital - 1) * 100
 	}
 	return fmt.Sprintf(
-		"Live Trading Summary | Strategy: %s | Balance: $%.2f (%.2f%%) | "+
-			"Realized PnL: $%.2f | Duration: %s",
+		"实盘交易汇总 | 策略：%s | 余额：$%.2f（%.2f%%）| "+
+			"已实现盈亏：$%.2f | 运行时长：%s",
 		e.strategy.Name(),
 		equity, ret,
 		rpnl,

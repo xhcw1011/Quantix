@@ -227,6 +227,45 @@ func TestOMS_ConcurrentSubmit(t *testing.T) {
 	assert.Len(t, o.OpenOrders(), n)
 }
 
+// TestOMS_FindPending_PositionSideAware reproduces the 2026-08-12 finding: a
+// macross hedge-mode direction flip (golden cross while SHORT) needs to close
+// the SHORT (BUY, PositionSide=SHORT) and — same bar — open a LONG (BUY,
+// PositionSide=LONG). Both share Symbol+Side, so a PositionSide-blind
+// FindPending falsely treats the still-pending close as a "duplicate" of the
+// open and silently drops it — the engine gets stuck flat forever after its
+// first flip. FindPending must only match orders on the SAME leg.
+func TestOMS_FindPending_PositionSideAware(t *testing.T) {
+	o := newTestOMS()
+	closeShort := strategy.OrderRequest{Symbol: "BTCUSDT", Side: strategy.SideBuy, PositionSide: strategy.PositionSideShort, Type: strategy.OrderMarket, Qty: 1}
+	ord, err := o.Submit(closeShort, "test")
+	require.NoError(t, err)
+	require.NoError(t, o.Accept(ord.ID))
+
+	// A pending close-SHORT (BUY+SHORT) must not block a fresh open-LONG
+	// (BUY+LONG) — different leg, not a duplicate.
+	got := o.FindPending("BTCUSDT", strategy.SideBuy, strategy.PositionSideLong)
+	assert.Nil(t, got, "BUY+LONG must not match a pending BUY+SHORT order")
+
+	// But it must still correctly find a genuine duplicate on the SAME leg.
+	got = o.FindPending("BTCUSDT", strategy.SideBuy, strategy.PositionSideShort)
+	require.NotNil(t, got)
+	assert.Equal(t, ord.ID, got.ID)
+}
+
+// TestOMS_FindPending_OneWayModeUnaffected preserves existing one-way/spot
+// behavior (no PositionSide, "" on both sides) — a genuine duplicate on the
+// same symbol+side must still be found.
+func TestOMS_FindPending_OneWayModeUnaffected(t *testing.T) {
+	o := newTestOMS()
+	ord, err := o.Submit(buyReq("BTCUSDT"), "test")
+	require.NoError(t, err)
+	require.NoError(t, o.Accept(ord.ID))
+
+	got := o.FindPending("BTCUSDT", strategy.SideBuy, strategy.PositionSideNet)
+	require.NotNil(t, got)
+	assert.Equal(t, ord.ID, got.ID)
+}
+
 func TestOMS_PruneTerminal(t *testing.T) {
 	log, _ := zap.NewDevelopment()
 	o := New(ModePaper, log)

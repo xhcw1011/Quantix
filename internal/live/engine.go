@@ -112,6 +112,10 @@ type Engine struct {
 
 	// Position syncer (Redis-backed, exchange is source of truth)
 	posSyncer *position.Syncer // nil if not configured
+
+	// divergenceAlerted avoids repeated CRITICAL alerts once posSyncer and the
+	// OMS's fill-derived position have already been flagged as disagreeing.
+	divergenceAlerted bool
 }
 
 const (
@@ -347,7 +351,7 @@ func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, f
 	if err != nil {
 		return 0, 0, fmt.Errorf("place close order: %w", err)
 	}
-	e.log.Info("API close-position executed",
+	e.log.Info("手动平仓已执行",
 		zap.String("symbol", symbol),
 		zap.String("side", side),
 		zap.Float64("qty", closeQty),

@@ -84,7 +84,7 @@ func TestOnFillPersistsToRedis(t *testing.T) {
 
 	s.OnFill(nil, strategy.Fill{Symbol: "ETHUSDT", Side: strategy.SideBuy, Qty: 0.5})
 
-	got, err := rdb.Get(context.Background(), "quantix:composite:test-engine:state").Result()
+	got, err := rdb.Get(context.Background(), "quantix:composite:0:test-engine:state").Result()
 	if err != nil {
 		t.Fatalf("redis get: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestRecoverStateFromRedis(t *testing.T) {
 	// Pre-populate Redis with prior state (simulates surviving restart).
 	st := compositeState{PosQty: -0.7, UpdatedAt: time.Now()}
 	b, _ := json.Marshal(st)
-	rdb.Set(context.Background(), "quantix:composite:test-engine:state", b, 0)
+	rdb.Set(context.Background(), "quantix:composite:0:test-engine:state", b, 0)
 
 	a := &fakeAlpha{out: alpha.Signal{Direction: alpha.DirShort, Strength: 0.9}}
 	s := New([]Alpha{a}, Config{Symbol: "ETHUSDT"})
@@ -184,6 +184,43 @@ func TestRecoverStateNoOpWithoutRedis(t *testing.T) {
 
 	if s.posQty != 0 {
 		t.Fatalf("posQty leaked: %f", s.posQty)
+	}
+}
+
+// TestStateKey_IsolatedPerUser reproduces the 2026-08-06 finding: stateKey()
+// was built only from engineID ("SYMBOL-INTERVAL-composite"), which is only
+// unique WITHIN one user's engines -- two different users running composite
+// on the same symbol+interval share the identical engineID string, so one
+// user's restart could load the OTHER user's posQty and get the
+// position-aware entry gating (and sizing) completely wrong. Same root cause
+// as the guardian_state incident (migration 015) and the experiments table
+// bug (migration 016).
+func TestStateKey_IsolatedPerUser(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	const engineID = "ETHUSDT-1h-composite" // deliberately identical for both users
+	const userA, userB = 90005, 90006
+
+	sA := New([]Alpha{&fakeAlpha{}}, Config{Symbol: "ETHUSDT"})
+	sA.userID, sA.engineID, sA.rdb = userA, engineID, rdb
+	sA.OnFill(nil, strategy.Fill{Symbol: "ETHUSDT", Side: strategy.SideBuy, Qty: 1})
+
+	sB := New([]Alpha{&fakeAlpha{}}, Config{Symbol: "ETHUSDT"})
+	sB.userID, sB.engineID, sB.rdb = userB, engineID, rdb
+	sB.OnFill(nil, strategy.Fill{Symbol: "ETHUSDT", Side: strategy.SideSell, Qty: 2})
+
+	// Simulate userA's engine restarting and recovering from Redis.
+	restoredA := New([]Alpha{&fakeAlpha{}}, Config{Symbol: "ETHUSDT"})
+	ctxA := strategy.NewContext(&fakePortfolio{cash: 10000}, &fakeBroker{}, zap.NewNop())
+	ctxA.Extra["redis_client"] = rdb
+	ctxA.Extra["user_id"] = userA
+	ctxA.Extra["engine_id"] = engineID
+	restoredA.OnBar(ctxA, makeBars(1, 2300)[0])
+
+	if restoredA.posQty != 1 {
+		t.Fatalf("userA's posQty contaminated by userB's state: got %f, want 1", restoredA.posQty)
 	}
 }
 

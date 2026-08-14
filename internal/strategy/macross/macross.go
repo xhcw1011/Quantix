@@ -22,6 +22,7 @@ import (
 
 	"github.com/Quantix/quantix/internal/exchange"
 	"github.com/Quantix/quantix/internal/indicator"
+	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/strategy"
 	"github.com/Quantix/quantix/internal/strategy/registry"
 )
@@ -45,6 +46,69 @@ type Config struct {
 	// counts, filtering marginal "touch" crosses that whipsaw in chop (e.g. the
 	// 2026-07-05 fast/slow 0.0009% touch). 0 = raw cross. Default 0.0015 (0.15%).
 	CrossBufferPct float64
+
+	// AsymmetricExit changes hedge-mode exit behavior (EnableShort only). Default
+	// (false): a reverse cross always closes the current position and flips,
+	// regardless of whether it's winning or losing.
+	//
+	// When true: a reverse cross only closes the position if it's currently
+	// PROFITABLE (take-profit-on-reversal). While underwater, the position is
+	// held instead of being flipped into a fresh loss on every whipsaw, and is
+	// managed instead by ReduceTriggerPct/ReduceConfirmBars/ReduceFrac (a
+	// one-time partial de-risk once the adverse move is confirmed) with
+	// StopLossPct remaining the final backstop. TrailActivatePct/
+	// TrailGivebackFrac additionally protects large winners from round-tripping
+	// while waiting for the (laggy) SMA reverse cross to confirm.
+	//
+	// Backtest-validated across ETH (21 months, 2 real bear legs) and BTC (a
+	// real -53% decline plus a calm control period): consistently and
+	// substantially better than flip-on-every-cross on both assets and both
+	// regimes tested. See docs/research/ for the investigation.
+	AsymmetricExit bool
+
+	// MinProfitToClosePct gates the "only close if profitable" half of
+	// AsymmetricExit: a reverse cross only closes the current position if its
+	// floating profit exceeds this fraction of entry, not merely > 0. A close
+	// that's nominally profitable at the signal bar's close can still land a
+	// net loss once round-trip taker fees and the gap to the actual fill price
+	// are accounted for (2026-08-07 incident: 0.0224% floating profit at the
+	// signal bar → -$1.12 realized after a 0.04%-per-side fee). Only used when
+	// AsymmetricExit is true.
+	MinProfitToClosePct float64
+
+	// ReduceTriggerPct/ReduceConfirmBars/ReduceFrac: only used when
+	// AsymmetricExit is true. A confirmed adverse move — floating loss >=
+	// ReduceTriggerPct sustained for ReduceConfirmBars consecutive bars —
+	// triggers a ONE-TIME partial reduce of ReduceFrac of the position.
+	ReduceTriggerPct  float64
+	ReduceConfirmBars int
+	ReduceFrac        float64
+
+	// TrailActivatePct/TrailGivebackFrac: only used when AsymmetricExit is true.
+	// Once a position's floating profit reaches TrailActivatePct, its peak is
+	// tracked; if profit retraces by TrailGivebackFrac of that peak, the
+	// position is closed in full. TrailActivatePct <= 0 disables this (small/
+	// medium winners are never touched — only large ones that have already run
+	// well past typical trade size get this protection).
+	TrailActivatePct  float64
+	TrailGivebackFrac float64
+
+	// EntryOrderType selects how new entries are placed: "" or "market"
+	// (default) submits immediately at market; "limit" rests a maker-favoured
+	// limit order first (see EntryLimitOffsetPct/EntryTimeoutBars) and falls
+	// back to market if it doesn't fill in time. Exits/closes always stay
+	// market regardless of this setting — a position that needs to come off
+	// should come off decisively, not wait on a limit that may never fill.
+	EntryOrderType string
+	// EntryLimitOffsetPct is the fraction below (long) / above (short) the
+	// signal bar's close that the limit entry is placed at — the further the
+	// offset, the more likely it rests as a maker fill, but the less likely it
+	// fills at all. Only used when EntryOrderType == "limit".
+	EntryLimitOffsetPct float64
+	// EntryTimeoutBars is how many bars a limit entry is given to fill before
+	// it's cancelled and replaced with a market order. Only used when
+	// EntryOrderType == "limit".
+	EntryTimeoutBars int
 }
 
 // MACross is a dual-SMA crossover strategy with optional short-selling support.
@@ -57,6 +121,16 @@ type MACross struct {
 	hasLong  bool
 	hasShort bool
 
+	// AsymmetricExit position state. hasLong and hasShort are mutually exclusive
+	// in hedge mode (a reverse cross always closes the opposite side, whether
+	// immediately or via the asymmetric-exit path), so a single set of fields
+	// covers whichever side is currently open — no need to duplicate per side.
+	posEntry      float64 // entry price of the currently open leg
+	posQty        float64 // remaining qty of the currently open leg
+	posReduced    bool    // the one-time confirmed-loss reduce has already fired
+	posLossStreak int     // consecutive bars with floating loss >= ReduceTriggerPct
+	posPeakFP     float64 // peak floating-profit fraction seen this leg (for trailing)
+
 	// Warmup priming: sawWarmup records that a backfill replay happened; primed
 	// records that we've established the initial position from trend state on the
 	// first live bar afterwards (see primeDirection).
@@ -68,13 +142,26 @@ type MACross struct {
 	// to flat and priming re-opens a position the account already holds — the
 	// "re-orders on every deploy" bug. See reconcilePosition.
 	reconciled bool
+
+	// pending tracks a resting limit entry order awaiting a fill (EntryOrderType
+	// == "limit" only). One slot is enough — only one entry can ever be in
+	// flight at a time (long-only and hedge mode both open at most one leg per
+	// signal). See checkPendingEntry.
+	pending strategy.PendingEntry
+
+	// restart recovery for pending limit entries (optional; nil in backtest/paper).
+	store        StateStore
+	restoreTried bool // guards the one-shot restart cleanup below (once per process)
 }
 
-// positionReporter reports whether a live position exists on a side. The live
-// engine's position.Syncer satisfies it and is injected via
-// ctx.Extra["position_syncer"]; absent in backtests (nil → no reconciliation).
+// positionReporter reports whether a live position exists on a side, and its
+// cost basis. The live engine's position.Syncer satisfies it and is injected
+// via ctx.Extra["position_syncer"]; absent in backtests (nil → no
+// reconciliation).
 type positionReporter interface {
 	HasPosition(side string) bool
+	GetLong() *position.StrategyPosition
+	GetShort() *position.StrategyPosition
 }
 
 // reconcilePosition seeds hedge-mode hasLong/hasShort from the real account
@@ -92,10 +179,24 @@ func (m *MACross) reconcilePosition(ctx *strategy.Context) {
 	}
 	if pr.HasPosition(string(strategy.PositionSideLong)) {
 		m.hasLong = true
+		if p := pr.GetLong(); p != nil {
+			m.posEntry = p.EntryPrice
+			m.posQty = p.Qty
+		}
 	}
 	if pr.HasPosition(string(strategy.PositionSideShort)) {
 		m.hasShort = true
+		if p := pr.GetShort(); p != nil {
+			m.posEntry = p.EntryPrice
+			m.posQty = p.Qty
+		}
 	}
+	// posReduced/posLossStreak/posPeakFP intentionally stay at their zero
+	// value here: the syncer doesn't carry these strategy-internal fields, and
+	// forgetting them is safe-direction (worst case: one extra confirmed-loss
+	// reduce on an already-reduced leg, or a trailing exit that re-earns its
+	// peak from the current price instead of a pre-restart high) rather than
+	// unsafe-direction like the posEntry==0 bug this restores.
 }
 
 // New creates a new MACross strategy with the given configuration.
@@ -114,6 +215,10 @@ func (m *MACross) Name() string {
 // OnBar implements strategy.Strategy.
 func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Symbol != m.cfg.Symbol {
+		return
+	}
+	m.restoreState(ctx)
+	if m.checkPendingEntry(ctx, bar) {
 		return
 	}
 	if bar.Warmup {
@@ -145,7 +250,7 @@ func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			// a one-off low-ER bar would leave us flat through a whole trend.
 			if m.trendOK() {
 				m.primed = true
-				ctx.Log.Info("macross: priming position from trend state after warmup",
+				ctx.Log.Info("macross：预热结束后按趋势方向建仓",
 					zap.String("symbol", bar.Symbol), zap.Int("dir", dir),
 					zap.Float64("fast", indicator.Last(fast)), zap.Float64("slow", indicator.Last(slow)))
 				if dir > 0 {
@@ -163,6 +268,120 @@ func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	} else {
 		m.onBarSimple(ctx, bar, fast, slow)
 	}
+}
+
+// checkPendingEntry advances a resting limit entry (if any) and reports
+// whether this bar was consumed by it — the caller should return immediately
+// in that case rather than also evaluating a fresh cross signal, so a limit
+// order that hasn't resolved yet never gets a second entry stacked on top of
+// it. Once the position appears (pendingFilled) the pending entry clears and
+// this bar stays quiet; the next bar resumes normal signal evaluation. If the
+// bar-count budget (EntryTimeoutBars) runs out first, the stale limit is
+// cancelled and replaced with its market fallback.
+func (m *MACross) checkPendingEntry(ctx *strategy.Context, bar exchange.Kline) bool {
+	if !m.pending.Active() {
+		return false
+	}
+	if m.pendingFilled(ctx) {
+		m.pending.Clear()
+		m.clearState()
+		return true
+	}
+	if m.pending.Timeout(m.cfg.EntryTimeoutBars) {
+		_ = ctx.CancelOrder(m.pending.OrderID)
+		ctx.PlaceOrder(m.pending.Fallback)
+		ctx.Log.Info("限价开仓超时，改市价单成交",
+			zap.String("symbol", bar.Symbol), zap.Int("bars_waited", m.pending.Bars))
+		m.pending.Clear()
+		m.clearState()
+	}
+	return true
+}
+
+// pendingFilled reports whether the position the pending entry was opening
+// has appeared. The two modes track position differently (see the OnFill /
+// onBarSimple doc comments), so this can't be unified further than a branch.
+func (m *MACross) pendingFilled(ctx *strategy.Context) bool {
+	if m.cfg.EnableShort {
+		return m.hasLong || m.hasShort
+	}
+	_, _, has := ctx.Portfolio.Position(m.cfg.Symbol)
+	return has
+}
+
+// placeEntry submits req as-is when EntryOrderType isn't "limit" (unchanged
+// market-order behaviour). Otherwise it rewrites req into a maker-favoured
+// resting limit at closePrice ± EntryLimitOffsetPct and tracks it as a
+// pending entry with fallback as the market order to fall back to; an instant
+// reject (id == "", e.g. a MakerOnly order that would have crossed the book)
+// falls back to market immediately instead of waiting out the timeout.
+func (m *MACross) placeEntry(ctx *strategy.Context, fallback strategy.OrderRequest, closePrice float64) {
+	if m.cfg.EntryOrderType != "limit" {
+		ctx.PlaceOrder(fallback)
+		return
+	}
+	offset := closePrice * m.cfg.EntryLimitOffsetPct
+	price := closePrice - offset // favourable for a buy (long entry)
+	if fallback.Side == strategy.SideSell {
+		price = closePrice + offset // favourable for a sell (short entry)
+	}
+	req := fallback
+	req.Type = strategy.OrderLimit
+	req.Price = price
+	req.MakerOnly = true
+	id := ctx.PlaceOrder(req)
+	if id == "" {
+		ctx.PlaceOrder(fallback) // instantly rejected — don't wait out the timeout
+		return
+	}
+	m.pending = strategy.PendingEntry{OrderID: id, Fallback: fallback}
+	m.saveState()
+}
+
+// saveState persists the pending entry's order ID (best-effort) so a restart
+// can at least clean it up. No-op without a wired StateStore.
+func (m *MACross) saveState() {
+	if m.store == nil {
+		return
+	}
+	_ = m.store.Save(PendingEntryState{OrderID: m.pending.OrderID})
+}
+
+// clearState removes the persisted pending-entry record. Must be called
+// whenever m.pending clears (filled or timed out) — otherwise a stale
+// OrderID lingers and a later restart would try to cancel an order that
+// isn't pending anymore (harmless — CancelOrder on an already-resolved order
+// just errors and is ignored — but noisy and misleading in logs).
+func (m *MACross) clearState() {
+	if m.store == nil {
+		return
+	}
+	_ = m.store.Clear()
+}
+
+// SetStateStore wires restart-recovery persistence for pending limit entries.
+// The live engine calls this after construction; backtest/paper leave it nil.
+func (m *MACross) SetStateStore(store StateStore) { m.store = store }
+
+// restoreState runs once per process, at the very first bar. If a pending
+// limit entry was left resting when the process last stopped, macross has no
+// safe way to resume tracking it (unlike guardian, it can't distinguish "this
+// order is still exactly what I'd place today" from "conditions changed") —
+// so it just cancels the stale order and starts clean rather than leaving an
+// orphaned resting order the strategy no longer tracks.
+func (m *MACross) restoreState(ctx *strategy.Context) {
+	if m.restoreTried || m.store == nil {
+		return
+	}
+	m.restoreTried = true
+	st, ok := m.store.Load()
+	if !ok || st.OrderID == "" {
+		return
+	}
+	_ = ctx.CancelOrder(st.OrderID)
+	m.clearState()
+	ctx.Log.Info("macross：重启后清理了一笔未成交的限价开仓单",
+		zap.String("symbol", m.cfg.Symbol), zap.String("order_id", st.OrderID))
 }
 
 // efficiencyRatio returns Kaufman's Efficiency Ratio over the last n closes:
@@ -205,7 +424,7 @@ func (m *MACross) onBarSimple(ctx *strategy.Context, bar exchange.Kline, fast, s
 	switch crossDir(fast, slow, m.cfg.CrossBufferPct) {
 	case 1:
 		if !hasPosition && m.trendOK() {
-			ctx.Log.Info("golden cross — BUY",
+			ctx.Log.Info("金叉——买入",
 				zap.String("symbol", bar.Symbol),
 				zap.Float64("fast", indicator.Last(fast)),
 				zap.Float64("slow", indicator.Last(slow)),
@@ -223,12 +442,12 @@ func (m *MACross) onBarSimple(ctx *strategy.Context, bar exchange.Kline, fast, s
 			if m.cfg.TakeProfitPct > 0 {
 				req.TakeProfit = bar.Close * (1 + m.cfg.TakeProfitPct)
 			}
-			ctx.PlaceOrder(req)
+			m.placeEntry(ctx, req, bar.Close)
 		}
 
 	case -1:
 		if hasPosition {
-			ctx.Log.Info("death cross — SELL",
+			ctx.Log.Info("死叉——卖出",
 				zap.String("symbol", bar.Symbol),
 				zap.Float64("fast", indicator.Last(fast)),
 				zap.Float64("slow", indicator.Last(slow)),
@@ -246,36 +465,125 @@ func (m *MACross) onBarSimple(ctx *strategy.Context, bar exchange.Kline, fast, s
 
 // onBarHedge handles the hedge mode (simultaneous LONG/SHORT for futures/swap).
 func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, slow []float64) {
+	if m.cfg.AsymmetricExit && (m.hasLong || m.hasShort) {
+		m.manageAsymmetricExit(ctx, bar)
+	}
+
+	// Track, for THIS bar's cross decision, whether a close order was just
+	// queued above/below — fills are applied asynchronously (OnFill runs after
+	// the broker processes this bar), so m.hasLong/m.hasShort won't reflect a
+	// same-bar close yet. Using local flags instead of re-reading the (stale)
+	// struct fields lets close-then-open fire correctly within one bar.
+	stillShort := m.hasShort
+	stillLong := m.hasLong
+
 	switch crossDir(fast, slow, m.cfg.CrossBufferPct) {
 	case 1:
-		// Golden cross: close short (if open), then open long
-		ctx.Log.Info("golden cross — close SHORT, open LONG",
+		// Golden cross: close short (if open and, under AsymmetricExit, only if
+		// profitable), then open long.
+		ctx.Log.Info("金叉——平空开多",
 			zap.String("symbol", bar.Symbol),
 			zap.Float64("fast", indicator.Last(fast)),
 			zap.Float64("slow", indicator.Last(slow)),
 			zap.Float64("close", bar.Close),
 		)
-		if m.hasShort {
+		if m.hasShort && (!m.cfg.AsymmetricExit || m.profitableEnoughToClose(bar.Close)) {
 			ctx.PlaceOrder(strategy.CloseShort(bar.Symbol, 0))
+			stillShort = false
 		}
-		if !m.hasLong && m.trendOK() {
+		if !m.hasLong && !stillShort && m.trendOK() {
 			m.openLong(ctx, bar)
 		}
 
 	case -1:
-		// Death cross: close long (if open), then open short
-		ctx.Log.Info("death cross — close LONG, open SHORT",
+		// Death cross: close long (if open and, under AsymmetricExit, only if
+		// profitable), then open short.
+		ctx.Log.Info("死叉——平多开空",
 			zap.String("symbol", bar.Symbol),
 			zap.Float64("fast", indicator.Last(fast)),
 			zap.Float64("slow", indicator.Last(slow)),
 			zap.Float64("close", bar.Close),
 		)
-		if m.hasLong {
+		if m.hasLong && (!m.cfg.AsymmetricExit || m.profitableEnoughToClose(bar.Close)) {
 			ctx.PlaceOrder(strategy.CloseLong(bar.Symbol, 0))
+			stillLong = false
 		}
-		if !m.hasShort && m.trendOK() {
+		if !m.hasShort && !stillLong && m.trendOK() {
 			m.openShort(ctx, bar)
 		}
+	}
+}
+
+// floatingPnLPct returns the currently open leg's unrealized P&L as a fraction
+// of its entry price (positive = profit). Returns 0 when flat.
+func (m *MACross) floatingPnLPct(price float64) float64 {
+	if m.posEntry == 0 {
+		return 0
+	}
+	switch {
+	case m.hasLong:
+		return (price - m.posEntry) / m.posEntry
+	case m.hasShort:
+		return (m.posEntry - price) / m.posEntry
+	default:
+		return 0
+	}
+}
+
+// profitableEnoughToClose reports whether the currently open leg's floating
+// profit clears MinProfitToClosePct — the gate AsymmetricExit uses to decide
+// whether a reverse cross closes (take-profit-on-reversal) or holds. Requires
+// strictly more than fees, not merely a nominal profit — see MinProfitToClosePct.
+func (m *MACross) profitableEnoughToClose(price float64) bool {
+	return m.floatingPnLPct(price) > m.cfg.MinProfitToClosePct
+}
+
+// manageAsymmetricExit runs the confirmed-loss reduce and large-winner trailing
+// exit for the currently open leg. Only called when AsymmetricExit is on and a
+// position is open. The hard StopLossPct backstop is unaffected — it's placed
+// as an exchange-native protective order at entry time and fires independently.
+func (m *MACross) manageAsymmetricExit(ctx *strategy.Context, bar exchange.Kline) {
+	fp := m.floatingPnLPct(bar.Close)
+
+	m.posLossStreak = updateLossStreak(m.posLossStreak, fp, m.cfg.ReduceTriggerPct)
+	if m.cfg.ReduceTriggerPct > 0 && shouldReduce(m.posLossStreak, m.cfg.ReduceConfirmBars, m.posReduced) {
+		m.reducePosition(ctx, bar, m.cfg.ReduceFrac)
+		m.posReduced = true
+		m.posLossStreak = 0
+	}
+
+	if m.cfg.TrailActivatePct > 0 {
+		if fp > m.posPeakFP {
+			m.posPeakFP = fp
+		}
+		if shouldTrailClose(m.posPeakFP, fp, m.cfg.TrailActivatePct, m.cfg.TrailGivebackFrac) {
+			if m.hasLong {
+				ctx.PlaceOrder(strategy.CloseLong(bar.Symbol, 0))
+			} else if m.hasShort {
+				ctx.PlaceOrder(strategy.CloseShort(bar.Symbol, 0))
+			}
+		}
+	}
+}
+
+// reducePosition partially closes the currently open leg by frac (e.g. 0.5 =
+// half). No-op if the leg's qty isn't known yet (shouldn't happen in practice —
+// OnFill always sets it on open — but guards against div-by-zero-style orders).
+func (m *MACross) reducePosition(ctx *strategy.Context, bar exchange.Kline, frac float64) {
+	if m.posQty <= 0 {
+		return
+	}
+	qty := m.posQty * frac
+	if m.hasLong {
+		ctx.PlaceOrder(strategy.OrderRequest{
+			Symbol: bar.Symbol, Side: strategy.SideSell, PositionSide: strategy.PositionSideLong,
+			Type: strategy.OrderMarket, Qty: qty, Reason: "asymmetric_reduce",
+		})
+	} else if m.hasShort {
+		ctx.PlaceOrder(strategy.OrderRequest{
+			Symbol: bar.Symbol, Side: strategy.SideBuy, PositionSide: strategy.PositionSideShort,
+			Type: strategy.OrderMarket, Qty: qty, Reason: "asymmetric_reduce",
+		})
 	}
 }
 
@@ -288,7 +596,7 @@ func (m *MACross) openLong(ctx *strategy.Context, bar exchange.Kline) {
 	if m.cfg.TakeProfitPct > 0 {
 		req.TakeProfit = bar.Close * (1 + m.cfg.TakeProfitPct)
 	}
-	ctx.PlaceOrder(req)
+	m.placeEntry(ctx, req, bar.Close)
 }
 
 // openShort places a hedge-mode short entry with optional stop-loss / take-profit.
@@ -300,7 +608,18 @@ func (m *MACross) openShort(ctx *strategy.Context, bar exchange.Kline) {
 	if m.cfg.TakeProfitPct > 0 {
 		req.TakeProfit = bar.Close * (1 - m.cfg.TakeProfitPct)
 	}
-	ctx.PlaceOrder(req)
+	m.placeEntry(ctx, req, bar.Close)
+}
+
+// positionEpsilon absorbs float rounding when a reduce fill's qty doesn't
+// exactly zero out posQty.
+const positionEpsilon = 1e-9
+
+// resetPosState clears the per-leg asymmetric-exit bookkeeping on a fresh open.
+func (m *MACross) resetPosState() {
+	m.posReduced = false
+	m.posLossStreak = 0
+	m.posPeakFP = 0
 }
 
 // OnFill implements strategy.Strategy.
@@ -319,16 +638,33 @@ func (m *MACross) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 		return
 	}
 
-	// Update hedge position state
+	// Update hedge position state. Opening fills (re-)establish entry/qty for
+	// the asymmetric-exit bookkeeping; closing fills decrement qty and only
+	// clear the has* flag once the leg is fully flat — a partial reduce fill
+	// must NOT be mistaken for a full close.
 	switch {
 	case fill.PositionSide == strategy.PositionSideLong && fill.Side == strategy.SideBuy:
 		m.hasLong = true
+		m.posEntry = fill.Price
+		m.posQty = fill.Qty
+		m.resetPosState()
 	case fill.PositionSide == strategy.PositionSideLong && fill.Side == strategy.SideSell:
-		m.hasLong = false
+		m.posQty -= fill.Qty
+		if m.posQty <= positionEpsilon {
+			m.hasLong = false
+			m.posQty = 0
+		}
 	case fill.PositionSide == strategy.PositionSideShort && fill.Side == strategy.SideSell:
 		m.hasShort = true
+		m.posEntry = fill.Price
+		m.posQty = fill.Qty
+		m.resetPosState()
 	case fill.PositionSide == strategy.PositionSideShort && fill.Side == strategy.SideBuy:
-		m.hasShort = false
+		m.posQty -= fill.Qty
+		if m.posQty <= positionEpsilon {
+			m.hasShort = false
+			m.posQty = 0
+		}
 	}
 }
 
@@ -361,10 +697,66 @@ func init() {
 		if v, ok := params["TrendFilterMin"]; ok {
 			cfg.TrendFilterMin = toFloat(v) // explicit (incl. 0 = filter off)
 		} else {
-			cfg.TrendFilterMin = 0.20 // default ON — only open in trending regimes (backtest-validated)
+			// default OFF as of 2026-08-05: the previous default-on 0.20 filter
+			// (ER over just TrendFilterN=10 bars, ~2.5h at 15m) was re-tested
+			// against a full 21-month ETH history (2 real bear legs) and a real
+			// BTC -53% decline + calm control period. On BOTH assets, across
+			// both regimes, leaving the filter OFF beat the shipped 0.20 default
+			// -- the 10-bar ER window is too short relative to the FastPeriod/
+			// SlowPeriod signal it was meant to gate, so it was filtering out
+			// good entries more often than bad ones. See docs/research/.
+			cfg.TrendFilterMin = 0
 		}
 		if v, ok := params["CrossBufferPct"]; ok {
 			cfg.CrossBufferPct = toFloat(v) // opt-in; default 0 (backtest showed a buffer hurts)
+		}
+		if v, ok := params["EntryOrderType"].(string); ok {
+			cfg.EntryOrderType = v
+		} // default "" == market, unchanged behaviour
+		if v, ok := params["EntryLimitOffsetPct"]; ok {
+			cfg.EntryLimitOffsetPct = toFloat(v)
+		} else {
+			cfg.EntryLimitOffsetPct = 0.0005 // 0.05%
+		}
+		if v, ok := params["EntryTimeoutBars"]; ok {
+			cfg.EntryTimeoutBars = toInt(v)
+		} else {
+			cfg.EntryTimeoutBars = 3
+		}
+		if v, ok := params["AsymmetricExit"].(bool); ok {
+			cfg.AsymmetricExit = v
+		} else {
+			cfg.AsymmetricExit = true // default ON — see Config.AsymmetricExit doc for validation
+		}
+		if v, ok := params["MinProfitToClosePct"]; ok {
+			cfg.MinProfitToClosePct = toFloat(v)
+		} else {
+			cfg.MinProfitToClosePct = 0.001 // 0.1% — clears the ~0.08% round-trip taker fee with a small buffer
+		}
+		if v, ok := params["ReduceTriggerPct"]; ok {
+			cfg.ReduceTriggerPct = toFloat(v)
+		} else {
+			cfg.ReduceTriggerPct = 0.01
+		}
+		if v, ok := params["ReduceConfirmBars"]; ok {
+			cfg.ReduceConfirmBars = toInt(v)
+		} else {
+			cfg.ReduceConfirmBars = 2
+		}
+		if v, ok := params["ReduceFrac"]; ok {
+			cfg.ReduceFrac = toFloat(v)
+		} else {
+			cfg.ReduceFrac = 0.5
+		}
+		if v, ok := params["TrailActivatePct"]; ok {
+			cfg.TrailActivatePct = toFloat(v)
+		} else {
+			cfg.TrailActivatePct = 0.05
+		}
+		if v, ok := params["TrailGivebackFrac"]; ok {
+			cfg.TrailGivebackFrac = toFloat(v)
+		} else {
+			cfg.TrailGivebackFrac = 0.35
 		}
 		if cfg.FastPeriod == 0 {
 			cfg.FastPeriod = 10
@@ -381,6 +773,12 @@ func init() {
 		}
 		if cfg.TakeProfitPct < 0 {
 			return nil, fmt.Errorf("TakeProfitPct must be >= 0 (got %.4f)", cfg.TakeProfitPct)
+		}
+		if cfg.ReduceFrac < 0 || cfg.ReduceFrac > 1 {
+			return nil, fmt.Errorf("ReduceFrac must be in [0, 1] (got %.4f)", cfg.ReduceFrac)
+		}
+		if cfg.TrailGivebackFrac < 0 || cfg.TrailGivebackFrac > 1 {
+			return nil, fmt.Errorf("TrailGivebackFrac must be in [0, 1] (got %.4f)", cfg.TrailGivebackFrac)
 		}
 		return New(cfg), nil
 	})

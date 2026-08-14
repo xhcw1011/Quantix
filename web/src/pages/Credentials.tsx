@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   listCredentials, createCredential, deleteCredential, testCredential
 } from '../api/trading'
+import { INPUT_CLASS } from '../lib/inputStyles'
 
 interface Credential {
   id: number
@@ -180,13 +181,13 @@ export default function Credentials() {
       <div className="bg-slate-800 rounded-xl p-4">
         <h2 className="text-sm font-semibold text-slate-300 mb-4">添加账户</h2>
         <form onSubmit={handleCreate} className="space-y-3">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs text-slate-400 mb-1">交易所</label>
               <select
                 value={form.exchange}
                 onChange={(e) => setForm({ ...form, exchange: e.target.value })}
-                className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                className={INPUT_CLASS}
               >
                 <option value="binance">Binance</option>
                 <option value="okx">OKX</option>
@@ -198,7 +199,7 @@ export default function Credentials() {
               <select
                 value={form.market_type}
                 onChange={(e) => setForm({ ...form, market_type: e.target.value })}
-                className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                className={INPUT_CLASS}
               >
                 <option value="spot">现货</option>
                 <option value="swap">永续合约</option>
@@ -212,7 +213,7 @@ export default function Credentials() {
             <select
               value={accountType}
               onChange={(e) => setAccountType(e.target.value as AccountType)}
-              className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+              className={INPUT_CLASS}
             >
               <option value="live">正式实盘</option>
               <option value="sim">测试/模拟盘</option>
@@ -227,7 +228,7 @@ export default function Credentials() {
             <input
               value={form.label}
               onChange={(e) => setForm({ ...form, label: e.target.value })}
-              className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+              className={INPUT_CLASS}
               placeholder="例如:我的币安账户"
               required
             />
@@ -264,7 +265,7 @@ export default function Credentials() {
                 type="password"
                 value={form.passphrase}
                 onChange={(e) => setForm({ ...form, passphrase: e.target.value })}
-                className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                className={INPUT_CLASS}
                 placeholder="OKX Passphrase"
               />
             </div>

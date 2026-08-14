@@ -18,18 +18,24 @@ import (
 // ─── OnBar ───────────────────────────────────────────────────────────────────
 
 func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
-	if bar.Symbol != s.cfg.Symbol { return }
+	if bar.Symbol != s.cfg.Symbol {
+		return
+	}
 
 	// ── Sim clock: drive day-boundary / held-duration logic off bar time in
 	// backtest (live leaves s.backtest=false → s.now() stays wall-clock). ──
 	if !s.backtest {
-		if v, ok := ctx.Extra["backtest"].(bool); ok { s.backtest = v }
+		if v, ok := ctx.Extra["backtest"].(bool); ok {
+			s.backtest = v
+		}
 	}
 	s.simClock = bar.CloseTime
 
 	// ── Buffer bar by interval ──
 	iv := bar.Interval
-	if iv == "" { iv = s.cfg.PrimaryInterval }
+	if iv == "" {
+		iv = s.cfg.PrimaryInterval
+	}
 	s.barsByInterval[iv] = append(s.barsByInterval[iv], bar)
 	maxBuf := s.cfg.LookbackBars * 2
 	if len(s.barsByInterval[iv]) > maxBuf {
@@ -39,7 +45,9 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// ── Early Redis init (needed before warmup for backtest replay detection) ──
 	if s.rdb == nil {
 		if v, ok := ctx.Extra["redis_client"]; ok {
-			if rc, ok := v.(*redis.Client); ok { s.rdb = rc }
+			if rc, ok := v.(*redis.Client); ok {
+				s.rdb = rc
+			}
 		}
 	}
 	// Pre-load replay signals once — ONLY in explicit backtest mode.
@@ -72,16 +80,22 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				}
 			}
 			if v, ok := ctx.Extra["data_store"]; ok {
-				if st, ok := v.(*data.Store); ok { s.store = st }
+				if st, ok := v.(*data.Store); ok {
+					s.store = st
+				}
 			}
 			if v, ok := ctx.Extra["user_id"]; ok {
-				if uid, ok := v.(int); ok { s.userID = uid }
+				if uid, ok := v.(int); ok {
+					s.userID = uid
+				}
 			}
 			if v, ok := ctx.Extra["engine_id"]; ok {
-				if eid, ok := v.(string); ok { s.engineID = eid }
+				if eid, ok := v.(string); ok {
+					s.engineID = eid
+				}
 			}
 			s.recoverFromSyncer(bar.Close)
-			s.log.Info("AI warmed up",
+			s.log.Info("AI：预热完成",
 				zap.Int("primary_bars", len(primaryBars)),
 				zap.String("primary", s.cfg.PrimaryInterval),
 				zap.Bool("syncer", s.syncer != nil),
@@ -98,8 +112,12 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Skip stale 1m bars to prevent false stop-loss on backfill.
 	if iv != s.cfg.PrimaryInterval {
 		if !isStaleBar {
-			if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
-			if s.shortPos != nil { s.managePos(ctx, bar, s.shortPos, &s.shortPos) }
+			if s.longPos != nil {
+				s.managePos(ctx, bar, s.longPos, &s.longPos)
+			}
+			if s.shortPos != nil {
+				s.managePos(ctx, bar, s.shortPos, &s.shortPos)
+			}
 		}
 		return
 	}
@@ -113,10 +131,10 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			s.liveReady = true // historical replay: every bar is actionable
 		} else if time.Since(bar.CloseTime) < 2*time.Minute {
 			s.liveReady = true
-			s.log.Info("AI: live ready — first real-time bar")
+			s.log.Info("AI：进入实时模式——首个实时K线")
 		} else if len(s.replaySignals) > 0 {
 			s.liveReady = true
-			s.log.Info("AI: backtest replay mode — using cached signals", zap.Int("signals", len(s.replaySignals)))
+			s.log.Info("AI：回测回放模式——使用缓存信号", zap.Int("signals", len(s.replaySignals)))
 		} else {
 			return
 		}
@@ -128,7 +146,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// to avoid false "externally closed" that creates ghost positions.
 	if s.syncer != nil {
 		if s.longPos != nil && s.longPos.filled && !s.syncer.HasPosition("LONG") {
-			s.log.Warn("AI: LONG externally closed — cancelling orphan orders + clearing state")
+			s.log.Warn("AI：多仓已被外部平掉——取消孤儿订单并清空状态")
 			if s.longPos.stagedTPPlaced || s.longPos.safetyNetSL {
 				if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
 					ep.CancelAllProtective(s.cfg.Symbol, "LONG")
@@ -140,7 +158,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			s.longPos = nil
 		}
 		if s.shortPos != nil && s.shortPos.filled && !s.syncer.HasPosition("SHORT") {
-			s.log.Warn("AI: SHORT externally closed — cancelling orphan orders + clearing state")
+			s.log.Warn("AI：空仓已被外部平掉——取消孤儿订单并清空状态")
 			if s.shortPos.stagedTPPlaced || s.shortPos.safetyNetSL {
 				if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
 					ep.CancelAllProtective(s.cfg.Symbol, "SHORT")
@@ -163,7 +181,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
 			if ep.PlaceExchangeSL(s.cfg.Symbol, "LONG", "SELL", s.longPos.remainQty, s.longPos.stopLoss) {
 				s.longPos.safetyNetSL = true
-				s.log.Info("AI: safety-net SL placed for recovered LONG", zap.Float64("sl", s.longPos.stopLoss))
+				s.log.Info("AI：已为恢复的多仓挂上安全网止损", zap.Float64("sl", s.longPos.stopLoss))
 			}
 		}
 	}
@@ -172,21 +190,28 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		if ep, ok := ctx.Extra["staged_exit"].(strategy.StagedExitPlacer); ok {
 			if ep.PlaceExchangeSL(s.cfg.Symbol, "SHORT", "BUY", s.shortPos.remainQty, s.shortPos.stopLoss) {
 				s.shortPos.safetyNetSL = true
-				s.log.Info("AI: safety-net SL placed for recovered SHORT", zap.Float64("sl", s.shortPos.stopLoss))
+				s.log.Info("AI：已为恢复的空仓挂上安全网止损", zap.Float64("sl", s.shortPos.stopLoss))
 			}
 		}
 	}
 	// Range/grid positions: no exchange SL (grid rides the range, exits only via TP).
 
 	// Manage positions on primary bar too (SL, trailing, TP checks must run even if halted)
-	if s.longPos != nil { s.managePos(ctx, bar, s.longPos, &s.longPos) }
-	if s.shortPos != nil { s.managePos(ctx, bar, s.shortPos, &s.shortPos) }
+	if s.longPos != nil {
+		s.managePos(ctx, bar, s.longPos, &s.longPos)
+	}
+	if s.shortPos != nil {
+		s.managePos(ctx, bar, s.shortPos, &s.shortPos)
+	}
 
 	// Log position state every primary bar (essential for debugging trailing/exit behavior)
 	if s.longPos != nil && s.longPos.filled {
 		p := s.longPos
-		pnlR := 0.0; if p.R > 0 { pnlR = (price - p.entryPrice) / p.R }
-		s.log.Info("POS LONG",
+		pnlR := 0.0
+		if p.R > 0 {
+			pnlR = (price - p.entryPrice) / p.R
+		}
+		s.log.Info("多仓状态",
 			zap.Float64("entry", p.entryPrice), zap.Float64("price", price),
 			zap.Float64("pnlR", r2(pnlR)), zap.Float64("peak", p.peakPrice),
 			zap.Float64("trailing", p.trailing), zap.Float64("sl", p.stopLoss),
@@ -195,8 +220,11 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	if s.shortPos != nil && s.shortPos.filled {
 		p := s.shortPos
-		pnlR := 0.0; if p.R > 0 { pnlR = (p.entryPrice - price) / p.R }
-		s.log.Info("POS SHORT",
+		pnlR := 0.0
+		if p.R > 0 {
+			pnlR = (p.entryPrice - price) / p.R
+		}
+		s.log.Info("空仓状态",
 			zap.Float64("entry", p.entryPrice), zap.Float64("price", price),
 			zap.Float64("pnlR", r2(pnlR)), zap.Float64("peak", p.peakPrice),
 			zap.Float64("trailing", p.trailing), zap.Float64("sl", p.stopLoss),
@@ -205,7 +233,9 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 
 	// dayHalted blocks NEW entries only — existing position management above must still run.
-	if s.dayHalted { return }
+	if s.dayHalted {
+		return
+	}
 
 	// Track if we have pending orders (for post-GPT cancel logic)
 	hasPendingLong := s.longPos != nil && !s.longPos.filled
@@ -214,13 +244,15 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Post-SL: skip this bar, let next bar handle fresh signal evaluation.
 	if s.postSLReeval {
 		s.postSLReeval = false
-		s.log.Info("AI: post-SL cooldown — skip this bar",
+		s.log.Info("AI：止损后冷却期——跳过本根K线",
 			zap.String("closed_side", s.postSLSide), zap.Float64("sl_price", s.postSLPrice))
 		return
 	}
 
 	// Don't open new positions on the same bar as a stop-loss (normal path)
-	if s.stopBar == s.barCount { return }
+	if s.stopBar == s.barCount {
+		return
+	}
 
 	// ── Regime detection (every bar — sliding window, not batch) ──
 	atr := s.calcATR()
@@ -228,6 +260,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		return // extreme volatility guard
 	}
 	regime := s.detectRegime()
+	s.regimeAge = regimeAgeNext(s.regimeAge, regime == s.lastRegime)
 	s.lastRegime = regime
 	// Apply hysteresis so a confirmed 1h trend isn't reset to neutral on every
 	// bounce (which let counter-trend entries slip through). Once per primary bar.
@@ -254,7 +287,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	expansionCooldown := 3
 	if s.expansionBar > 0 && s.barCount-s.expansionBar < expansionCooldown && s.longPos == nil && s.shortPos == nil {
 		if s.barCount%6 == 0 || s.barCount-s.expansionBar == 0 {
-			s.log.Info("AI: skip — EXPANSION cooldown",
+			s.log.Info("AI：跳过——扩张期冷却中",
 				zap.Int("bars_since", s.barCount-s.expansionBar),
 				zap.Int("cooldown", expansionCooldown),
 				zap.Float64("price", price))
@@ -268,7 +301,9 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Grid is exempt — TP fill means range is active, next reversion should be acted on promptly.
 	tpCooldown := 3
 	if s.tpCooldownBar > 0 && s.barCount-s.tpCooldownBar < tpCooldown && s.longPos == nil && s.shortPos == nil {
-		if regime != RegimeRange { return }
+		if regime != RegimeRange {
+			return
+		}
 	}
 
 	// Clear external close flag (no longer needed for GPT forcing, but still consumed).
@@ -284,7 +319,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// ConsecLoss halt: only block trend entries. Grid mode is high-frequency
 	// small-profit — occasional losses are normal cost, not signal failure.
 	if s.consecLoss >= s.cfg.MaxConsecLoss && regime != RegimeRange && regime != RegimeSlowTrend {
-		s.log.Warn("AI: trend halted — consecutive losses", zap.Int("consec", s.consecLoss))
+		s.log.Warn("AI：趋势开仓已暂停——连续亏损", zap.Int("consec", s.consecLoss))
 		s.lastCallBar = s.barCount
 		return
 	}
@@ -304,18 +339,22 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Set reason string based on signal type
 	var longReason, shortReason string
 	if regime == RegimeStrongTrend || regime == RegimeExpansion {
-		longReason = "breakout: price > 10-bar high"
-		shortReason = "breakout: price < 10-bar low"
+		longReason = "突破：价格突破10根K线高点"
+		shortReason = "突破：价格跌破10根K线低点"
 	} else {
-		longReason = "reversion: RSI oversold + BB lower"
-		shortReason = "reversion: RSI overbought + BB upper"
+		longReason = "回归：RSI超卖 + 触及布林带下轨"
+		shortReason = "回归：RSI超买 + 触及布林带上轨"
 	}
 
 	// Counter-trend hard clamp (trend mode only — reversion IS counter-trend)
 	if regime == RegimeStrongTrend || regime == RegimeExpansion {
 		ctCap := 0.20
-		if s.lastTrendDir < 0 && longConf > ctCap { longConf = ctCap }
-		if s.lastTrendDir > 0 && shortConf > ctCap { shortConf = ctCap }
+		if s.lastTrendDir < 0 && longConf > ctCap {
+			longConf = ctCap
+		}
+		if s.lastTrendDir > 0 && shortConf > ctCap {
+			shortConf = ctCap
+		}
 	}
 
 	// ── Entry thresholds: regime determines required confidence ──
@@ -325,12 +364,20 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	entryConfLong := s.cfg.ConfidenceThreshold
 	entryConfShort := s.cfg.ConfidenceThreshold
 	if regime == RegimeStrongTrend || regime == RegimeExpansion {
-		if s.lastTrendDir >= 0 { entryConfLong = s.cfg.RegimeEntryConf }
-		if s.lastTrendDir <= 0 { entryConfShort = s.cfg.RegimeEntryConf }
+		if s.lastTrendDir >= 0 {
+			entryConfLong = s.cfg.RegimeEntryConf
+		}
+		if s.lastTrendDir <= 0 {
+			entryConfShort = s.cfg.RegimeEntryConf
+		}
 	} else if regime == RegimeSlowTrend {
 		slowConf := (s.cfg.RegimeEntryConf + s.cfg.ConfidenceThreshold) / 2
-		if s.lastTrendDir >= 0 { entryConfLong = slowConf }
-		if s.lastTrendDir <= 0 { entryConfShort = slowConf }
+		if s.lastTrendDir >= 0 {
+			entryConfLong = slowConf
+		}
+		if s.lastTrendDir <= 0 {
+			entryConfShort = slowConf
+		}
 	} else if regime == RegimeRange {
 		if s.cfg.RangeEntryConf > 0 {
 			entryConfLong = s.cfg.RangeEntryConf
@@ -345,26 +392,31 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	longExhausted, shortExhausted := false, false
 	// ── Trend exhaustion filter: skip with-trend entry if 2h move is too large ──
 	// Prevents chasing into extended trends that are likely to reverse.
-	// Uses 15m bars (8 bars = 2 hours) to measure trend distance.
+	// Uses EntryFilterInterval bars (default 15m, 8 bars = 2 hours) to measure
+	// trend distance.
 	if s.cfg.TrendExhaustPct > 0 {
-		bars15 := s.barsForInterval("15m")
+		bars15 := s.entryFilterBars()
 		if len(bars15) >= 8 {
 			low4h := bars15[len(bars15)-8].Close
 			high4h := bars15[len(bars15)-8].Close
 			for _, b := range bars15[len(bars15)-8:] {
-				if b.Low < low4h { low4h = b.Low }
-				if b.High > high4h { high4h = b.High }
+				if b.Low < low4h {
+					low4h = b.Low
+				}
+				if b.High > high4h {
+					high4h = b.High
+				}
 			}
 			move4h := (high4h - low4h) / price
 			current := bars15[len(bars15)-1].Close
 			// Track exhaustion flags — applied after MTF scoring to avoid being overwritten.
 			if move4h > s.cfg.TrendExhaustPct && (current-low4h)/(high4h-low4h) > 0.8 && longConf > 0 {
-				s.log.Info("AI: BUY soft-limited — trend exhausted (near 2h high)",
+				s.log.Info("AI：买入信号被软限制——趋势已到2小时高点附近，可能透支",
 					zap.Float64("move_pct", r3(move4h*100)))
 				longExhausted = true
 			}
 			if move4h > s.cfg.TrendExhaustPct && (high4h-current)/(high4h-low4h) > 0.8 && shortConf > 0 {
-				s.log.Info("AI: SELL soft-limited — trend exhausted (near 2h low)",
+				s.log.Info("AI：卖出信号被软限制——趋势已到2小时低点附近，可能透支",
 					zap.Float64("move_pct", r3(move4h*100)))
 				shortExhausted = true
 			}
@@ -381,12 +433,12 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	isReversion := regime == RegimeRange
 	if !isReversion || s.cfg.RangeTrendFilter {
 		if s.lastHourlyDir == -1 && longConf > 0 {
-			s.log.Info("AI: BUY blocked — 1h EMA bearish", zap.Float64("conf", longConf), zap.Bool("reversion", isReversion))
+			s.log.Info("AI：买入被拦截——1小时EMA偏空", zap.Float64("conf", longConf), zap.Bool("reversion", isReversion))
 			longConf = 0
 			s.accumLong = 0
 		}
 		if s.lastHourlyDir == 1 && shortConf > 0 {
-			s.log.Info("AI: SELL blocked — 1h EMA bullish", zap.Float64("conf", shortConf), zap.Bool("reversion", isReversion))
+			s.log.Info("AI：卖出被拦截——1小时EMA偏多", zap.Float64("conf", shortConf), zap.Bool("reversion", isReversion))
 			shortConf = 0
 			s.accumShort = 0
 		}
@@ -401,7 +453,7 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	} else if shortConf >= entryConfShort {
 		action = "SELL"
 	}
-	s.log.Info("AI signal → "+action,
+	s.log.Info("AI信号 → "+action,
 		zap.Float64("price", price), zap.String("regime", string(regime)),
 		zap.Int("trend_dir", s.lastTrendDir),
 		zap.Float64("raw_L", rawLongConf), zap.Float64("raw_S", rawShortConf),
@@ -411,10 +463,10 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		zap.Int("call", s.totalCall),
 	)
 	if longConf >= entryConfLong {
-		s.log.Info("  BUY reason: "+longReason)
+		s.log.Info("  买入理由：" + longReason)
 	}
 	if shortConf >= entryConfShort {
-		s.log.Info("  SELL reason: "+shortReason)
+		s.log.Info("  卖出理由：" + shortReason)
 	}
 	s.logEvent("signal", action, "", price, 0, 0, math.Max(longConf, shortConf), 0,
 		fmt.Sprintf(`{"raw_L":%.2f,"raw_S":%.2f,"eff_L":%.2f,"eff_S":%.2f,"L_entry":%.2f,"S_entry":%.2f}`,
@@ -423,28 +475,44 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// Minimum spread between long and short to avoid self-hedging.
 	// Use ATR-based spread: entries must be at least 1×ATR apart.
 	minSpread := atr
-	if minSpread < price*0.002 { minSpread = price * 0.002 } // floor: 0.2% of price
+	if minSpread < price*0.002 {
+		minSpread = price * 0.002
+	} // floor: 0.2% of price
 
 	// ── Multi-timeframe scoring (must run before single-direction check and boost) (replaces hard block) ──
 	// Score: positive = bullish, negative = bearish. Range -5 to +5.
 	// Components: 15m return (±2) + 15m EMA structure (±1) + 5m momentum (±1) + 1m change (±1)
 	mtfScore := 0
 
-	// 15m trend score (±2): based on 8-bar return
-	bars15 := s.barsForInterval("15m")
+	// 15m trend score (±2): based on 8-bar return (interval per EntryFilterInterval)
+	bars15 := s.entryFilterBars()
 	if len(bars15) >= 8 {
 		c15 := make([]float64, len(bars15))
-		for i, b := range bars15 { c15[i] = b.Close }
+		for i, b := range bars15 {
+			c15[i] = b.Close
+		}
 		ret15 := (c15[len(c15)-1] - c15[len(c15)-8]) / c15[len(c15)-8]
-		if ret15 > s.cfg.MTFStrongTrend { mtfScore += 2 } else if ret15 > s.cfg.MTFWeakTrend { mtfScore += 1 }
-		if ret15 < -s.cfg.MTFStrongTrend { mtfScore -= 2 } else if ret15 < -s.cfg.MTFWeakTrend { mtfScore -= 1 }
+		if ret15 > s.cfg.MTFStrongTrend {
+			mtfScore += 2
+		} else if ret15 > s.cfg.MTFWeakTrend {
+			mtfScore += 1
+		}
+		if ret15 < -s.cfg.MTFStrongTrend {
+			mtfScore -= 2
+		} else if ret15 < -s.cfg.MTFWeakTrend {
+			mtfScore -= 1
+		}
 
 		// 15m EMA structure confirmation (±1): uses EMA10/30 (same as GPT buildContext).
 		if len(c15) >= 30 {
 			ema10_15 := indicator.Last(indicator.EMA(c15, 10))
 			ema30_15 := indicator.Last(indicator.EMA(c15, 30))
-			if ema10_15 > ema30_15 { mtfScore++ }  // bullish structure
-			if ema10_15 < ema30_15 { mtfScore-- }  // bearish structure
+			if ema10_15 > ema30_15 {
+				mtfScore++
+			} // bullish structure
+			if ema10_15 < ema30_15 {
+				mtfScore--
+			} // bearish structure
 		}
 	}
 
@@ -454,8 +522,12 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		rsi5m := indicator.Last(indicator.RSI(closes5m, s.cfg.RSIPeriod))
 		macd5m := indicator.MACD(closes5m, s.cfg.MACDFast, s.cfg.MACDSlow, s.cfg.MACDSignal)
 		macdHist5m := indicator.Last(macd5m.Histogram)
-		if macdHist5m > 0 && rsi5m > s.cfg.MTFBearRSI { mtfScore++ }      // bullish: MACD positive + RSI not oversold
-		if macdHist5m < 0 && rsi5m < s.cfg.MTFBullRSI { mtfScore-- }      // bearish: MACD negative + RSI not overbought
+		if macdHist5m > 0 && rsi5m > s.cfg.MTFBearRSI {
+			mtfScore++
+		} // bullish: MACD positive + RSI not oversold
+		if macdHist5m < 0 && rsi5m < s.cfg.MTFBullRSI {
+			mtfScore--
+		} // bearish: MACD negative + RSI not overbought
 	}
 
 	// 1m short-term score (±1): net change over last 3 bars
@@ -463,12 +535,16 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if len(bars1m) >= 3 {
 		last3 := bars1m[len(bars1m)-3:]
 		netChange := (last3[2].Close - last3[0].Close) / last3[0].Close
-		if netChange > s.cfg.MTF1mThreshold { mtfScore++ }   // > +0.1%
-		if netChange < -s.cfg.MTF1mThreshold { mtfScore-- }  // < -0.1%
+		if netChange > s.cfg.MTF1mThreshold {
+			mtfScore++
+		} // > +0.1%
+		if netChange < -s.cfg.MTF1mThreshold {
+			mtfScore--
+		} // < -0.1%
 	}
 
 	s.lastMTFScore = mtfScore
-	s.log.Info("AI: MTF score", zap.Int("score", mtfScore))
+	s.log.Info("AI：多周期评分", zap.Int("score", mtfScore))
 
 	// Strong MTF trend overrides Range regime — but only if ATR confirms trend expansion.
 	// ── Trend: MTF momentum filter ──
@@ -498,8 +574,12 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	s.mtfShortScale = shortQtyScale
 
 	// Apply trend exhaustion AFTER MTF scoring (otherwise MTF overwrites it).
-	if longExhausted { s.mtfLongScale *= 0.5 }
-	if shortExhausted { s.mtfShortScale *= 0.5 }
+	if longExhausted {
+		s.mtfLongScale *= 0.5
+	}
+	if shortExhausted {
+		s.mtfShortScale *= 0.5
+	}
 
 	// ── Rule-based boost (after MTF scoring, respects MTF + trend direction) ──
 	swLow := s.findSwingLow(10)
@@ -508,42 +588,54 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// In bearish STRONG_TREND, don't boost LONG; in bullish STRONG_TREND, don't boost SHORT.
 	swingLongMTFOk := mtfScore >= -1 && s.lastTrendDir >= 0
 	if price > 0 && swLow > 0 && (price-swLow)/price < s.cfg.SwingProximity && longConf >= s.cfg.BoostMinConf && longConf < entryConfLong && s.longPos == nil && swingLongMTFOk {
-		s.log.Info("AI: boost long — price near swing low",
+		s.log.Info("AI：加强多头信号——价格接近波段低点",
 			zap.Float64("price", price), zap.Float64("swing_low", swLow), zap.Int("mtf", mtfScore))
 		longConf = entryConfLong
-		if longEntry <= 0 { longEntry = swLow }
+		if longEntry <= 0 {
+			longEntry = swLow
+		}
 	}
 	swingShortMTFOk := mtfScore <= 1 && s.lastTrendDir <= 0
 	if price > 0 && swHigh > 0 && (swHigh-price)/price < s.cfg.SwingProximity && shortConf >= s.cfg.BoostMinConf && shortConf < entryConfShort && s.shortPos == nil && swingShortMTFOk {
-		s.log.Info("AI: boost short — price near swing high",
+		s.log.Info("AI：加强空头信号——价格接近波段高点",
 			zap.Float64("price", price), zap.Float64("swing_high", swHigh), zap.Int("mtf", mtfScore))
 		shortConf = entryConfShort
-		if shortEntry <= 0 { shortEntry = swHigh }
+		if shortEntry <= 0 {
+			shortEntry = swHigh
+		}
 	}
 
 	// ── MTF momentum boost (Trend only, with-trend direction only) ──
 	if mtfScore >= 2 && s.lastTrendDir >= 0 && longConf > 0 && longConf >= s.cfg.BoostMinConf && longConf < entryConfLong && s.longPos == nil {
-		s.log.Info("AI: MTF momentum boost → LONG",
+		s.log.Info("AI：多周期动量加强 → 做多",
 			zap.Float64("conf_before", longConf), zap.Int("mtf", mtfScore))
 		longConf = entryConfLong
-		if longEntry <= 0 { longEntry = price - atr*s.cfg.EntryATRK }
+		if longEntry <= 0 {
+			longEntry = price - atr*s.cfg.EntryATRK
+		}
 	}
 	if mtfScore <= -2 && s.lastTrendDir <= 0 && shortConf > 0 && shortConf >= s.cfg.BoostMinConf && shortConf < entryConfShort && s.shortPos == nil {
-		s.log.Info("AI: MTF momentum boost → SHORT",
+		s.log.Info("AI：多周期动量加强 → 做空",
 			zap.Float64("conf_before", shortConf), zap.Int("mtf", mtfScore))
 		shortConf = entryConfShort
-		if shortEntry <= 0 { shortEntry = price + atr*s.cfg.EntryATRK }
+		if shortEntry <= 0 {
+			shortEntry = price + atr*s.cfg.EntryATRK
+		}
 	}
 
 	// ── Cancel pending orders if GPT signal reversed ──
 	if hasPendingLong && shortConf >= s.cfg.ReversalConf {
-		s.log.Info("AI: cancelling pending LONG — signal reversed to SHORT")
-		if s.longPos.orderID != "" { ctx.CancelOrder(s.longPos.orderID) }
+		s.log.Info("AI：取消挂单中的多单——信号已反转为空")
+		if s.longPos.orderID != "" {
+			ctx.CancelOrder(s.longPos.orderID)
+		}
 		s.longPos = nil
 	}
 	if hasPendingShort && longConf >= s.cfg.ReversalConf {
-		s.log.Info("AI: cancelling pending SHORT — signal reversed to LONG")
-		if s.shortPos.orderID != "" { ctx.CancelOrder(s.shortPos.orderID) }
+		s.log.Info("AI：取消挂单中的空单——信号已反转为多")
+		if s.shortPos.orderID != "" {
+			ctx.CancelOrder(s.shortPos.orderID)
+		}
 		s.shortPos = nil
 	}
 
@@ -578,13 +670,13 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		if s.cfg.HedgeOnDrawdown {
 			if s.longPos != nil && shortConf >= entryConfShort && s.canHedge(price, s.longPos) {
 				hedgeAllowed = true
-				s.log.Info("AI: hedge-on-drawdown → SHORT scalp",
+				s.log.Info("AI：回撤对冲 → 空头短线单",
 					zap.Float64("main_entry", s.longPos.entryPrice),
 					zap.Float64("price", price))
 			}
 			if s.shortPos != nil && longConf >= entryConfLong && s.canHedge(price, s.shortPos) {
 				hedgeAllowed = true
-				s.log.Info("AI: hedge-on-drawdown → LONG scalp",
+				s.log.Info("AI：回撤对冲 → 多头短线单",
 					zap.Float64("main_entry", s.shortPos.entryPrice),
 					zap.Float64("price", price))
 			}
@@ -608,17 +700,21 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// ── Update pending limit orders: cancel if new signal provides better entry ──
 	if s.longPos != nil && !s.longPos.filled && longConf >= entryConfLong && longEntry > 0 {
 		if longEntry < s.longPos.entryPrice {
-			s.log.Info("AI: updating pending LONG — better entry",
+			s.log.Info("AI：更新挂单中的多单——发现更好的入场价",
 				zap.Float64("old", s.longPos.entryPrice), zap.Float64("new", longEntry))
-			if s.longPos.orderID != "" { ctx.CancelOrder(s.longPos.orderID) }
+			if s.longPos.orderID != "" {
+				ctx.CancelOrder(s.longPos.orderID)
+			}
 			s.longPos = nil
 		}
 	}
 	if s.shortPos != nil && !s.shortPos.filled && shortConf >= entryConfShort && shortEntry > 0 {
 		if shortEntry > s.shortPos.entryPrice {
-			s.log.Info("AI: updating pending SHORT — better entry",
+			s.log.Info("AI：更新挂单中的空单——发现更好的入场价",
 				zap.Float64("old", s.shortPos.entryPrice), zap.Float64("new", shortEntry))
-			if s.shortPos.orderID != "" { ctx.CancelOrder(s.shortPos.orderID) }
+			if s.shortPos.orderID != "" {
+				ctx.CancelOrder(s.shortPos.orderID)
+			}
 			s.shortPos = nil
 		}
 	}
@@ -630,11 +726,15 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 		if isReversion {
 			// Grid: only block if short is modeRange and very close (same grid level)
 			if s.shortPos != nil && s.shortPos.mode == modeRange {
-				if math.Abs(s.shortPos.entryPrice-price) < minSpread { longConf = 0 }
+				if math.Abs(s.shortPos.entryPrice-price) < minSpread {
+					longConf = 0
+				}
 			}
 		} else {
 			if s.shortPos != nil {
-				if math.Abs(s.shortPos.entryPrice-price) < minSpread { longConf = 0 }
+				if math.Abs(s.shortPos.entryPrice-price) < minSpread {
+					longConf = 0
+				}
 			}
 		}
 		if longConf > 0 {
@@ -642,20 +742,28 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 			if isReversion {
 				// Reversion: use signal's entry directly (near BB extreme)
 				entry = longEntry
-				if entry <= 0 { entry = math.Round(price*100) / 100 }
+				if entry <= 0 {
+					entry = math.Round(price*100) / 100
+				}
 				s.lastConf = longConf
 				s.openGrid(ctx, "LONG", price, entry, atr)
-				if s.longPos != nil { s.longPos.entryRegime = regime }
+				if s.longPos != nil {
+					s.longPos.entryRegime = regime
+					s.longPos.entryRegimeAge = s.regimeAge
+				}
 			} else {
 				// Breakout: market price entry (urgency, no pullback blending)
 				entry = math.Round(price*100) / 100
 				gptTP := shortEntry
 				if hedgeAllowed && s.shortPos != nil {
 					s.openHedgeScalp(ctx, "LONG", price, entry, atr, s.shortPos)
-				} else {
+				} else if !s.trendEntryBlocked("LONG", price, atr) {
 					s.lastConf = longConf
 					s.openTrend(ctx, "LONG", price, entry, atr, gptTP)
-					if s.longPos != nil { s.longPos.entryRegime = regime }
+					if s.longPos != nil {
+						s.longPos.entryRegime = regime
+						s.longPos.entryRegimeAge = s.regimeAge
+					}
 				}
 			}
 		}
@@ -665,30 +773,42 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if shortConf >= entryConfShort && s.cfg.EnableShort && s.shortPos == nil {
 		if isReversion {
 			if s.longPos != nil && s.longPos.mode == modeRange {
-				if math.Abs(s.longPos.entryPrice-price) < minSpread { shortConf = 0 }
+				if math.Abs(s.longPos.entryPrice-price) < minSpread {
+					shortConf = 0
+				}
 			}
 		} else {
 			if s.longPos != nil {
-				if math.Abs(s.longPos.entryPrice-price) < minSpread { shortConf = 0 }
+				if math.Abs(s.longPos.entryPrice-price) < minSpread {
+					shortConf = 0
+				}
 			}
 		}
 		if shortConf > 0 {
 			var entry float64
 			if isReversion {
 				entry = shortEntry
-				if entry <= 0 { entry = math.Round(price*100) / 100 }
+				if entry <= 0 {
+					entry = math.Round(price*100) / 100
+				}
 				s.lastConf = shortConf
 				s.openGrid(ctx, "SHORT", price, entry, atr)
-				if s.shortPos != nil { s.shortPos.entryRegime = regime }
+				if s.shortPos != nil {
+					s.shortPos.entryRegime = regime
+					s.shortPos.entryRegimeAge = s.regimeAge
+				}
 			} else {
 				entry = math.Round(price*100) / 100
 				gptTP := longEntry
 				if hedgeAllowed && s.longPos != nil {
 					s.openHedgeScalp(ctx, "SHORT", price, entry, atr, s.longPos)
-				} else {
+				} else if !s.trendEntryBlocked("SHORT", price, atr) {
 					s.lastConf = shortConf
 					s.openTrend(ctx, "SHORT", price, entry, atr, gptTP)
-					if s.shortPos != nil { s.shortPos.entryRegime = regime }
+					if s.shortPos != nil {
+						s.shortPos.entryRegime = regime
+						s.shortPos.entryRegimeAge = s.regimeAge
+					}
 				}
 			}
 		}
@@ -709,8 +829,9 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				s.openTrend(ctx, "LONG", price, math.Round(price*100)/100, atr, 0)
 				if s.longPos != nil {
 					s.longPos.entryRegime = regime
+					s.longPos.entryRegimeAge = s.regimeAge
 					s.trendEntryCooldown = s.cfg.TrendEntryCooldownBars
-					s.log.Info("AI: TREND-SCORE entry", zap.String("side", "LONG"),
+					s.log.Info("AI：趋势评分开仓", zap.String("side", "LONG"),
 						zap.Float64("score", s.trendScore), zap.Int("htf", htfDir))
 				}
 			}
@@ -720,8 +841,9 @@ func (s *AIStrategy) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 				s.openTrend(ctx, "SHORT", price, math.Round(price*100)/100, atr, 0)
 				if s.shortPos != nil {
 					s.shortPos.entryRegime = regime
+					s.shortPos.entryRegimeAge = s.regimeAge
 					s.trendEntryCooldown = s.cfg.TrendEntryCooldownBars
-					s.log.Info("AI: TREND-SCORE entry", zap.String("side", "SHORT"),
+					s.log.Info("AI：趋势评分开仓", zap.String("side", "SHORT"),
 						zap.Float64("score", s.trendScore), zap.Int("htf", htfDir))
 				}
 			}

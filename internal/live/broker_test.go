@@ -261,9 +261,9 @@ func TestLiveBroker_WarmupSuppressesOrders(t *testing.T) {
 }
 
 func TestLiveBroker_AutoSizeMarketFills(t *testing.T) {
-	// cash 10000 @ 50000 → resolved qty = 10000*0.99/50000 = 0.198 (0.001-aligned).
+	// cash 10000 @ 50000 → resolved qty = 10000*sizingCashFrac/50000 = 0.12 (0.001-aligned).
 	mock := &mockOrderClient{
-		marketFill: exchange.OrderFill{ExchangeID: "e1", FilledQty: 0.198, AvgPrice: 50000, Fee: 1, Status: "filled"},
+		marketFill: exchange.OrderFill{ExchangeID: "e1", FilledQty: 0.12, AvgPrice: 50000, Fee: 1, Status: "filled"},
 	}
 	b, o := newTestLiveBroker(mock)
 	b.SetLastPrice(50000)
@@ -279,11 +279,117 @@ func TestLiveBroker_AutoSizeMarketFills(t *testing.T) {
 
 	ord := o.Get(ordID)
 	require.NotNil(t, ord)
-	assert.InDelta(t, 0.198, ord.Qty, 1e-9, "auto-sized order must carry the resolved qty, not 0")
+	assert.InDelta(t, 0.12, ord.Qty, 1e-9, "auto-sized order must carry the resolved qty, not 0")
 
 	fe := drainFill(t, o)
-	assert.InDelta(t, 0.198, fe.Fill.Qty, 1e-9)
+	assert.InDelta(t, 0.12, fe.Fill.Qty, 1e-9)
 	assert.Equal(t, oms.StatusFilled, o.Get(ordID).Status, "fill must reconcile → FILLED, not stuck OPEN")
+}
+
+func TestLiveBroker_AutoSizeLimitOrders(t *testing.T) {
+	// cash 10000 @ 50000 → resolved qty = 10000*sizingCashFrac/50000 = 0.12 (0.001-aligned).
+	// Same auto-size gap as TestLiveBroker_AutoSizeMarketFills, but for LIMIT
+	// orders: placeLimitOrderAsync already resolves Qty internally for the
+	// exchange call, but PlaceOrder's own up-front resolution (used for the OMS
+	// record and the exposure guard) only covered MARKET orders — a Qty:0 limit
+	// order kept an OMS record of Qty=0, so the eventual real fill would be
+	// rejected as an over-fill and the exposure guard would see zero exposure.
+	mock := &mockOrderClient{limitID: "L1"}
+	b, o := newTestLiveBroker(mock)
+	b.SetLastPrice(50000)
+	b.cash.Store(10000.0)
+	b.equity.Store(10000.0)
+
+	ordID := b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "BTCUSDT", Side: strategy.SideBuy, Type: strategy.OrderLimit, Price: 49900, Qty: 0,
+	})
+	require.NotEmpty(t, ordID)
+
+	ord := o.Get(ordID)
+	require.NotNil(t, ord)
+	assert.InDelta(t, 0.12, ord.Qty, 1e-9, "auto-sized limit order must carry the resolved qty, not 0")
+}
+
+// TestLiveBroker_AutoSizeUsesConfiguredLeverage reproduces the 2026-08-13
+// finding: resolveQty sized every opening order as if unleveraged (cash ×
+// 0.99 ÷ price), never multiplying by the account's configured leverage —
+// so a 5x leverage account only ever opened 1x-sized positions, leaving most
+// of the leverage's capital efficiency unused. maxLeverage (wired by
+// SetExposureGuard, e.g. from EngineConfig.Leverage) must now scale the
+// auto-sized qty directly.
+func TestLiveBroker_AutoSizeUsesConfiguredLeverage(t *testing.T) {
+	// cash 1000 @ 50000, 5x leverage → qty = 1000*sizingCashFrac*5/50000 = 0.06 (0.001-aligned).
+	mock := &mockOrderClient{
+		marketFill: exchange.OrderFill{ExchangeID: "e1", FilledQty: 0.06, AvgPrice: 50000, Fee: 1, Status: "filled"},
+	}
+	b, o := newTestLiveBroker(mock)
+	b.SetLastPrice(50000)
+	b.cash.Store(1000.0)
+	b.equity.Store(1000.0)
+	b.SetExposureGuard(func() float64 { return 0 }, 5, 1.0) // frac=1.0: isolate the leverage effect from the exposure cap
+
+	ordID := b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "BTCUSDT", Side: strategy.SideBuy, Type: strategy.OrderMarket, Qty: 0,
+	})
+	require.NotEmpty(t, ordID)
+
+	ord := o.Get(ordID)
+	require.NotNil(t, ord)
+	assert.InDelta(t, 0.06, ord.Qty, 1e-9, "auto-sized qty must scale with the account's configured leverage")
+}
+
+// TestLiveBroker_AutoSizeRespectsExposureCapFromFlatStart reproduces a
+// 2026-08-13 production incident: the exposure guard blocked a real opening
+// order with no pre-existing position at all. Sizing used 99% of cash at full
+// leverage, while exceedsGrossExposure caps gross notional at equity ×
+// leverage × defaultMaxGrossExposureFrac (0.8) — since both scale by the same
+// leverage multiplier, it cancels out of the comparison, so 0.99 > 0.8 meant
+// ANY auto-sized opening order at ANY leverage was rejected, even from a flat
+// account. The two leverage tests above use frac=1.0 specifically to isolate
+// the leverage effect, so this real-default-frac scenario slipped through.
+func TestLiveBroker_AutoSizeRespectsExposureCapFromFlatStart(t *testing.T) {
+	mock := &mockOrderClient{
+		marketFill: exchange.OrderFill{ExchangeID: "e1", FilledQty: 1, AvgPrice: 50000, Fee: 1, Status: "filled"},
+	}
+	b, o := newTestLiveBroker(mock)
+	b.SetLastPrice(50000)
+	b.cash.Store(1000.0)
+	b.equity.Store(1000.0)
+	b.SetExposureGuard(func() float64 { return 0 }, 5, defaultMaxGrossExposureFrac) // real production defaults: 5x, 0.8 frac, flat start
+
+	ordID := b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "BTCUSDT", Side: strategy.SideBuy, Type: strategy.OrderMarket, Qty: 0,
+	})
+	require.NotEmpty(t, ordID, "auto-sizing from a flat account at the real default exposure frac must not immediately trip the exposure guard")
+
+	ord := o.Get(ordID)
+	require.NotNil(t, ord)
+	capNotional := 1000.0 * 5 * defaultMaxGrossExposureFrac
+	assert.LessOrEqual(t, ord.Qty*50000, capNotional, "auto-sized notional must stay within the exposure cap")
+}
+
+// TestLiveBroker_AutoSizeDefaultsToUnleveraged confirms sizing falls back to
+// 1x (today's behavior) when no leverage has been configured — spot / one-way
+// accounts, or before SetExposureGuard has run.
+func TestLiveBroker_AutoSizeDefaultsToUnleveraged(t *testing.T) {
+	// cash 10000 @ 50000, no leverage configured (defaults to 1x) → qty = 10000*sizingCashFrac*1/50000 = 0.12.
+	mock := &mockOrderClient{
+		marketFill: exchange.OrderFill{ExchangeID: "e1", FilledQty: 0.12, AvgPrice: 50000, Fee: 1, Status: "filled"},
+	}
+	b, o := newTestLiveBroker(mock)
+	b.SetLastPrice(50000)
+	b.cash.Store(10000.0)
+	b.equity.Store(10000.0)
+	// No SetExposureGuard call — maxLeverage stays at its zero value.
+
+	ordID := b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "BTCUSDT", Side: strategy.SideBuy, Type: strategy.OrderMarket, Qty: 0,
+	})
+	require.NotEmpty(t, ordID)
+
+	ord := o.Get(ordID)
+	require.NotNil(t, ord)
+	assert.InDelta(t, 0.12, ord.Qty, 1e-9, "unconfigured leverage must default to 1x, not 0x")
 }
 
 func TestLiveBroker_MarketOrderExchangeError(t *testing.T) {
@@ -447,6 +553,45 @@ func TestLiveBroker_DuplicateOrderBlocked(t *testing.T) {
 		Qty:    0.5,
 	})
 	assert.Equal(t, ordID2, ordID3, "duplicate order should return the pending limit order ID")
+}
+
+// TestLiveBroker_HedgeModeFlipNotBlockedAsDuplicate reproduces the 2026-08-12
+// incident: a macross hedge-mode direction flip (golden cross while SHORT)
+// closes the SHORT (BUY, PositionSide=SHORT) then, same bar, opens a LONG
+// (BUY, PositionSide=LONG). Both share Symbol+Side — before the fix, the
+// still-pending close falsely blocked the open as a "duplicate", leaving the
+// engine stuck flat after its first flip. The open leg must succeed.
+func TestLiveBroker_HedgeModeFlipNotBlockedAsDuplicate(t *testing.T) {
+	mock := &mockOrderClient{
+		limitID: "close-short-pending",
+	}
+	b, _ := newTestLiveBroker(mock)
+	b.SetLastPrice(50000)
+	b.cash.Store(100000.0)
+	b.equity.Store(100000.0)
+
+	// Close SHORT via a resting limit order — stays OPEN / non-terminal, same
+	// as a real close order would while still waiting for exchange confirmation.
+	closeID := b.PlaceOrder(strategy.OrderRequest{
+		Symbol:       "BTCUSDT",
+		Side:         strategy.SideBuy,
+		PositionSide: strategy.PositionSideShort,
+		Type:         strategy.OrderLimit,
+		Qty:          1,
+		Price:        49000,
+	})
+	require.NotEmpty(t, closeID)
+
+	// Open LONG — same Symbol+Side as the pending close, different PositionSide.
+	openID := b.PlaceOrder(strategy.OrderRequest{
+		Symbol:       "BTCUSDT",
+		Side:         strategy.SideBuy,
+		PositionSide: strategy.PositionSideLong,
+		Type:         strategy.OrderMarket,
+		Qty:          1,
+	})
+	assert.NotEmpty(t, openID, "open-LONG must not be blocked by the pending close-SHORT")
+	assert.NotEqual(t, closeID, openID, "open-LONG must be a genuinely new order, not the pending close returned again")
 }
 
 func TestLiveBroker_CancelAllPending(t *testing.T) {

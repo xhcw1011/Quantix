@@ -16,31 +16,36 @@ const (
 // ─── Hourly Mode ────────────────────────────────────────────────────────────
 
 type hourlyMode int
+
 const (
 	hourlyTrendStrong hourlyMode = iota // 1h EMA aligned + slope strong → wide trail, let it run
-	hourlyTrendWeak                      // 1h neutral or mixed → normal trail
-	hourlyExitMode                       // 1h EMA opposes position → tight trail, prepare exit
+	hourlyTrendWeak                     // 1h neutral or mixed → normal trail
+	hourlyExitMode                      // 1h EMA opposes position → tight trail, prepare exit
 )
 
 func (s *AIStrategy) hourlyModeStr(side string) string {
 	m := s.detectHourlyMode(side)
 	switch m {
-	case hourlyTrendStrong: return "STRONG"
-	case hourlyExitMode:    return "EXIT"
-	default:                return "WEAK"
+	case hourlyTrendStrong:
+		return "STRONG"
+	case hourlyExitMode:
+		return "EXIT"
+	default:
+		return "WEAK"
 	}
 }
 
 // ─── Position ────────────────────────────────────────────────────────────────
 
 type posMode int
+
 const (
 	modeTrend posMode = iota
 	modeRange
 )
 
 type posState struct {
-	side       string  // "LONG" or "SHORT"
+	side       string // "LONG" or "SHORT"
 	mode       posMode
 	entryPrice float64
 	entryATR   float64 // ATR at entry time — used for trailing so it never tightens when live ATR shrinks
@@ -61,20 +66,29 @@ type posState struct {
 	// from the "actual fill event received" state. Required to avoid double-
 	// counting the market order's first fill in the partial-fill accumulator.
 	firstFillSeen bool
-	orderID    string
-	limitBar   int
+	orderID       string
+	limitBar      int
 
 	closeFailCount int       // consecutive close order failures (reset on success)
 	lastPeakAt     time.Time // when peakPrice was last updated (for stale peak detection)
 	trailTier      int       // 0=none, 1=tight(1ATR), 2=wide(3ATR) — tracks current trailing tier
 
 	// Staged TP (trend mode): exchange-native limit orders
-	stagedTPPlaced bool // true once TP orders are on the exchange
-	safetyNetSL    bool // true while a temporary exchange SL protects trend positions during recovery
+	stagedTPPlaced bool             // true once TP orders are on the exchange
+	safetyNetSL    bool             // true while a temporary exchange SL protects trend positions during recovery
 	stagedTPs      []stagedTPRecord // tracks each TP level for dynamic adjustment
 
 	// Regime at entry time (determines management behavior)
 	entryRegime Regime
+	// entryRegimeAge is s.regimeAge at the bar this position opened — how many
+	// consecutive bars the entry regime had already held. Feeds
+	// ageAdjustedTrendCutR (manage.go): a grid position opened deep into an
+	// already-old regime read gets cut earlier on TrendCutR, mirroring the
+	// same "older regime = higher risk" signal gridAgeSizeScale already uses
+	// for entry sizing. NOT persisted across live restarts (recovered
+	// positions default to 0 = treated as youngest/full-threshold, the safe
+	// direction — ageAdjustedTrendCutR is off by default anyway).
+	entryRegimeAge int
 
 	// Grid orders (range mode only)
 	gridOrders []*gridOrder
@@ -98,4 +112,3 @@ type gridOrder struct {
 	orderID    string
 	limitBar   int
 }
-

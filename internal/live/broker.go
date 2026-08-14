@@ -194,9 +194,11 @@ func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
 		return ""
 	}
 
-	// Soft idempotency: block duplicate orders for the same symbol+side to
-	// prevent double-position after network retries.
-	if existing := b.omsInst.FindPending(req.Symbol, req.Side); existing != nil {
+	// Soft idempotency: block duplicate orders for the same symbol+side+positionSide
+	// to prevent double-position after network retries. positionSide matters — see
+	// FindPending's doc comment (hedge-mode direction flips share Side across
+	// independent legs and must not be treated as duplicates of each other).
+	if existing := b.omsInst.FindPending(req.Symbol, req.Side, req.PositionSide); existing != nil {
 		// Stale pending orders (>5min) from DB recovery should not block new orders
 		if time.Since(existing.CreatedAt) > 5*time.Minute {
 			b.log.Info("clearing stale OMS order — cancelling on exchange too", zap.String("id", existing.ID))
@@ -215,17 +217,20 @@ func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
 				zap.String("existing_id", existing.ID),
 				zap.String("existing_status", string(existing.Status)),
 			)
-			return ""
+			return existing.ID
 		}
 	}
 
-	// Resolve auto-sized (Qty==0) market orders up-front so the exposure guard,
-	// the OMS order record, and fill reconciliation all use the real quantity.
-	// Otherwise the OMS order keeps Qty=0 and OMS.Fill rejects every real fill as
-	// an over-fill (fill.Qty > 0 = order.Qty), leaving the order stuck OPEN and the
-	// strategy's hedge state (macross hasLong/hasShort) never updating. Explicit
-	// Qty>0 orders (e.g. aistrat) skip this.
-	if req.Qty == 0 && (req.Type == strategy.OrderMarket || req.Type == strategy.OrderType("")) {
+	// Resolve auto-sized (Qty==0) market/limit orders up-front so the exposure
+	// guard, the OMS order record, and fill reconciliation all use the real
+	// quantity. Otherwise the OMS order keeps Qty=0 and OMS.Fill rejects every
+	// real fill as an over-fill (fill.Qty > 0 = order.Qty), leaving the order
+	// stuck OPEN and the strategy's hedge state (macross hasLong/hasShort) never
+	// updating. Limit orders need this too (not just market) — placeLimitOrderAsync
+	// already resolves Qty internally for the exchange call, but without this
+	// up-front resolution the OMS record and exposure guard above never see it.
+	// Explicit Qty>0 orders (e.g. aistrat) skip this.
+	if req.Qty == 0 && (req.Type == strategy.OrderMarket || req.Type == strategy.OrderType("") || req.Type == strategy.OrderLimit) {
 		resolved, err := b.resolveQty(req, string(req.PositionSide))
 		if err != nil {
 			b.log.Warn("auto-size: cannot resolve order qty — dropping order",
@@ -247,14 +252,14 @@ func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
 		}
 		gross := b.grossQtyFn()
 		if exceedsGrossExposure(b.Equity(), float64(b.maxLeverage), b.maxGrossFrac, gross, req.Qty, price) {
-			b.log.Warn("EXPOSURE GUARD: opening order blocked — projected gross notional exceeds equity×leverage×frac cap",
+			b.log.Warn("敞口保护：开仓单被拦截 — 预计总敞口会超过权益×杠杆×比例上限",
 				zap.String("symbol", req.Symbol), zap.String("side", string(req.Side)),
 				zap.String("pos_side", string(req.PositionSide)), zap.Float64("new_qty", req.Qty),
 				zap.Float64("exchange_gross_qty", gross), zap.Float64("equity", b.Equity()),
 				zap.Int("leverage", b.maxLeverage), zap.Float64("frac", b.maxGrossFrac),
 				zap.Float64("price", price))
 			if b.notifier != nil {
-				b.notifier.SystemAlert("WARN", "exposure guard blocked an opening order — real position would exceed the gross-exposure cap (possible desync); check positions")
+				b.notifier.SystemAlert("WARN", "敞口保护拦截了一笔开仓单——实际仓位会超过总敞口上限（可能是账户状态不同步），请检查仓位")
 			}
 			return ""
 		}
@@ -518,6 +523,33 @@ func roundQtyToStep(qty, step float64) float64 {
 	return math.Floor(qty/step+1e-9) * step
 }
 
+// sizingLeverage returns the multiplier auto-sized opening orders use against
+// available cash. Mirrors exceedsGrossExposure's own "at least 1x" floor —
+// unset (0, before SetExposureGuard has run) or spot/one-way (1) both size as
+// unleveraged. Configured futures leverage (e.g. 5x) scales sizing directly,
+// so a 5x account actually opens 5x-sized positions instead of always sizing
+// as if unleveraged and leaving most of the account's capital efficiency
+// unused (2026-08-13 finding).
+func (b *Broker) sizingLeverage() float64 {
+	if b.maxLeverage < 1 {
+		return 1
+	}
+	return float64(b.maxLeverage)
+}
+
+// sizingCashFrac is the fraction of available cash an auto-sized (Qty:0)
+// opening order uses, before the leverage multiplier. Must stay meaningfully
+// below exceedsGrossExposure's defaultMaxGrossExposureFrac (0.8): both
+// figures get multiplied by the SAME configured leverage, so the leverage
+// cancels out of the comparison — sizing at 0.99 against an 0.8 cap meant
+// ANY auto-sized opening order, from a completely flat account, at ANY
+// leverage, always exceeded the exposure guard and got rejected outright
+// (2026-08-13 production incident: a real opening order blocked with zero
+// pre-existing exposure). 0.6 leaves headroom under 0.8 for cash-vs-equity
+// drift (unrealized PnL), small pre-existing gross exposure, and price
+// movement between this snapshot and the guard's own re-check.
+const sizingCashFrac = 0.6
+
 func (b *Broker) resolveQty(req strategy.OrderRequest, posSide string) (float64, error) {
 	if req.Qty > 0 {
 		return req.Qty, nil
@@ -526,22 +558,22 @@ func (b *Broker) resolveQty(req strategy.OrderRequest, posSide string) (float64,
 	lp := safeLoadFloat64(&b.lastPrice)
 
 	switch {
-	// Opening long or net buy: use available cash
+	// Opening long or net buy: use available cash × configured leverage
 	case (posSide == "" && req.Side == strategy.SideBuy) ||
 		(posSide == string(strategy.PositionSideLong) && req.Side == strategy.SideBuy):
 		if lp <= 0 {
 			return 0, fmt.Errorf("all-in buy: no last price available")
 		}
 		cash := safeLoadFloat64(&b.cash)
-		return roundQtyToStep(cash*0.99/lp, defaultQtyStep), nil
+		return roundQtyToStep(cash*sizingCashFrac*b.sizingLeverage()/lp, defaultQtyStep), nil
 
-	// Opening short: use cash as margin (1x equiv)
+	// Opening short: use cash as margin × configured leverage
 	case posSide == string(strategy.PositionSideShort) && req.Side == strategy.SideSell:
 		if lp <= 0 {
 			return 0, fmt.Errorf("all-in short: no last price available")
 		}
 		cash := safeLoadFloat64(&b.cash)
-		return roundQtyToStep(cash*0.99/lp, defaultQtyStep), nil
+		return roundQtyToStep(cash*sizingCashFrac*b.sizingLeverage()/lp, defaultQtyStep), nil
 
 	// Closing long or net sell
 	case (posSide == "" && req.Side == strategy.SideSell) ||

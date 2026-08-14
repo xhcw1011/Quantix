@@ -825,7 +825,20 @@ func (b *OrderBroker) SubscribeUserData(ctx context.Context, handler func(fill e
 	}
 }
 
+// GetPositionMode implements exchange.PositionModeChecker. Queries the
+// account-wide dualSidePosition setting — true means Hedge Mode (orders must
+// carry an explicit PositionSide), false means One-way/net mode (PositionSide
+// omitted).
+func (b *OrderBroker) GetPositionMode(ctx context.Context) (bool, error) {
+	res, err := b.client.NewGetPositionModeService().Do(ctx)
+	if err != nil {
+		return false, fmt.Errorf("get position mode: %w", err)
+	}
+	return res.DualSidePosition, nil
+}
+
 // Compile-time interface checks.
 var _ exchange.OrderClient = (*OrderBroker)(nil)
 var _ exchange.MarginQuerier = (*OrderBroker)(nil)
 var _ exchange.OrderStatusChecker = (*OrderBroker)(nil)
+var _ exchange.PositionModeChecker = (*OrderBroker)(nil)

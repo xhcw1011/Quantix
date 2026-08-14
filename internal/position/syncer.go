@@ -121,8 +121,10 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 	// position query so a recovered (untracked) position gets a real cost basis —
 	// otherwise a strategy adopting it (e.g. guardian) can't compute the stop.
 	entryBySide := map[string]float64{}
+	positionsQueryOK := false
 	if pq, ok := querier.(exchange.PositionQuerier); ok {
 		if positions, perr := pq.GetPositions(ctx); perr == nil {
+			positionsQueryOK = true
 			for _, p := range positions {
 				if p.Symbol != s.symbol {
 					continue
@@ -227,23 +229,41 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 	}
 
 	// Check for phantom positions (we think we have it but exchange doesn't).
-	// If we reach here, the API call succeeded (errors returned early at line 112).
-	// An empty result means no positions exist — trust the exchange.
+	// If we reach here, the GetMarginRatios call succeeded (errors returned
+	// early at line 112) — but GetMarginRatios and GetPositions both parse the
+	// SAME underlying exchange response, just with different per-field
+	// strictness (e.g. GetMarginRatios silently drops an entry if markPrice
+	// fails to parse; GetPositions doesn't). A transient glitch in ONE parse
+	// must not be enough to wipe a real position: when GetPositions ran
+	// successfully and disagrees (it saw the position, GetMarginRatios
+	// didn't), treat this round as inconclusive and keep the existing
+	// position rather than clear it — a 2026-08-13 incident wiped a real,
+	// exchange-confirmed, stop-loss-protected SHORT this way. If GetPositions
+	// isn't available or also failed, fall back to trusting GetMarginRatios
+	// alone, same as before.
 	s.mu.Lock()
 	if s.long != nil && !exchangeLong {
-		s.log.Warn("syncer: phantom LONG — exchange has no position, clearing")
-		s.long = nil
-		s.PositionClosedExternally.Store(true)
-		if s.redis != nil {
-			s.redis.DeletePosition(ctx, s.symbol, "LONG")
+		if _, sawInPositions := entryBySide["LONG"]; positionsQueryOK && sawInPositions {
+			s.log.Warn("syncer: GetMarginRatios reports LONG absent but GetPositions still saw it — treating as inconclusive, not clearing")
+		} else {
+			s.log.Warn("syncer: phantom LONG — exchange has no position, clearing")
+			s.long = nil
+			s.PositionClosedExternally.Store(true)
+			if s.redis != nil {
+				s.redis.DeletePosition(ctx, s.symbol, "LONG")
+			}
 		}
 	}
 	if s.short != nil && !exchangeShort {
-		s.log.Warn("syncer: phantom SHORT — exchange has no position, clearing")
-		s.short = nil
-		s.PositionClosedExternally.Store(true)
-		if s.redis != nil {
-			s.redis.DeletePosition(ctx, s.symbol, "SHORT")
+		if _, sawInPositions := entryBySide["SHORT"]; positionsQueryOK && sawInPositions {
+			s.log.Warn("syncer: GetMarginRatios reports SHORT absent but GetPositions still saw it — treating as inconclusive, not clearing")
+		} else {
+			s.log.Warn("syncer: phantom SHORT — exchange has no position, clearing")
+			s.short = nil
+			s.PositionClosedExternally.Store(true)
+			if s.redis != nil {
+				s.redis.DeletePosition(ctx, s.symbol, "SHORT")
+			}
 		}
 	}
 	s.mu.Unlock()

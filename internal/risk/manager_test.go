@@ -86,6 +86,93 @@ func TestRisk_Reset(t *testing.T) {
 	assert.NoError(t, m.Check(buyReq(0.001), 8_000, 0, 50_000))
 }
 
+// ─── State persistence (2026-08-06: circuit breaker must survive a restart) ──
+
+// fakeRiskStore is an in-memory risk.StateStore for tests.
+type fakeRiskStore struct {
+	halted     bool
+	peakEquity float64
+	ok         bool
+	saves      int
+}
+
+func (f *fakeRiskStore) Save(halted bool, peakEquity float64) error {
+	f.halted, f.peakEquity, f.ok = halted, peakEquity, true
+	f.saves++
+	return nil
+}
+func (f *fakeRiskStore) Load() (bool, float64, bool) { return f.halted, f.peakEquity, f.ok }
+
+// TestRisk_SetStateStoreRestoresPriorHalt reproduces the 2026-08-06 finding:
+// risk.Manager is recreated fresh on every engine start (restart or
+// first-ever), so a real, still-in-force halt from before a crash/restart
+// was silently cleared -- the account could resume trading past its own
+// drawdown cap. A persisted halt must survive being wired into a brand new
+// Manager instance.
+func TestRisk_SetStateStoreRestoresPriorHalt(t *testing.T) {
+	m := newManager(0.10, 0.15, 0.02) // freshly constructed, as if just after a restart
+	store := &fakeRiskStore{halted: true, peakEquity: 10_000, ok: true}
+
+	m.SetStateStore(store)
+
+	if !m.Halted() {
+		t.Fatal("a persisted halt must survive being restored into a new Manager instance")
+	}
+	err := m.Check(buyReq(0.001), 8_000, 0, 50_000)
+	if err != ErrCircuitBreaker {
+		t.Fatalf("orders must still be blocked after restoring a prior halt, got: %v", err)
+	}
+}
+
+// TestRisk_SetStateStoreNeverLowersPeakEquity: the peak baseline must never
+// regress to a lower, already-drawn-down value just because the process
+// restarted -- that would let another full MaxDrawdownPct of loss happen on
+// top of a loss that already occurred before the restart.
+func TestRisk_SetStateStoreNeverLowersPeakEquity(t *testing.T) {
+	m := New(Config{MaxDrawdownPct: 0.15}, 8_000, zap.NewNop()) // constructed with CURRENT (already-reduced) equity, as manager.go does on restart
+	store := &fakeRiskStore{halted: false, peakEquity: 10_000, ok: true}
+
+	m.SetStateStore(store)
+
+	if got := m.PeakEquity(); got != 10_000 {
+		t.Fatalf("peak equity must restore to the persisted historical peak, got %v want 10000", got)
+	}
+}
+
+// TestRisk_SetStateStoreNoPriorState covers the genuinely-first-ever-start
+// case: nothing to restore, the manager keeps its constructor-seeded values.
+func TestRisk_SetStateStoreNoPriorState(t *testing.T) {
+	m := New(Config{MaxDrawdownPct: 0.15}, 10_000, zap.NewNop())
+	store := &fakeRiskStore{} // ok=false: no row yet
+
+	m.SetStateStore(store)
+
+	if m.Halted() {
+		t.Fatal("must not halt when there is no persisted state")
+	}
+	if got := m.PeakEquity(); got != 10_000 {
+		t.Fatalf("peak equity must keep its constructor value, got %v want 10000", got)
+	}
+}
+
+// TestRisk_PersistsOnCircuitBreakerTrip verifies the halt is written through
+// to the store the moment it fires, not just held in memory (else the next
+// restart still can't see it).
+func TestRisk_PersistsOnCircuitBreakerTrip(t *testing.T) {
+	m := newManager(0.10, 0.15, 0.02)
+	store := &fakeRiskStore{}
+	m.SetStateStore(store)
+
+	m.UpdateEquity(8_400) //nolint:errcheck // 16% drawdown -> trips
+
+	if !store.halted {
+		t.Fatal("circuit breaker trip must be persisted immediately")
+	}
+	if store.saves == 0 {
+		t.Fatal("expected at least one Save call")
+	}
+}
+
 // ─── Kelly Criterion tests ────────────────────────────────────────────────────
 
 func TestKelly_PositiveEdge(t *testing.T) {
@@ -133,7 +220,7 @@ func TestRisk_BlocksOversizedShort(t *testing.T) {
 	}
 	err := m.Check(req, 10_000, 0, 50_000)
 	assert.Error(t, err, "should block short that exceeds max position size")
-	assert.Contains(t, err.Error(), "position size")
+	assert.Contains(t, err.Error(), "仓位大小")
 }
 
 func TestRisk_AllowsValidShort(t *testing.T) {

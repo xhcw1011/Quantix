@@ -157,6 +157,7 @@ func (s *AIStrategy) openGrid(ctx *strategy.Context, side string, currentPrice, 
 	}
 	gridEquity := equity * s.cfg.GridEquityPct
 	riskAmount := gridEquity * s.cfg.GridRiskPerLayer
+	riskAmount *= gridAgeSizeScale(s.regimeAge, s.cfg.GridAgeSizeDecay, s.cfg.GridAgeSizeFloor)
 	qty := math.Floor(riskAmount/R*1000) / 1000
 
 	// Safety cap: grid margin must not exceed grid equity allocation
@@ -374,6 +375,7 @@ func (s *AIStrategy) placeOrder(ctx *strategy.Context, side string, price, qty f
 		Meta: map[string]float64{
 			"regime": regimeCode(s.lastRegime), "atr": s.calcATR(), "entry_stop": stopLoss,
 			"efficiency": s.lastEfficiency, "efficiency_margin": s.cfg.TrendEfficiencyMin - s.lastEfficiency,
+			"regime_age": float64(s.regimeAge),
 		},
 	}
 	if enforceBrokerStop {

@@ -1,0 +1,12 @@
+-- Fix: experiments was keyed only by engine_id, but engine_id
+-- ("SYMBOL-INTERVAL-STRATEGY", e.g. "BTCUSDT-15m-macross") is only unique
+-- WITHIN one user's engines -- it is NOT globally unique. Two different users
+-- running the same symbol+interval+strategy combo share the identical
+-- engine_id string, so cmd/experiment-report's KPI query
+-- (WHERE strategy_id=$engine_id / engine_id=$engine_id, no user_id) could
+-- blend two different users' fills/trade_events into one experiment's KPI
+-- report and auto-write a won/lost decision to the shared experiments row
+-- based on the blended numbers (found 2026-08-06 during the guardian_state
+-- cross-user audit, see migration 015 for the original incident this same
+-- root cause caused on the live trading path).
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS user_id INTEGER NOT NULL DEFAULT 0;

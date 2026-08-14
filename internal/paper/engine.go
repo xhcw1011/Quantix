@@ -100,6 +100,18 @@ func New(
 
 // Run starts the paper trading loop. It reads closed klines from klineCh
 // and processes them until ctx is cancelled.
+// checkRetired reports whether the strategy has permanently retired (see
+// strategy.Retired). Mirrors internal/live's Engine.checkRetired so paper
+// mode gets the same self-stop behavior (2026-08-06 finding).
+func (e *Engine) checkRetired() bool {
+	r, ok := e.strategy.(strategy.Retired)
+	if !ok || !r.Retired() {
+		return false
+	}
+	e.log.Info("策略已退休，引擎停止", zap.String("id", e.cfg.StrategyID))
+	return true
+}
+
 func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	e.startTime = time.Now()
 	e.omsInst.SetContext(ctx) // enable backpressure on fills/orders channels
@@ -122,7 +134,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	go e.processFills(ctx)
 	go e.persistOrdersLoop(ctx)
 
-	e.log.Info("paper trading started",
+	e.log.Info("模拟交易已启动",
 		zap.String("strategy", e.strategy.Name()),
 		zap.String("id", e.cfg.StrategyID),
 		zap.Float64("capital", e.cfg.InitialCapital),
@@ -130,7 +142,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 
 	if e.notifier != nil {
 		e.notifier.SystemAlert("INFO", fmt.Sprintf(
-			"Quantix paper trading started\nStrategy: %s | Capital: $%.2f",
+			"Quantix 模拟交易已启动\n策略：%s | 本金：$%.2f",
 			e.strategy.Name(), e.cfg.InitialCapital,
 		))
 	}
@@ -151,10 +163,10 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			e.printStatus()
 			if e.notifier != nil {
 				e.notifier.SystemAlert("INFO", fmt.Sprintf(
-					"Quantix stopped\n%s", e.Summary(),
+					"Quantix 模拟交易已停止\n%s", e.Summary(),
 				))
 			}
-			e.log.Info("paper trading stopped")
+			e.log.Info("模拟交易已停止")
 			return nil
 
 		case kline, ok := <-klineCh:
@@ -166,6 +178,9 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				continue
 			}
 			e.onBar(kline)
+			if e.checkRetired() {
+				return strategy.ErrRetired
+			}
 
 		case <-statusTicker.C:
 			e.printStatus()
@@ -216,7 +231,7 @@ func (e *Engine) onBar(bar exchange.Kline) {
 	}
 
 	if err := e.risk.UpdateEquity(equity); err != nil {
-		e.log.Error("trading halted by risk manager",
+		e.log.Error("风控已暂停模拟交易",
 			zap.Float64("equity", equity), zap.Error(err))
 		if e.notifier != nil {
 			var drawdown float64
@@ -341,7 +356,7 @@ func (e *Engine) applyFillEvent(event oms.FillEvent) {
 		)
 	}
 
-	e.log.Info("paper fill",
+	e.log.Info("模拟成交",
 		zap.String("order_id", event.Order.ID),
 		zap.String("symbol", event.Fill.Symbol),
 		zap.String("side", string(event.Fill.Side)),
@@ -564,7 +579,7 @@ func (e *Engine) printStatus() {
 	totalReturn := safePctReturn(equity, e.cfg.InitialCapital)
 	elapsed := time.Since(e.startTime).Truncate(time.Second)
 
-	e.log.Info("──── Paper Trading Status ────",
+	e.log.Info("──── 模拟交易状态 ────",
 		zap.Duration("uptime", elapsed),
 		zap.Float64("initial_capital", e.cfg.InitialCapital),
 		zap.Float64("cash", cash),
@@ -576,7 +591,7 @@ func (e *Engine) printStatus() {
 	)
 
 	for _, pos := range positions {
-		e.log.Info("  position",
+		e.log.Info("  仓位",
 			zap.String("symbol", pos.Symbol),
 			zap.Float64("qty", pos.Qty),
 			zap.Float64("avg_entry", pos.AvgEntryPrice),
@@ -590,7 +605,7 @@ func (e *Engine) printStatus() {
 			filled++
 		}
 	}
-	e.log.Info("  orders",
+	e.log.Info("  订单",
 		zap.Int("total", len(orders)),
 		zap.Int("filled", filled),
 	)
@@ -682,8 +697,8 @@ func (e *Engine) Summary() string {
 		}
 	}
 	return fmt.Sprintf(
-		"Paper Trading Summary | Strategy: %s | Capital: $%.2f → $%.2f (%.2f%%) | "+
-			"Realized PnL: $%.2f | Filled orders: %d | Duration: %s",
+		"模拟交易汇总 | 策略：%s | 本金：$%.2f → $%.2f（%.2f%%）| "+
+			"已实现盈亏：$%.2f | 已成交订单：%d | 运行时长：%s",
 		e.strategy.Name(),
 		e.cfg.InitialCapital, equity, ret,
 		rpnl,

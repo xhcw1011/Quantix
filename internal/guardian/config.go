@@ -14,9 +14,30 @@ func init() {
 	registry.Register("guardian", Factory)
 }
 
+// ResolveMode determines which of the three Guardian modes a raw params map
+// resolves to — the exact precedence Factory uses to build the Guardian
+// (PlaceEntry beats Adopt; Adopt defaults true). Exported so callers outside
+// this package that need to know "what will this guardian actually do"
+// without fully parsing/validating params (e.g. internal/api's pre-flight
+// leverage-requirement check) ask this package directly instead of
+// re-deriving the boolean precedence themselves and risking drift — the
+// 2026-08-07 refactor found exactly that drift: internal/api/manager.go's
+// guardianAdoptOnly only ever checked PlaceEntry, silently mislabeling an
+// explicit Adopt:false request (ModeExplicit) as adopt-only.
+func ResolveMode(params map[string]any) Mode {
+	if boolOr(params, "PlaceEntry", false) {
+		return ModeEntry
+	}
+	if boolOr(params, "Adopt", true) {
+		return ModeAdopt
+	}
+	return ModeExplicit
+}
+
 // guardianConfig is the parsed, validated setup for one Guardian engine.
 type guardianConfig struct {
 	Symbol     string
+	Mode       Mode
 	Adopt      bool
 	PlaceEntry bool // open the position first, then arm from the fill
 
@@ -50,15 +71,15 @@ func Factory(params map[string]any, log *zap.Logger) (strategy.Strategy, error) 
 		return nil, err
 	}
 	var g *Guardian
-	switch {
-	case gc.PlaceEntry:
+	switch gc.Mode {
+	case ModeEntry:
 		g = NewEntryGuardian(gc.Symbol, gc.Side, gc.Qty, gc.Prot, gc.ATRWindow, log)
 		if gc.EntryType == "limit" {
 			g.SetLimitEntry(gc.EntryPrice)
 		}
-	case gc.Adopt:
+	case ModeAdopt:
 		g = NewAdoptGuardian(gc.Symbol, gc.Prot, gc.ATRWindow, log)
-	default:
+	default: // ModeExplicit
 		g = NewGuardian(gc.Symbol, NewProtection(gc.Side, gc.Entry, gc.Qty, gc.Prot, 0), gc.ATRWindow, log)
 	}
 	if gc.MAPeriod > 0 {
@@ -169,6 +190,7 @@ func parseGuardianConfig(p map[string]any) (guardianConfig, error) {
 	if gc.Symbol == "" {
 		return gc, fmt.Errorf("guardian: Symbol is required")
 	}
+	gc.Mode = ResolveMode(p)
 	for _, v := range sliceOr(p, "AlertLevels") {
 		if f, ok := asFloat(v); ok {
 			gc.AlertLevels = append(gc.AlertLevels, f)

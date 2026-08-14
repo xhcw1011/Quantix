@@ -54,23 +54,48 @@ type livePositionSource interface {
 	GetShort() *position.StrategyPosition
 }
 
-// Guardian is a protective strategy: it never opens (the user does) and never
-// re-enters. It watches one position, ratchets a trailing stop, closes on stop
-// or take-profit, and exposes live status. It implements strategy.Strategy,
-// strategy.TickReceiver and strategy.StatusReporter.
+// Phase is the Guardian's lifecycle stage — the single source of truth for
+// Status()'s "state" wire value. These 4 strings are a fixed contract with
+// web/src/pages/Engine.tsx's LiveStatus display (arming/watching/closing/
+// closed → 准备中/守护中/平仓中/已结束) and must never change.
+type Phase string
+
+const (
+	PhaseArming   Phase = "arming"
+	PhaseWatching Phase = "watching"
+	PhaseClosing  Phase = "closing"
+	PhaseClosed   Phase = "closed"
+)
+
+// Mode selects how the Guardian arms itself when it starts unarmed
+// (prot == nil). Set once at construction; never changes for the life of the
+// instance. See ResolveMode (config.go) for how a start request's params
+// resolve to one of these.
+type Mode int
+
+const (
+	ModeAdopt    Mode = iota // arm from whatever the account already holds
+	ModeEntry                // place the entry first, arm from its fill (or a live-position match)
+	ModeExplicit             // pre-armed at construction (API-only); never re-arms
+)
+
+// Guardian is a protective strategy: it never opens (the user does, unless
+// Mode is ModeEntry) and never re-enters. It watches one position, ratchets a
+// trailing stop, closes on stop or take-profit, and exposes live status. It
+// implements strategy.Strategy, strategy.TickReceiver and
+// strategy.StatusReporter.
 type Guardian struct {
 	symbol string
 	prot   *Protection
 	cfg    ProtectionConfig // used to arm when adopting
-	adopt  bool             // arm from the live account position on first bar
+	mode   Mode
+	phase  Phase
 	atr    *ATR
 	log    *zap.Logger
 
-	prevClose   float64
-	lastPrice   float64
-	barsHeld    int
-	closePlaced bool // a protective close has been submitted (prevents dupes)
-	done        bool // the protective close has filled
+	prevClose float64
+	lastPrice float64
+	barsHeld  int
 
 	// alerts (optional)
 	alerts   *AlertEngine
@@ -89,16 +114,20 @@ type Guardian struct {
 	stopOrderID      string
 	restingStopPrice float64 // stop price currently resting on the exchange
 
-	// restart recovery (optional)
-	store        StateStore
-	stateKey     string
-	restoreTried bool
+	// restart recovery (optional). restoreLoaded/restoredState guard the ONE
+	// store.Load() call (across both OnBar/OnTick call sites and however many
+	// bars arming takes); trailApplied guards the post-arm overlay, which may
+	// happen on a later bar than the load itself (e.g. ATR warmup delays arming).
+	store         StateStore
+	stateKey      string
+	restoreLoaded bool
+	restoredState *GuardianState
+	trailApplied  bool
 
 	armNotified bool // arm-summary (risk preview) sent once
 	partialDone bool // partial take-profit already fired
 
-	// arm-with-entry (optional): place the entry, then arm from its fill.
-	wantEntry   bool
+	// arm-with-entry (optional, Mode == ModeEntry): place the entry, then arm from its fill.
 	entrySide   string
 	entryQty    float64
 	entryType   string  // "market" (default) or "limit"
@@ -106,14 +135,20 @@ type Guardian struct {
 	entryPlaced bool
 }
 
-// NewGuardian builds a Guardian for an already-armed Protection.
+// NewGuardian builds a Guardian for an already-armed Protection (ModeExplicit,
+// prot != nil). Also used internally by NewAdoptGuardian/NewEntryGuardian with
+// prot == nil, which overwrite mode immediately after.
 func NewGuardian(symbol string, prot *Protection, atrWindow int, log *zap.Logger) *Guardian {
 	if log == nil {
 		log = zap.NewNop()
 	}
 	// AvgATR baseline = EMA of ATR over ~4× the ATR window (for vol-spike detection).
 	alpha := 2.0 / (float64(4*atrWindow) + 1)
-	return &Guardian{symbol: symbol, prot: prot, atr: NewATR(atrWindow), log: log, avgAlpha: alpha}
+	phase := PhaseArming
+	if prot != nil {
+		phase = PhaseWatching
+	}
+	return &Guardian{symbol: symbol, prot: prot, mode: ModeExplicit, phase: phase, atr: NewATR(atrWindow), log: log, avgAlpha: alpha}
 }
 
 // NewAdoptGuardian builds a Guardian that arms itself from the live account
@@ -121,7 +156,7 @@ func NewGuardian(symbol string, prot *Protection, atrWindow int, log *zap.Logger
 func NewAdoptGuardian(symbol string, cfg ProtectionConfig, atrWindow int, log *zap.Logger) *Guardian {
 	g := NewGuardian(symbol, nil, atrWindow, log)
 	g.cfg = cfg
-	g.adopt = true
+	g.mode = ModeAdopt
 	return g
 }
 
@@ -130,7 +165,7 @@ func NewAdoptGuardian(symbol string, cfg ProtectionConfig, atrWindow int, log *z
 func NewEntryGuardian(symbol, side string, qty float64, cfg ProtectionConfig, atrWindow int, log *zap.Logger) *Guardian {
 	g := NewGuardian(symbol, nil, atrWindow, log)
 	g.cfg = cfg
-	g.wantEntry = true
+	g.mode = ModeEntry
 	g.entrySide = side
 	g.entryQty = qty
 	g.entryType = "market"
@@ -155,7 +190,7 @@ func (g *Guardian) UpdateParams(ctx *strategy.Context, params map[string]any) er
 	if g.prot.TPPrice() > 0 {
 		tp = fmtPrice(g.prot.TPPrice())
 	}
-	g.log.Info("guardian: params updated live",
+	g.log.Info("guardian：参数已实时更新",
 		zap.String("symbol", g.symbol),
 		zap.Float64("stop", g.prot.Stop), zap.Float64("tp", g.prot.TPPrice()))
 	g.notifyAction("updated", fmt.Sprintf("已更新守护参数:止损→%s,止盈→%s", fmtPrice(g.prot.Stop), tp))
@@ -225,8 +260,13 @@ func (g *Guardian) livePosition(ctx *strategy.Context) *position.StrategyPositio
 func (g *Guardian) enterOrAdopt(ctx *strategy.Context, atr float64, isWarmup bool) bool {
 	pos := g.livePosition(ctx)
 	if pos == nil {
-		if isWarmup {
-			return false // don't open during warmup replay — the order is suppressed
+		if isWarmup || g.entryPlaced {
+			// isWarmup: don't open during warmup replay — the order is suppressed.
+			// entryPlaced: the one-shot entry already fired in a prior call/run —
+			// don't place a second one. (If it already filled, the branch above
+			// would have caught it via the live position; if it's still pending,
+			// wait rather than duplicate it.)
+			return false
 		}
 		g.placeEntry(ctx) // first run, live bar: no existing position → open it
 		return false
@@ -250,7 +290,8 @@ func (g *Guardian) enterOrAdopt(ctx *strategy.Context, atr float64, isWarmup boo
 		return false // no price yet — retry next bar/tick
 	}
 	g.prot = NewProtection(side, entry, pos.Qty, g.cfg, atr)
-	g.log.Info("guardian: adopted existing position instead of re-entering",
+	g.phase = PhaseWatching
+	g.log.Info("guardian：接管已有仓位，不重复开仓",
 		zap.String("symbol", g.symbol), zap.String("side", side),
 		zap.Float64("entry", pos.EntryPrice), zap.Float64("qty", pos.Qty),
 		zap.Float64("stop", g.prot.Stop))
@@ -261,6 +302,7 @@ func (g *Guardian) enterOrAdopt(ctx *strategy.Context, atr float64, isWarmup boo
 // placeEntry submits the market entry order once (armed later via OnFill).
 func (g *Guardian) placeEntry(ctx *strategy.Context) {
 	g.entryPlaced = true
+	g.persistEntryPlaced()
 	var req strategy.OrderRequest
 	dir := "空"
 	if g.entrySide == SideLong {
@@ -283,7 +325,7 @@ func (g *Guardian) placeEntry(ctx *strategy.Context) {
 
 // tryArm initialises Protection from the live account position; returns whether armed.
 func (g *Guardian) tryArm(ctx *strategy.Context, atr float64) bool {
-	if !g.adopt || ctx.Portfolio == nil {
+	if g.mode != ModeAdopt || ctx.Portfolio == nil {
 		return false
 	}
 	qty, avg, ok := ctx.Portfolio.Position(g.symbol)
@@ -298,7 +340,8 @@ func (g *Guardian) tryArm(ctx *strategy.Context, atr float64) bool {
 		side = SideShort
 	}
 	g.prot = NewProtection(side, avg, math.Abs(qty), g.cfg, atr)
-	g.log.Info("guardian: adopted position",
+	g.phase = PhaseWatching
+	g.log.Info("guardian：已接管仓位",
 		zap.String("symbol", g.symbol), zap.String("side", side),
 		zap.Float64("entry", avg), zap.Float64("qty", math.Abs(qty)),
 		zap.Float64("stop", g.prot.Stop))
@@ -335,32 +378,51 @@ func (g *Guardian) SetStateStore(store StateStore, key string) {
 	g.stateKey = key
 }
 
-// maybeRestore loads persisted trail state once, overriding the freshly-armed
-// protection so a restart resumes the advanced stop instead of resetting it.
-func (g *Guardian) maybeRestore() {
-	if g.restoreTried || g.store == nil || g.stateKey == "" || g.prot == nil {
+// restoreState is called at the top of OnBar and OnTick, both before AND after
+// the arm attempt. It loads the persisted blob exactly once (restoreLoaded)
+// and applies the prot-independent parts (EntryPlaced, Closing) immediately;
+// the prot-dependent trail overlay applies once prot exists, which may be a
+// later call if arming is delayed (e.g. ATR warmup).
+func (g *Guardian) restoreState() {
+	if g.store == nil || g.stateKey == "" {
 		return
 	}
-	g.restoreTried = true
-	st, ok := g.store.Load(g.stateKey)
-	if !ok {
-		return
+	if !g.restoreLoaded {
+		g.restoreLoaded = true
+		if st, ok := g.store.Load(g.stateKey); ok {
+			g.restoredState = &st
+			if g.mode == ModeEntry && st.EntryPlaced {
+				g.entryPlaced = true
+				g.log.Info("guardian：一次性开仓指令此前已执行过，重启后不再重复开仓",
+					zap.String("symbol", g.symbol))
+			}
+			if st.Closing {
+				g.phase = PhaseClosing
+			}
+		}
 	}
-	g.prot.Stop = st.Stop
-	g.prot.PeakR = st.PeakR
-	g.prot.SetActivated(st.Activated)
-	g.stopOrderID = st.StopOrderID
-	g.restingStopPrice = st.RestingStopPrice
-	if st.StopOrderID != "" {
-		// The resting stop still lives on the exchange; don't place a duplicate.
-		g.restingMode = true
-		g.restingTried = true
+	if !g.trailApplied && g.restoredState != nil && g.prot != nil {
+		g.trailApplied = true
+		st := g.restoredState
+		g.prot.Stop = st.Stop
+		g.prot.PeakR = st.PeakR
+		g.prot.SetActivated(st.Activated)
+		g.stopOrderID = st.StopOrderID
+		g.restingStopPrice = st.RestingStopPrice
+		g.partialDone = st.PartialDone
+		if st.StopOrderID != "" {
+			// The resting stop still lives on the exchange; don't place a duplicate.
+			g.restingMode = true
+			g.restingTried = true
+		}
+		g.log.Info("guardian：重启后已恢复跟踪止损状态",
+			zap.String("symbol", g.symbol), zap.Float64("stop", st.Stop))
 	}
-	g.log.Info("guardian: restored trail state after restart",
-		zap.String("symbol", g.symbol), zap.Float64("stop", st.Stop))
 }
 
-// saveState persists the current trail state (best-effort).
+// saveState persists the current trail state (best-effort). EntryPlaced is
+// carried forward so a later trail-state save (which writes the whole JSON
+// document) never resets the one-shot-entry flag back to false.
 func (g *Guardian) saveState() {
 	if g.store == nil || g.stateKey == "" || g.prot == nil {
 		return
@@ -371,7 +433,33 @@ func (g *Guardian) saveState() {
 		Activated:        g.prot.Activated(),
 		StopOrderID:      g.stopOrderID,
 		RestingStopPrice: g.restingStopPrice,
+		EntryPlaced:      g.entryPlaced,
+		PartialDone:      g.partialDone,
+		Closing:          g.phase == PhaseClosing,
 	})
+}
+
+// clearState removes the persisted state entirely. Must be called the moment
+// g.phase becomes PhaseClosed — by ANY path (self-retire or externally
+// closed) — otherwise a stale record (Closing:true above all) would poison a
+// future, unrelated guardian that later reuses this exact engine_id
+// (engine_id is deterministic — "Symbol-Interval-guardian" — with no session
+// nonce, and rows are never deleted anywhere else).
+func (g *Guardian) clearState() {
+	if g.store == nil || g.stateKey == "" {
+		return
+	}
+	_ = g.store.Delete(g.stateKey)
+}
+
+// persistEntryPlaced records immediately that the one-shot entry has fired, so
+// even if the process dies before any trail state exists, a subsequent restart
+// still knows not to re-enter.
+func (g *Guardian) persistEntryPlaced() {
+	if g.store == nil || g.stateKey == "" {
+		return
+	}
+	_ = g.store.Save(g.stateKey, GuardianState{EntryPlaced: true})
 }
 
 // notifyAction sends a factual notification about something the guardian did
@@ -390,6 +478,7 @@ func (g *Guardian) maybePartialTP(ctx *strategy.Context, price float64) {
 		return
 	}
 	g.partialDone = true
+	g.saveState() // persist immediately so a restart before the next trail-save doesn't forget
 	qty := g.prot.PartialTPQty()
 	var req strategy.OrderRequest
 	if g.prot.Side == SideLong {
@@ -447,7 +536,7 @@ func (g *Guardian) placeRestingStop(ctx *strategy.Context) {
 	g.restingStopPrice = g.prot.Stop
 	g.restingMode = true
 	g.saveState()
-	g.log.Info("guardian: resting stop placed",
+	g.log.Info("guardian：已挂出交易所止损单",
 		zap.String("symbol", g.symbol), zap.Float64("stop", g.prot.Stop),
 		zap.String("order", id))
 }
@@ -494,9 +583,10 @@ func (g *Guardian) Name() string { return "guardian" }
 // OnBar updates ATR + trailing on each closed candle and enforces the stop/TP
 // against the bar's intrabar extremes (the stop that was in force during the bar).
 func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
-	if g.inactive() {
+	if g.phase == PhaseClosed {
 		return
 	}
+	g.restoreState()
 	pc := g.prevClose
 	if pc == 0 {
 		pc = bar.Open
@@ -510,16 +600,38 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	g.lastPrice = bar.Close
 
 	if g.prot == nil {
-		if g.wantEntry { // open first (or adopt if already open), arm from there
-			if !g.entryPlaced {
-				if !g.enterOrAdopt(ctx, atr, bar.Warmup) {
-					return
-				}
-			} else {
-				return // entry placed, waiting for its fill to arm
+		if g.phase == PhaseClosing {
+			// Restored Closing while still unarmed this run -- our own close
+			// (placed by a prior process) may have resolved, fully or
+			// partially, while we were down. Confirm flatness before ever
+			// arming: a fully-resolved close must retire, not quietly start
+			// fresh protection underneath a position that's already gone.
+			if bar.Warmup {
+				return
 			}
-		} else if !g.tryArm(ctx, atr) {
-			return
+			if qty, known := g.liveQty(ctx); !known || qty == 0 {
+				g.retire(ctx)
+				return
+			}
+			// Nonzero remainder: our close likely only partially filled (or
+			// never went through at all). Fall through and arm it fresh
+			// below rather than leaving it unprotected indefinitely.
+		}
+		switch g.mode {
+		case ModeEntry: // open first (or adopt if already open), arm from there.
+			// Always re-checks the live position, even after entryPlaced fires --
+			// a fill that lands as an "unmatched fill" (OMS lost track of the
+			// order's client-order-ID, e.g. after an intervening restart while a
+			// resting LIMIT entry was still pending) never reaches OnFill, so
+			// waiting for that notification alone can wait forever while a real,
+			// unprotected position sits on the exchange (2026-08-05 incident).
+			if !g.enterOrAdopt(ctx, atr, bar.Warmup) {
+				return
+			}
+		default: // ModeAdopt (ModeExplicit never reaches here — prot is set at construction)
+			if !g.tryArm(ctx, atr) {
+				return
+			}
 		}
 	}
 	// During the startup backfill replay, only prime indicators / adopt — never run
@@ -529,8 +641,16 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Warmup {
 		return
 	}
-	g.maybeRestore()
-	if g.resyncPosition(ctx) { // position closed externally → retired
+	g.restoreState()
+	if g.resyncPosition(ctx) { // position closed externally → retired, or partial fill re-armed
+		return
+	}
+	if g.phase == PhaseClosing {
+		// Our own close hasn't resolved yet — resyncPosition already checked
+		// whether it's actually gone (→ retire) or partially filled (→ re-arm
+		// above); if we're still here it's genuinely still open. Don't
+		// re-trail/re-check exit on a position we've already told the exchange
+		// to close.
 		return
 	}
 	g.notifyArmSummary()
@@ -558,20 +678,38 @@ func engineLive(ctx *strategy.Context) bool {
 
 // OnTick enforces the stop/TP precisely between bars and trails on favourable ticks.
 func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
-	if g.inactive() {
+	if g.phase == PhaseClosed {
 		return
 	}
+	g.restoreState()
 	g.lastPrice = price
 	// arm-with-entry: open as soon as the engine is live (real-time), rather than
 	// waiting for the next closed bar. Skip if a position already exists — OnBar
 	// adopts that case. This is what makes "顺便帮我开仓" open promptly.
 	if g.prot == nil {
-		if g.wantEntry && !g.entryPlaced && engineLive(ctx) && g.livePosition(ctx) == nil {
-			g.placeEntry(ctx)
+		if g.phase == PhaseClosing {
+			// Restored Closing while still unarmed -- see the matching branch
+			// in OnBar. Only OnBar's per-bar resync confirms/re-arms; never
+			// treat this as "need a fresh entry" here.
+			return
+		}
+		if g.mode == ModeEntry {
+			// Mirrors OnBar: always re-check the live position, even after
+			// entryPlaced fires or before engineLive flips -- a fill that lands
+			// as an "unmatched fill" never reaches OnFill, so waiting for that
+			// notification alone can wait forever while a real, unprotected
+			// position sits on the exchange (2026-08-05 incident). A brand-new
+			// entry still waits for engineLive, same as before.
+			g.enterOrAdopt(ctx, g.atr.Value(), !engineLive(ctx))
 		}
 		return
 	}
-	g.maybeRestore()
+	g.restoreState()
+	if g.phase == PhaseClosing {
+		// See the matching comment in OnBar — OnBar's per-bar resyncPosition is
+		// what actually confirms/re-arms; OnTick just waits quietly in between.
+		return
+	}
 	g.notifyArmSummary()
 	g.ensureRestingStop(ctx)
 	g.lastPrice = price
@@ -590,54 +728,76 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 	g.syncRestingStop(ctx)
 }
 
-// resyncPosition reconciles against the live account position each bar. If the
-// position vanished (user closed / liquidated) it retires; if the size changed it
-// updates the protected qty and re-sizes the resting stop. Returns true if the
-// guardian retired this cycle.
-func (g *Guardian) resyncPosition(ctx *strategy.Context) bool {
-	if g.prot == nil || g.inactive() {
-		return false
-	}
-	// Determine the live position size. Prefer the syncer — it tracks hedge LONG/
-	// SHORT legs, whereas ctx.Portfolio.Position only exposes the one-way slot and
-	// would report a hedge position as gone (falsely retiring the guardian). Fall
-	// back to the portfolio only when no syncer is present (backtest/paper).
-	var qty float64
-	var known bool
+// liveQty returns the live account position size (unsigned) for this symbol
+// and whether it's known. Prefers the position syncer — it tracks hedge LONG/
+// SHORT legs, whereas ctx.Portfolio.Position only exposes the one-way slot and
+// would report a hedge position as gone (falsely retiring the guardian).
+// Falls back to the portfolio only when no syncer is present (backtest/paper).
+func (g *Guardian) liveQty(ctx *strategy.Context) (float64, bool) {
 	if pos := g.livePosition(ctx); pos != nil {
-		qty, known = pos.Qty, true
-	} else if _, ok := ctx.Extra["position_syncer"]; !ok && ctx.Portfolio != nil {
+		return pos.Qty, true
+	}
+	if _, ok := ctx.Extra["position_syncer"]; !ok && ctx.Portfolio != nil {
 		if q, _, pok := ctx.Portfolio.Position(g.symbol); pok {
-			qty, known = math.Abs(q), true
+			return math.Abs(q), true
 		}
 	}
+	return 0, false
+}
+
+// resyncPosition reconciles against the live account position each bar. If the
+// position vanished (user closed / liquidated, or our own close finally
+// confirmed) it retires; if the size changed it updates the protected qty and
+// re-sizes the resting stop — including the case where we were Closing and the
+// live qty shrank but didn't reach zero (our close only partially filled), in
+// which case the remainder is re-armed back into Watching rather than left
+// unprotected. Returns true if the guardian retired this cycle.
+func (g *Guardian) resyncPosition(ctx *strategy.Context) bool {
+	if g.prot == nil {
+		return false
+	}
+	qty, known := g.liveQty(ctx)
 	if !known || qty == 0 {
 		g.retire(ctx)
 		return true
 	}
 	if absQty := qty; absQty != g.prot.Qty {
+		if g.phase == PhaseClosing {
+			g.phase = PhaseWatching
+			g.notifyAction("resync", fmt.Sprintf("平仓单疑似只部分成交,剩余 %.6g 已重新纳入保护", absQty))
+		}
 		g.prot.Qty = absQty
 		if g.restingMode && g.stopOrderID != "" {
 			_ = ctx.CancelOrder(g.stopOrderID)
 			g.stopOrderID = ""
 			g.placeRestingStop(ctx)
 		}
-		g.log.Info("guardian: position resized, stop re-sized",
+		g.log.Info("guardian：仓位数量有变化，止损数量已同步调整",
 			zap.String("symbol", g.symbol), zap.Float64("qty", absQty))
 		g.notifyAction("resized", fmt.Sprintf("检测到仓位变动,止损数量已调整为 %.6g", absQty))
 	}
 	return false
 }
 
-// retire cancels the resting stop and marks the guardian done (position gone).
+// retire cancels the resting stop, marks the guardian closed (position gone —
+// either our own protective close finally confirmed via position resync, or
+// closed externally), and clears persisted state so a future, unrelated
+// guardian reusing this engine_id starts clean (see clearState doc comment).
 func (g *Guardian) retire(ctx *strategy.Context) {
+	wasClosing := g.phase == PhaseClosing
 	if g.stopOrderID != "" {
 		_ = ctx.CancelOrder(g.stopOrderID)
 		g.stopOrderID = ""
 	}
-	g.done = true
-	g.saveState()
-	g.log.Info("guardian: position closed externally, retiring",
+	g.phase = PhaseClosed
+	g.clearState()
+	if wasClosing {
+		g.log.Info("guardian：平仓已确认(通过持仓核对发现)，守护结束",
+			zap.String("symbol", g.symbol))
+		g.notifyAction("closed", "已按保护单平仓,守护结束")
+		return
+	}
+	g.log.Info("guardian：检测到仓位已被外部平掉，退出守护",
 		zap.String("symbol", g.symbol))
 	g.notifyAction("retired", "检测到你已手动平掉这个仓位,已撤掉止损单、停止守护")
 }
@@ -681,8 +841,8 @@ func (g *Guardian) evalAlerts(price float64) {
 	}
 }
 
-// OnFill marks the guardian done once its protective order (resting stop or a
-// tick-based close) has filled.
+// OnFill marks the guardian closed once its protective order (resting stop or a
+// tick-based close) has filled, and arms protection from an entry fill.
 func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
 	// A partial take-profit fill shrinks the position but does NOT end the guardian;
 	// resyncPosition re-sizes the stop from the account qty on the next bar.
@@ -692,15 +852,20 @@ func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
 	// The entry fill (arm-with-entry) arms protection from the fill price/qty.
 	if fill.Reason == "guardian_entry" && g.prot == nil {
 		g.prot = NewProtection(g.entrySide, fill.Price, fill.Qty, g.cfg, g.atr.Value())
-		g.log.Info("guardian: armed from entry fill",
+		g.phase = PhaseWatching
+		g.log.Info("guardian：开仓成交，已开始保护",
 			zap.String("symbol", g.symbol), zap.Float64("entry", fill.Price),
 			zap.Float64("qty", fill.Qty), zap.Float64("stop", g.prot.Stop))
 		return
 	}
-	if !g.done && (g.closePlaced || g.stopOrderID != "") {
-		g.done = true
+	if g.phase != PhaseClosed && (g.phase == PhaseClosing || g.stopOrderID != "") {
+		g.phase = PhaseClosed
 		g.stopOrderID = ""
-		g.log.Info("guardian: protective exit filled",
+		// Without this, EVERY normal close-completion leaves the persisted
+		// Closing:true parked forever — poisoning the next, unrelated guardian
+		// that ever reuses this engine_id (deterministic, no session nonce).
+		g.clearState()
+		g.log.Info("guardian：保护性平仓单已成交",
 			zap.String("symbol", g.symbol),
 			zap.Float64("price", fill.Price))
 		g.notifyAction("closed", fmt.Sprintf("已按保护单平仓 @ %s,守护结束", fmtPrice(fill.Price)))
@@ -710,13 +875,7 @@ func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
 // Status exposes live state for the operator dashboard.
 func (g *Guardian) Status() map[string]any {
 	if g.prot == nil {
-		return map[string]any{"state": "arming", "symbol": g.symbol}
-	}
-	state := "watching"
-	if g.done {
-		state = "closed"
-	} else if g.closePlaced {
-		state = "closing"
+		return map[string]any{"state": string(g.phase), "symbol": g.symbol}
 	}
 	tpPct := 0.0
 	if g.cfg.TPMode == TPPct {
@@ -727,7 +886,7 @@ func (g *Guardian) Status() map[string]any {
 		trailPct = g.cfg.ActivateR * g.cfg.StopValue * 100
 	}
 	return map[string]any{
-		"state":        state,
+		"state":        string(g.phase),
 		"symbol":       g.symbol,
 		"side":         g.prot.Side,
 		"entry":        g.prot.Entry,
@@ -753,7 +912,19 @@ func (g *Guardian) Status() map[string]any {
 // Prot exposes the underlying protection (for adoption/persistence wiring).
 func (g *Guardian) Prot() *Protection { return g.prot }
 
-func (g *Guardian) inactive() bool { return g.done || g.closePlaced }
+// inactive reports whether the guardian should skip its normal per-bar/tick
+// watching work — still closing (waiting for its own close to resolve) or
+// already fully done.
+func (g *Guardian) inactive() bool { return g.phase == PhaseClosing || g.phase == PhaseClosed }
+
+// Retired implements strategy.Retired: once the guarded position is gone for
+// good (closed by the guardian's own protective order, or externally and
+// detected via resyncPosition→retire), the engine hosting this guardian
+// should stop itself rather than keep polling/subscribing forever and being
+// resurrected on the next server restart. Never true for a ModeEntry guardian
+// still waiting to open — PhaseClosed is only ever reached once a position
+// that WAS being protected is confirmed gone.
+func (g *Guardian) Retired() bool { return g.phase == PhaseClosed }
 
 func (g *Guardian) stopReason() string {
 	if g.prot.Activated() {
@@ -786,7 +957,7 @@ func (g *Guardian) checkExitBar(ctx *strategy.Context, bar exchange.Kline) bool 
 }
 
 func (g *Guardian) placeClose(ctx *strategy.Context, reason string) {
-	if g.closePlaced {
+	if g.phase == PhaseClosing || g.phase == PhaseClosed {
 		return
 	}
 	// Cancel any resting stop first so it doesn't orphan on the exchange.
@@ -802,13 +973,19 @@ func (g *Guardian) placeClose(ctx *strategy.Context, reason string) {
 	}
 	req.Reason = "guardian_" + reason
 	ctx.PlaceOrder(req)
-	g.closePlaced = true
+	g.phase = PhaseClosing
+	// Persist Closing immediately — without this, a restart before the next
+	// trail-save would forget we're mid-close and re-arm from scratch as if
+	// still Watching (this write also picks up the now-cleared stopOrderID,
+	// closing a second, pre-existing gap: a restart used to be able to restore
+	// a stale stopOrderID pointing at an order we'd just cancelled above).
+	g.saveState()
 	verb := "止损"
 	if reason == "take_profit" {
 		verb = "止盈"
 	}
 	g.notifyAction("closing", fmt.Sprintf("已触发%s,正在平仓(约 %s)", verb, fmtPrice(g.lastPrice)))
-	g.log.Info("guardian: protective close submitted",
+	g.log.Info("guardian：保护性平仓单已提交",
 		zap.String("symbol", g.symbol),
 		zap.String("side", g.prot.Side),
 		zap.String("reason", reason),

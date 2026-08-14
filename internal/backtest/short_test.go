@@ -132,8 +132,8 @@ func TestLongAndShort_CoexistInHedgeMode(t *testing.T) {
 	// Both positions now exist.
 	require.Contains(t, p.longPositions, "BTCUSDT")
 	require.Contains(t, p.shortPositions, "BTCUSDT")
-	assert.Equal(t, 0.1, p.longPositions["BTCUSDT"].Qty)
-	assert.Equal(t, 0.05, p.shortPositions["BTCUSDT"].Qty)
+	assert.Equal(t, 0.1, p.longPositions["BTCUSDT"].Qty())
+	assert.Equal(t, 0.05, p.shortPositions["BTCUSDT"].Qty())
 
 	// Closing the SHORT must not touch the LONG.
 	b.PlaceOrder(strategy.OrderRequest{
@@ -145,7 +145,7 @@ func TestLongAndShort_CoexistInHedgeMode(t *testing.T) {
 
 	assert.NotContains(t, p.shortPositions, "BTCUSDT")
 	require.Contains(t, p.longPositions, "BTCUSDT", "LONG must remain after closing SHORT")
-	assert.Equal(t, 0.1, p.longPositions["BTCUSDT"].Qty)
+	assert.Equal(t, 0.1, p.longPositions["BTCUSDT"].Qty())
 }
 
 func TestShort_OpenWithoutExistingLong_NoLongerRejected(t *testing.T) {
@@ -183,9 +183,9 @@ func TestShort_AveragingDown(t *testing.T) {
 
 	pos := p.shortPositions["BTCUSDT"]
 	require.NotNil(t, pos)
-	assert.Equal(t, 0.2, pos.Qty)
+	assert.Equal(t, 0.2, pos.Qty())
 	// weighted avg: (50000*0.1 + 52000*0.1) / 0.2 = 51000
-	assert.InDelta(t, 51_000.0, pos.AvgPrice, 1e-6)
+	assert.InDelta(t, 51_000.0, pos.AvgPrice(), 1e-6)
 }
 
 func TestShort_CoverAll_WhenQtyZero(t *testing.T) {

@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -25,6 +27,8 @@ import (
 	"github.com/Quantix/quantix/internal/paper"
 	"github.com/Quantix/quantix/internal/pool"
 	"github.com/Quantix/quantix/internal/risk"
+	"github.com/Quantix/quantix/internal/strategy"
+	"github.com/Quantix/quantix/internal/strategy/macross"
 	"github.com/Quantix/quantix/internal/strategy/registry"
 )
 
@@ -40,6 +44,39 @@ type PaperConfig struct {
 	InitialCapital float64 `json:"initial_capital"` // default 10000
 	FeeRate        float64 `json:"fee_rate"`        // default 0.001
 	Slippage       float64 `json:"slippage"`        // default 0.0005
+}
+
+// guardianAdoptOnly reports whether req is a guardian instance that will only
+// adopt an existing position and never place a new entry order. Delegates to
+// guardian.ResolveMode so this predicate can never drift from what Factory
+// itself decides (2026-08-07: the previous hand-duplicated version only ever
+// checked PlaceEntry, silently mislabeling an explicit Adopt:false request —
+// ModeExplicit, not adopt-only — as adopt-only).
+func guardianAdoptOnly(req StartRequest) bool {
+	if req.StrategyID != "guardian" {
+		return false
+	}
+	return guardian.ResolveMode(req.Params) == guardian.ModeAdopt
+}
+
+// macrossPositionModeMismatch reports a clear, actionable error when the
+// exchange account's actual hedge/one-way position mode doesn't match what
+// macross's EnableShort param expects to construct orders for (2026-08-10
+// incident: EnableShort:false sends no PositionSide, which Binance rejects
+// with -4061 once the account is in Hedge Mode — this went unnoticed for two
+// days because nothing checked it before the engine started placing orders).
+// Returns nil when they match; also nil-safe if hedgeMode is unknown (callers
+// skip this check entirely when GetPositionMode fails rather than passing a
+// zero value here, so this function never sees "unknown").
+func macrossPositionModeMismatch(params map[string]any, hedgeMode bool) error {
+	wantHedge, _ := params["EnableShort"].(bool)
+	if hedgeMode == wantHedge {
+		return nil
+	}
+	if hedgeMode {
+		return fmt.Errorf("交易所账户当前是对冲模式(Hedge Mode),但「双向交易」未开启;请勾选「双向交易(做多做空)」,或先在交易所把账户切回单向模式")
+	}
+	return fmt.Errorf("交易所账户当前是单向模式(One-way),但「双向交易」已开启;请取消勾选「双向交易(做多做空)」,或先在交易所把账户切到对冲模式")
 }
 
 // StartRequest contains parameters to start a live or paper engine for a user.
@@ -467,8 +504,14 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 		g.SetDispatcher(guardian.NewNotifyDispatcher(notifier))
 		if req.Mode == "live" {
 			g.SetRestingStop(true)
-			g.SetStateStore(&guardianStateStore{store: m.store}, engineID)
+			g.SetStateStore(&guardianStateStore{store: m.store, userID: userID}, engineID)
 		}
+	}
+
+	// macross: wire pending-limit-entry persistence for LIVE mode so a restart
+	// can clean up a still-resting limit order rather than leave it orphaned.
+	if mc, ok := strat.(*macross.MACross); ok && req.Mode == "live" && m.store != nil {
+		mc.SetStateStore(newMacrossStateStore(m.store, userID, engineID))
 	}
 
 	if req.Mode == "paper" {
@@ -537,12 +580,24 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 		// log values wildly wrong (full notional locked instead of 1/leverage margin).
 		// Real exchange-side margin is unaffected, but monitoring/log values become
 		// untrustworthy. spot already rejected above (lines 307-317).
+		//
+		// Exception: a guardian in adopt-only mode (no PlaceEntry) never opens a
+		// new position — it manages whatever the account already holds, using
+		// whatever leverage is ALREADY set for that position. It doesn't need an
+		// explicit leverage value, and this code must NOT call SetLeverage on its
+		// behalf either: changing a symbol's leverage while adopting an already-
+		// open position is unnecessary, can needlessly fail on account-tier caps
+		// that have nothing to do with guardian's own protective logic (e.g. a
+		// sub-account capped below the value the user happened to pick), and some
+		// exchanges reject a leverage change outright while a position is open
+		// (2026-08-06 finding).
 		isFutures := !isSpotMarket
-		if isFutures && req.Leverage <= 0 {
+		adoptOnly := guardianAdoptOnly(req)
+		if isFutures && req.Leverage <= 0 && !adoptOnly {
 			engineCancel()
 			return "", fmt.Errorf("leverage is required for %s/%s (got %d); futures engines need explicit leverage to compute correct margin", cred.Exchange, effMarket, req.Leverage)
 		}
-		if req.Leverage > 0 {
+		if req.Leverage > 0 && !adoptOnly {
 			leverageCtx, leverageCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			lvErr := orderClient.SetLeverage(leverageCtx, req.Symbol, req.Leverage)
 			leverageCancel()
@@ -554,6 +609,29 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 				zap.String("symbol", req.Symbol),
 				zap.Int("leverage", req.Leverage),
 			)
+		}
+
+		// macross's EnableShort selects hedge-mode order construction (explicit
+		// PositionSide) vs simple/one-way (no PositionSide) — this depends on the
+		// exchange account's global position-mode setting, not anything per-engine.
+		// Catch a mismatch here, before the engine ever places an order, instead of
+		// letting it fail silently order-by-order (2026-08-10 incident: two days of
+		// -4061 rejections with no alert anywhere but the raw order log).
+		if req.StrategyID == "macross" && isFutures {
+			if pmc, ok := orderClient.(exchange.PositionModeChecker); ok {
+				pmCtx, pmCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				hedgeMode, pmErr := pmc.GetPositionMode(pmCtx)
+				pmCancel()
+				if pmErr == nil {
+					if mmErr := macrossPositionModeMismatch(req.Params, hedgeMode); mmErr != nil {
+						engineCancel()
+						return "", mmErr
+					}
+				} else {
+					m.log.Warn("could not verify exchange position mode before starting macross; proceeding without the check",
+						zap.String("symbol", req.Symbol), zap.Error(pmErr))
+				}
+			}
 		}
 
 		liveCfg := live.EngineConfig{
@@ -643,7 +721,22 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 			}
 			eqCancel()
 		}
-		rm.Reset(initEquity)
+		// Restore the circuit breaker's persisted halted/peak-equity state
+		// BEFORE feeding it this start's equity — rm.Reset() used to run here
+		// unconditionally, which silently cleared a real, still-in-force halt
+		// and reset the drawdown baseline to whatever equity happened to be at
+		// restart time (already-reduced, if the halt fired for a real reason).
+		// UpdateEquity only ever raises the peak and never un-halts on its
+		// own, so a genuinely fresh engine still seeds correctly (peak starts
+		// at 0 from risk.New, then rises to initEquity here) while a restored
+		// halt or historical peak survives (2026-08-06 finding).
+		if m.store != nil {
+			rm.SetStateStore(newRiskStateStore(m.store, userID, engineID))
+		}
+		if err := rm.UpdateEquity(initEquity); err != nil {
+			m.log.Warn("risk manager: circuit breaker active on startup",
+				zap.Int("user_id", userID), zap.String("engine_id", engineID), zap.Error(err))
+		}
 		re.engine = eng
 	}
 
@@ -727,7 +820,7 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 		} else {
 			runErr = re.engine.Run(ctx, klineCh)
 		}
-		if runErr != nil {
+		if runErr != nil && !errors.Is(runErr, strategy.ErrRetired) {
 			m.mu.Lock()
 			re.lastErr = runErr
 			m.mu.Unlock()
@@ -737,6 +830,14 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 				zap.String("mode", req.Mode),
 				zap.Error(runErr),
 			)
+		}
+		if errors.Is(runErr, strategy.ErrRetired) {
+			m.log.Info("engine self-stopped: strategy retired",
+				zap.Int("user_id", userID),
+				zap.String("engine_id", engineID),
+				zap.String("mode", req.Mode),
+			)
+			m.stopRetiredEngine(userID, engineID)
 		}
 	}()
 
@@ -767,6 +868,37 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 		zap.String("mode", req.Mode),
 	)
 	return engineID, nil
+}
+
+// stopRetiredEngine removes a self-retired engine from the running set and
+// deactivates its DB session, mirroring what Stop() does for an
+// explicitly-requested stop. Called when an engine's Run() returns
+// strategy.ErrRetired (the strategy reported strategy.Retired() == true, e.g.
+// guardian once its guarded position is gone for good) — a distinct exit
+// reason from an explicit Stop() (which already deactivated the session
+// itself) or a genuine runtime error (left is_active=true so it retries on
+// the next boot, unchanged behaviour). Without this, a retired guardian kept
+// occupying its engineID slot and got blindly resurrected on the next server
+// restart (2026-08-06 finding).
+func (m *EngineManager) stopRetiredEngine(userID int, engineID string) {
+	m.mu.Lock()
+	if userEngines, ok := m.engines[userID]; ok {
+		delete(userEngines, engineID)
+	}
+	m.mu.Unlock()
+
+	if m.store == nil {
+		return
+	}
+	sCtx, sCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer sCancel()
+	if err := m.store.DeactivateEngineSession(sCtx, userID, engineID); err != nil {
+		m.log.Error("deactivate retired engine session failed — may auto-restart on next boot",
+			zap.Int("user_id", userID),
+			zap.String("engine_id", engineID),
+			zap.Error(err),
+		)
+	}
 }
 
 // Stop gracefully stops the engine identified by engineID for the given user.
@@ -988,7 +1120,12 @@ func (m *EngineManager) GetEngine(userID int, engineID string) (*EngineInfo, err
 	return engineInfoFromRE(re), nil
 }
 
-// ListAll returns info about all engines for the given user.
+// ListAll returns info about all engines for the given user, in deterministic
+// order (by StartedAt desc, EngineID as a tiebreaker). Go randomizes map
+// iteration order on every range over m.engines[userID], so without this sort
+// the frontend's running-engines list visibly shuffled card order on every
+// ~10s poll even though nothing about the engines had changed (2026-08-13
+// finding).
 func (m *EngineManager) ListAll(userID int) []EngineInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -997,6 +1134,7 @@ func (m *EngineManager) ListAll(userID int) []EngineInfo {
 	for _, re := range m.engines[userID] {
 		out = append(out, *engineInfoFromRE(re))
 	}
+	sortEnginesByStartedAtDesc(out)
 	return out
 }
 
@@ -1011,7 +1149,9 @@ func (m *EngineManager) Status(userID int) EngineStatus {
 	return EngineInfo{Running: false}
 }
 
-// ListAllGlobalEngines returns all running engines across all users (admin use).
+// ListAllGlobalEngines returns all running engines across all users (admin
+// use), in deterministic order — same map-randomization issue as ListAll,
+// doubled (ranges over both the per-user map and the outer userID map).
 func (m *EngineManager) ListAllGlobalEngines() []EngineInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1024,7 +1164,20 @@ func (m *EngineManager) ListAllGlobalEngines() []EngineInfo {
 			out = append(out, *info)
 		}
 	}
+	sortEnginesByStartedAtDesc(out)
 	return out
+}
+
+// sortEnginesByStartedAtDesc sorts in place: most recently started first,
+// EngineID as a tiebreaker so order stays deterministic even when two engines
+// share a StartedAt timestamp.
+func sortEnginesByStartedAtDesc(engines []EngineInfo) {
+	sort.Slice(engines, func(i, j int) bool {
+		if engines[i].StartedAt != engines[j].StartedAt {
+			return engines[i].StartedAt > engines[j].StartedAt
+		}
+		return engines[i].EngineID < engines[j].EngineID
+	})
 }
 
 // ForceStop cancels any engine for any user (admin use).

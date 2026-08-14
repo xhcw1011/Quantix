@@ -23,7 +23,7 @@ cd "$(dirname "$0")/.."
 # ─── Connection params ───────────────────────────────────────────────────────
 SSH_HOST="${SSH_HOST:-54.46.102.153}"
 SSH_USER="${SSH_USER:-ubuntu}"
-SSH_KEY="${SSH_KEY:-/Users/apexis-backdesk/work/pem/test.pem}"
+SSH_KEY="${SSH_KEY:-/Users/apexis-backdesk/work/pem/calvin.chan_zttrust_go_20250821.pem}"
 SSH_PORT="${SSH_PORT:-22}"
 REMOTE_DIR="/tmp/quantix-deploy"
 INSTALL_DIR="/opt/quantix"

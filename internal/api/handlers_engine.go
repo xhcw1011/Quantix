@@ -201,6 +201,30 @@ func (s *Server) listStrategyPresets(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, presets)
 }
 
+// filterLogLines keeps only lines matching BOTH engineID (if set) and grep
+// (if set) — engineID is a real filter, not the no-op it used to be (a
+// 2026-08-06 bug let any authenticated user read every other user's log
+// lines via this endpoint, since this log file is shared across the whole
+// multi-tenant server). Trims to the last `limit` matches AFTER filtering,
+// not before, so the caller gets `limit` relevant lines rather than `limit`
+// lines it then has to filter down from.
+func filterLogLines(lines []string, engineID, grep string, limit int) []string {
+	out := make([]string, 0, limit)
+	for _, l := range lines {
+		if engineID != "" && !strings.Contains(l, engineID) {
+			continue
+		}
+		if grep != "" && !strings.Contains(l, grep) {
+			continue
+		}
+		out = append(out, l)
+	}
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
+}
+
 // recentLogs returns the last N lines of today's quantix log file, optionally
 // filtered by an engine_id substring. Used by the Live Log Viewer page so the
 // operator can read strategy decisions without SSH'ing the server.
@@ -240,20 +264,7 @@ func (s *Server) recentLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := make([]string, 0, limit)
-	for _, l := range lines {
-		if engineID != "" && !strings.Contains(l, engineID) {
-			// fall through; many log lines don't mention engine_id, so don't strict-filter
-		}
-		if grep != "" && !strings.Contains(l, grep) {
-			continue
-		}
-		out = append(out, l)
-	}
-	// Trim to last `limit` AFTER filtering.
-	if len(out) > limit {
-		out = out[len(out)-limit:]
-	}
+	out := filterLogLines(lines, engineID, grep, limit)
 
 	jsonOK(w, map[string]any{
 		"engine_id": engineID,

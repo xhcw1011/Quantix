@@ -1,10 +1,18 @@
-import { useEffect, useState } from 'react'
-import { getTicker, listCredentials, listEngines, listStrategies, listStrategyPresets, startEngine, stopEngineById, updateEngineParams } from '../api/trading'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { getPositions, getTicker, listCredentials, listEngines, listStrategies, listStrategyPresets, startEngine, stopEngineById } from '../api/trading'
 import { useTradeSocket } from '../hooks/useTradeSocket'
-import { COMMON_SYMBOLS, strategiesForMarket, strategyLabel, strategyMeta } from '../constants/strategies'
+import { COMMON_SYMBOLS, strategiesForMarket, strategyMeta } from '../constants/strategies'
 import type { MarketKind } from '../constants/strategies'
 import { fieldsForStrategy } from '../constants/strategyFields'
 import SymbolPicker from '../components/SymbolPicker'
+import NumberInput from '../components/NumberInput'
+import Toggle from '../components/Toggle'
+import LeverageSlider from '../components/LeverageSlider'
+import { type PositionView } from '../components/PositionRows'
+import StoppedEnginesList from '../components/StoppedEnginesList'
+import RunningEnginesList from '../components/RunningEnginesList'
+import { INPUT_CLASS } from '../lib/inputStyles'
 
 interface Preset {
   name: string
@@ -12,161 +20,7 @@ interface Preset {
   params: Record<string, any>
 }
 
-// LiveStatus subscribes to WS "status" messages and renders the latest snapshot
-// for the given engine_id. Server pushes once per minute from printStatus.
-function LiveStatus({ engineID, strategyId }: { engineID: string; strategyId?: string }) {
-  const [data, setData] = useState<Record<string, any> | null>(null)
-  const [lastTs, setLastTs] = useState<number>(0)
-  // 守仓风控档 live 编辑
-  const [editing, setEditing] = useState(false)
-  const [ev, setEv] = useState<Record<string, number | ''>>({})
-  const [saving, setSaving] = useState(false)
-  const [saveMsg, setSaveMsg] = useState('')
-
-  useTradeSocket((msg: any) => {
-    if (msg?.type === 'status' && msg?.data?.engine_id === engineID) {
-      setData(msg.data)
-      setLastTs(Date.now())
-    }
-  })
-
-  const guardianFields = fieldsForStrategy('guardian')
-  const openEdit = () => {
-    const cur = (data?.strat_edit ?? {}) as Record<string, number>
-    setEv(Object.fromEntries(guardianFields.map((f) => [f.key, cur[f.key] ?? f.default])))
-    setSaveMsg('')
-    setEditing(true)
-  }
-  const saveEdit = async () => {
-    setSaving(true)
-    setSaveMsg('')
-    try {
-      const params: Record<string, number> = {}
-      for (const f of guardianFields) params[f.key] = (Number(ev[f.key]) || 0) / 100 // % → fraction
-      await updateEngineParams(engineID, params)
-      setSaveMsg('已保存,立即生效')
-      setEditing(false)
-    } catch (e: any) {
-      setSaveMsg(e.response?.data?.error || '保存失败')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  if (!data) {
-    return (
-      <p className="text-xs text-slate-600 mt-2">
-        实时状态:等待下一次快照(约 60 秒一次)…
-      </p>
-    )
-  }
-  const ageS = Math.round((Date.now() - lastTs) / 1000)
-  const num = (v: any, d = 2) => typeof v === 'number' ? v.toFixed(d) : String(v ?? '—')
-  const stratFields = Object.entries(data).filter(([k]) => k.startsWith('strat_'))
-  // 自动守仓 has its own plain-language panel. Detect it by strategy id, or by the
-  // guardian-only `strat_state` key when the id isn't available.
-  const isGuardian = strategyId === 'guardian' || data.strat_state !== undefined
-  return (
-    <div className="mt-3 border-t border-slate-700 pt-2 text-xs">
-      <div className="flex items-center justify-between text-slate-500 mb-1.5">
-        <span>实时状态</span>
-        <span>{ageS}秒前更新</span>
-      </div>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-x-3 gap-y-1 text-slate-300">
-        <div><span className="text-slate-500">权益</span> <span className="font-mono">${num(data.equity)}</span></div>
-        <div><span className="text-slate-500">可用资金</span> <span className="font-mono">${num(data.cash)}</span></div>
-        <div><span className="text-slate-500">已实现</span> <span className="font-mono">${num(data.realized_pnl)}</span></div>
-        <div><span className="text-slate-500">收益率</span> <span className="font-mono">{num(data.total_return_pct)}%</span></div>
-        {data.strat_regime !== undefined && (
-          <div><span className="text-slate-500">Regime</span> <span className="font-mono">{data.strat_regime}</span></div>
-        )}
-        {data.strat_has_long !== undefined && (
-          <div><span className="text-slate-500">LONG</span> <span className={`font-mono ${data.strat_has_long ? 'text-green-300' : 'text-slate-500'}`}>{data.strat_has_long ? 'open' : '—'}</span></div>
-        )}
-        {data.strat_has_short !== undefined && (
-          <div><span className="text-slate-500">SHORT</span> <span className={`font-mono ${data.strat_has_short ? 'text-red-300' : 'text-slate-500'}`}>{data.strat_has_short ? 'open' : '—'}</span></div>
-        )}
-        {data.strat_hedge_cooldown_remaining !== undefined && data.strat_hedge_cooldown_remaining !== '0s' && (
-          <div><span className="text-slate-500">Hedge CD</span> <span className="font-mono">{data.strat_hedge_cooldown_remaining}</span></div>
-        )}
-      </div>
-
-      {/* 自动守仓 — 明白话面板 */}
-      {isGuardian && data.strat_state !== undefined && (() => {
-        const stateMap: Record<string, string> = {
-          watching: '守护中', closing: '平仓中', closed: '已结束', arming: '准备中',
-        }
-        const stateLabel = stateMap[data.strat_state] ?? String(data.strat_state)
-        const armed = data.strat_state !== 'arming'
-        const sideLabel = data.strat_side === 'long' ? '做多' : data.strat_side === 'short' ? '做空' : '—'
-        const pnlR = data.strat_pnl_r
-        const pnlText = typeof pnlR === 'number' ? `${pnlR >= 0 ? '+' : ''}${pnlR.toFixed(1)}R` : '—'
-        const pnlColor = typeof pnlR === 'number' ? (pnlR >= 0 ? 'text-green-300' : 'text-red-300') : 'text-slate-300'
-        return (
-          <div className="mt-2 border border-slate-700 rounded-lg bg-slate-900/40 p-3">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold text-slate-300">自动守仓 · {data.strat_symbol ?? ''}</span>
-              <div className="flex items-center gap-2">
-                {armed && !editing && (
-                  <button type="button" onClick={openEdit} className="text-xs px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-200">✎ 改风控档</button>
-                )}
-                <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-200">{stateLabel}</span>
-              </div>
-            </div>
-            {armed ? (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-x-3 gap-y-1.5 text-slate-300">
-                <div><span className="block text-slate-500">方向</span>{sideLabel}</div>
-                <div><span className="block text-slate-500">成本价</span><span className="font-mono">{num(data.strat_entry)}</span></div>
-                <div><span className="block text-slate-500">数量</span><span className="font-mono">{num(data.strat_qty, 4)}</span></div>
-                <div><span className="block text-slate-500">当前止损价</span><span className="font-mono">{num(data.strat_stop)}</span></div>
-                <div><span className="block text-slate-500">浮盈</span><span className={`font-mono ${pnlColor}`}>{pnlText}</span></div>
-                <div><span className="block text-slate-500">止损保护</span>{data.strat_trail_active ? '已上移锁利' : '未激活'}</div>
-                {typeof data.strat_tp === 'number' && data.strat_tp > 0 && (
-                  <div><span className="block text-slate-500">止盈价</span><span className="font-mono">{num(data.strat_tp)}</span></div>
-                )}
-              </div>
-            ) : (
-              <p className="text-slate-400">正在准备守护你的仓位…</p>
-            )}
-            {editing && (
-              <div className="mt-3 border-t border-slate-700 pt-2">
-                <p className="text-[10px] text-slate-500 mb-2">改完立即生效,不停引擎、不动仓位。止损在已开始移动后只能收紧、不能放宽。</p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {guardianFields.map((f) => (
-                    <div key={f.key}>
-                      <label className="block text-[11px] text-slate-400 mb-0.5">{f.label} (%)</label>
-                      <input
-                        type="number" step="any" min={0}
-                        value={ev[f.key] ?? ''}
-                        onChange={(e) => setEv((p) => ({ ...p, [f.key]: e.target.value === '' ? '' : Number(e.target.value) }))}
-                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm"
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div className="flex items-center gap-2 mt-2">
-                  <button type="button" onClick={saveEdit} disabled={saving} className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded text-xs font-semibold">{saving ? '保存中…' : '保存'}</button>
-                  <button type="button" onClick={() => setEditing(false)} className="px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-xs">取消</button>
-                  {saveMsg && <span className="text-[11px] text-slate-400">{saveMsg}</span>}
-                </div>
-              </div>
-            )}
-            {!editing && saveMsg && <p className="text-[11px] text-emerald-400 mt-1.5">{saveMsg}</p>}
-          </div>
-        )
-      })()}
-
-      {stratFields.length > 0 && (
-        <details className="mt-2">
-          <summary className="text-slate-500 cursor-pointer">策略详情 ({stratFields.length} 项)</summary>
-          <pre className="text-[10px] text-slate-400 mt-1 overflow-x-auto">{JSON.stringify(Object.fromEntries(stratFields), null, 2)}</pre>
-        </details>
-      )}
-    </div>
-  )
-}
-
-interface Credential {
+export interface Credential {
   id: number
   exchange: string
   label: string
@@ -175,7 +29,7 @@ interface Credential {
   demo: boolean
 }
 
-interface EngineInfo {
+export interface EngineInfo {
   engine_id: string
   credential_id: number
   strategy_id: string
@@ -188,18 +42,21 @@ interface EngineInfo {
   error?: string
 }
 
+export interface EnginePositions {
+  engine_id: string
+  last_price: number
+  positions: PositionView[]
+}
+
 const intervals = ['1m', '5m', '15m', '1h', '4h', '1d']
 
 const initialForm = {
   credential_id: 0,
-  strategy_id: 'dca',
+  strategy_id: 'guardian',
   symbol: 'BTCUSDT',
   interval: '1h',
   mode: 'live' as 'live' | 'paper',
   leverage: 1,
-  enable_short: false,
-  stop_loss_pct: 0,
-  take_profit_pct: 0,
   paper: {
     initial_capital: 10000,
     fee_rate: 0.001,
@@ -214,10 +71,13 @@ const initialForm = {
 
 
 export default function Engine() {
+  const navigate = useNavigate()
   const [engines, setEngines] = useState<EngineInfo[]>([])
   const [creds, setCreds] = useState<Credential[]>([])
   const [strategies, setStrategies] = useState<string[]>(['macross', 'grid', 'meanreversion', 'mlstrat'])
-  const [market, setMarket] = useState<MarketKind>('spot')
+  // 2026-08-12: 默认改成合约——用户实际常用的是合约,现货仍完全可选,只是不再预选,
+  // 避免"以为选的是合约,结果表单还停在现货默认值"这种误配置。
+  const [market, setMarket] = useState<MarketKind>('futures')
   const [form, setForm] = useState(initialForm)
   const [showForm, setShowForm] = useState(false)
   const [showRisk, setShowRisk] = useState(false)
@@ -227,7 +87,7 @@ export default function Engine() {
   const [presets, setPresets] = useState<Preset[]>([])
   const [selectedPresetIdx, setSelectedPresetIdx] = useState<number>(-1)
   const [extraParams, setExtraParams] = useState<string>('')  // JSON textarea
-  const [stratParams, setStratParams] = useState<Record<string, number | string>>({})
+  const [stratParams, setStratParams] = useState<Record<string, number | string | boolean>>({})
   // 交易对最新价:表单打开且选了交易对时展示,null = 加载中/取价失败
   const [symbolPrice, setSymbolPrice] = useState<string | null>(null)
   const [symbolPriceNum, setSymbolPriceNum] = useState<number | null>(null) // 原始数值,用于盈亏估算
@@ -256,9 +116,8 @@ export default function Engine() {
   const filteredCreds = creds
   const availableStrategies = strategiesForMarket(market).filter((s) => strategies.includes(s.id))
 
-  // Leverage and short toggle are futures-only concepts.
+  // Leverage is a futures-only concept.
   const showLeverage = market === 'futures' && form.mode === 'live'
-  const showShortToggle = market === 'futures' && form.strategy_id === 'macross'
 
   const handleMarketChange = (newMarket: MarketKind) => {
     setMarket(newMarket)
@@ -272,26 +131,53 @@ export default function Engine() {
     }))
   }
 
-  const loadEngines = () =>
+  // Stable references (useCallback, no reactive deps) so RunningEngineCard's
+  // memoization actually works — an inline/recreated-every-render callback
+  // prop would defeat it, forcing every card to re-render on every poll tick
+  // regardless of whether that specific engine's own data changed.
+  const loadEngines = useCallback(() => {
     listEngines()
       .then((r) => setEngines(r.data || []))
       .catch(() => {})
+  }, [])
+
+  // 持仓数据(按引擎分组),内嵌进下面运行中引擎卡片,替代原来独立的"持仓"页面。
+  const [positionsByEngine, setPositionsByEngine] = useState<Record<string, EnginePositions>>({})
+  const loadPositions = useCallback(() => {
+    getPositions()
+      .then((r) => {
+        const byEngine: Record<string, EnginePositions> = {}
+        for (const eng of (r.data.positions || []) as EnginePositions[]) {
+          byEngine[eng.engine_id] = eng
+        }
+        setPositionsByEngine(byEngine)
+      })
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     listCredentials().then((r) => {
       const c: Credential[] = r.data || []
       setCreds(c)
-      // Default to first spot credential; fall back to first of any type.
-      const spotFirst = c.find((cr) => cr.market_type === 'spot') ?? c[0]
-      if (spotFirst) setForm((f) => ({ ...f, credential_id: spotFirst.id }))
+      // Default to first non-spot (futures/swap) credential, matching the market
+      // tab's default of 合约; fall back to first of any type.
+      const preferred = c.find((cr) => cr.market_type !== 'spot') ?? c[0]
+      if (preferred) setForm((f) => ({ ...f, credential_id: preferred.id }))
     })
     listStrategies().then((r) => {
       if (Array.isArray(r.data) && r.data.length > 0) setStrategies(r.data)
     }).catch(() => {})
     loadEngines()
+    loadPositions()
     const t = setInterval(loadEngines, 10000)
-    return () => clearInterval(t)
-  }, [])
+    const pt = setInterval(loadPositions, 5000)
+    return () => { clearInterval(t); clearInterval(pt) }
+  }, [loadEngines, loadPositions])
+
+  // Refresh positions promptly on any fill (sizes/PnL change immediately after a fill).
+  useTradeSocket((msg: any) => {
+    if (msg?.type === 'fill') loadPositions()
+  })
 
   // Refetch presets and reset dynamic params whenever strategy_id changes.
   useEffect(() => {
@@ -362,7 +248,13 @@ export default function Engine() {
       if (form.mode === 'paper') {
         payload.paper = form.paper
       }
-      if (showLeverage && form.leverage > 1) {
+      // Guardian adopt-only (顺便帮我开仓 off) never opens a new position, so it
+      // doesn't need leverage — sending a stale value left over from switching
+      // strategies/toggles could get rejected by the exchange for no reason
+      // (e.g. a sub-account's leverage cap) even though nothing here needed it
+      // (backend mirrors this: internal/api/manager.go's guardianAdoptOnly, 2026-08-06).
+      const isGuardianAdoptOnly = form.strategy_id === 'guardian' && !guardianEntry.enabled
+      if (showLeverage && form.leverage > 1 && !isGuardianAdoptOnly) {
         payload.leverage = form.leverage
       }
       // Strategy-specific params: merge preset → extra-params textarea → form fields.
@@ -402,17 +294,6 @@ export default function Engine() {
           params.EntryPrice = guardianEntry.limitPrice
         }
       }
-      if (form.strategy_id === 'macross') {
-        if (showShortToggle && form.enable_short) {
-          params.EnableShort = true
-        }
-        if (form.stop_loss_pct > 0) {
-          params.StopLossPct = form.stop_loss_pct
-        }
-        if (form.take_profit_pct > 0) {
-          params.TakeProfitPct = form.take_profit_pct
-        }
-      }
       if (Object.keys(params).length > 0) {
         payload.params = params
       }
@@ -426,8 +307,18 @@ export default function Engine() {
     }
   }
 
-  const handleStop = async (engineId: string) => {
-    if (!confirm(`确定停止「${engineId}」?会取消所有未成交挂单。`)) return
+  // Mirrors positionsByEngine without being a reactive dependency, so
+  // handleStop stays a stable reference (see loadEngines/loadPositions comment)
+  // while still reading the LATEST positions when actually invoked.
+  const positionsByEngineRef = useRef(positionsByEngine)
+  useEffect(() => { positionsByEngineRef.current = positionsByEngine }, [positionsByEngine])
+
+  const handleStop = useCallback(async (engineId: string) => {
+    const hasPosition = (positionsByEngineRef.current[engineId]?.positions.length ?? 0) > 0
+    const warning = hasPosition
+      ? `确定停止「${engineId}」?这个引擎当前还有持仓,停止后不会再有策略帮你管理止损/止盈,仓位会保持原样挂在交易所上。会取消所有未成交挂单。`
+      : `确定停止「${engineId}」?会取消所有未成交挂单。`
+    if (!confirm(warning)) return
     setStoppingId(engineId)
     try {
       await stopEngineById(engineId)
@@ -437,20 +328,21 @@ export default function Engine() {
     } finally {
       setStoppingId(null)
     }
-  }
+  }, [loadEngines])
+
+  const handleNavigate = useCallback((engineId: string) => navigate(`/engine/${engineId}`), [navigate])
 
   const runningEngines = engines.filter((e) => e.running)
-  const stoppedEngines = engines.filter((e) => !e.running)
+  // Stopped engines accumulate forever (every past forward-test, every restart) —
+  // show only the most recent by default so old dead engines don't bury the
+  // ones that actually matter right now.
+  const allStoppedEngines = engines
+    .filter((e) => !e.running)
+    .sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime())
 
   // 资金属性:引擎动的是真钱还是模拟钱(mode=live 只是"实时",配 demo/testnet 账户仍是假钱)。
+  // 表单里的"是不是真钱"提示牌还要用 credById,RunningEnginesList 自己的那份是独立算的。
   const credById = Object.fromEntries(creds.map((c) => [c.id, c]))
-  const engineMoney = (eng: EngineInfo) => {
-    if (eng.mode === 'paper') return { text: '回测/模拟', cls: 'bg-slate-600 text-slate-300' }
-    const c = credById[eng.credential_id]
-    if (!c) return { text: '实时', cls: 'bg-slate-600 text-slate-300' }
-    if (c.testnet || c.demo) return { text: '模拟盘', cls: 'bg-blue-900/50 text-blue-300' }
-    return { text: '真钱', cls: 'bg-red-900/50 text-red-300' }
-  }
   const fields = fieldsForStrategy(form.strategy_id)
 
   // ── 自动守仓:盈亏估算(U 本位)──────────────────────────────────────────
@@ -501,7 +393,7 @@ export default function Engine() {
         <div className="bg-slate-800 rounded-xl p-5">
           <h2 className="text-sm font-semibold text-slate-300 mb-4">启动新策略</h2>
 
-          {/* Market tabs: 现货 (default/primary) vs 合约·进阶 (secondary) */}
+          {/* Market tabs: 合约 (default, matches actual usage) vs 现货 (still fully available) */}
           <div className="flex gap-2 mb-5">
             <button
               type="button"
@@ -553,7 +445,7 @@ export default function Engine() {
                   <select
                     value={form.credential_id}
                     onChange={(e) => setForm({ ...form, credential_id: +e.target.value })}
-                    className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                    className={INPUT_CLASS}
                   >
                     {filteredCreds.length === 0 && <option value={0}>(还没有账户,先去「交易所账户」页添加)</option>}
                     {filteredCreds.map((c) => {
@@ -575,7 +467,7 @@ export default function Engine() {
                     <select
                       value={form.strategy_id}
                       onChange={(e) => setForm({ ...form, strategy_id: e.target.value })}
-                      className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                      className={INPUT_CLASS}
                     >
                       {availableStrategies.map((s) => (
                         <option key={s.id} value={s.id}>{s.name}</option>
@@ -603,7 +495,7 @@ export default function Engine() {
                   <select
                     value={form.interval}
                     onChange={(e) => setForm({ ...form, interval: e.target.value })}
-                    className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                    className={INPUT_CLASS}
                   >
                     {intervals.map((i) => <option key={i} value={i}>{i}</option>)}
                   </select>
@@ -657,37 +549,42 @@ export default function Engine() {
               {fields.length > 0 && !isGuardianForm && (
                 <div className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 space-y-3">
                   <span className="text-xs font-semibold text-slate-300">参数设置</span>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     {fields.map((f) => (
                       <div key={f.key}>
-                        <label className="block text-xs text-slate-400 mb-1">
-                          {f.label}{f.unit ? ` (${f.unit})` : ''}
-                        </label>
-                        {f.type === 'select' ? (
-                          <select
-                            value={String(stratParams[f.key] ?? f.default)}
-                            onChange={(e) => setStratParams((p) => ({ ...p, [f.key]: e.target.value }))}
-                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                          >
-                            {f.options?.map((o) => (
-                              <option key={o.value} value={o.value}>{o.label}</option>
-                            ))}
-                          </select>
+                        {f.type === 'boolean' ? (
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs text-slate-400">{f.label}</label>
+                            <Toggle
+                              checked={(stratParams[f.key] ?? f.default) as boolean}
+                              onChange={(v) => setStratParams((p) => ({ ...p, [f.key]: v }))}
+                            />
+                          </div>
                         ) : (
-                          <input
-                            type="number"
-                            value={stratParams[f.key] ?? f.default}
-                            step={f.step}
-                            min={f.min}
-                            max={f.max}
-                            onChange={(e) =>
-                              setStratParams((p) => ({
-                                ...p,
-                                [f.key]: e.target.value === '' ? '' : Number(e.target.value),
-                              }))
-                            }
-                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                          />
+                          <>
+                            <label className="block text-xs text-slate-400 mb-1">
+                              {f.label}{f.unit ? ` (${f.unit})` : ''}
+                            </label>
+                            {f.type === 'select' ? (
+                              <select
+                                value={String(stratParams[f.key] ?? f.default)}
+                                onChange={(e) => setStratParams((p) => ({ ...p, [f.key]: e.target.value }))}
+                                className={INPUT_CLASS}
+                              >
+                                {f.options?.map((o) => (
+                                  <option key={o.value} value={o.value}>{o.label}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <NumberInput
+                                value={(stratParams[f.key] ?? f.default) as number | ''}
+                                min={f.min}
+                                max={f.max}
+                                onChange={(v) => setStratParams((p) => ({ ...p, [f.key]: v }))}
+                                className={INPUT_CLASS}
+                              />
+                            )}
+                          </>
                         )}
                         {f.help && (
                           <p className="text-[10px] text-slate-500 mt-0.5">{f.help}</p>
@@ -706,17 +603,10 @@ export default function Engine() {
                       <span className="text-xs font-semibold text-slate-300">顺便帮我开仓</span>
                       <p className="text-xs text-slate-500">开启后先按下面的方向和数量下单,再自动守护;不开就守护你账户里已有的仓位</p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setGuardianEntry((g) => ({ ...g, enabled: !g.enabled }))}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                        guardianEntry.enabled ? 'bg-emerald-600' : 'bg-slate-600'
-                      }`}
-                    >
-                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        guardianEntry.enabled ? 'translate-x-6' : 'translate-x-1'
-                      }`} />
-                    </button>
+                    <Toggle
+                      checked={guardianEntry.enabled}
+                      onChange={(v) => setGuardianEntry((g) => ({ ...g, enabled: v }))}
+                    />
                   </div>
                   {guardianEntry.enabled && (
                     <>
@@ -726,7 +616,7 @@ export default function Engine() {
                           <select
                             value={guardianEntry.side}
                             onChange={(e) => setGuardianEntry((g) => ({ ...g, side: e.target.value as 'long' | 'short' }))}
-                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                            className={INPUT_CLASS}
                           >
                             <option value="long">做多</option>
                             <option value="short">做空</option>
@@ -748,15 +638,14 @@ export default function Engine() {
                               </div>
                             )}
                           </div>
-                          <input
-                            type="number" min="0"
-                            step={guardianQtyMode === 'coin' || !symbolPriceNum ? '0.001' : 'any'}
+                          <NumberInput
+                            min={0}
                             value={guardianEntry.qty > 0 ? qtyToDisplay(guardianEntry.qty) : ''}
-                            onChange={(e) => {
-                              const v = e.target.value === '' ? 0 : Number(e.target.value)
-                              setGuardianEntry((g) => ({ ...g, qty: v <= 0 ? 0 : displayToQty(v) }))
+                            onChange={(v) => {
+                              const n = v === '' ? 0 : v
+                              setGuardianEntry((g) => ({ ...g, qty: n <= 0 ? 0 : displayToQty(n) }))
                             }}
-                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                            className={INPUT_CLASS}
                             placeholder={
                               guardianQtyMode === 'coin' || !symbolPriceNum
                                 ? '币的个数,例如 0.005'
@@ -795,11 +684,11 @@ export default function Engine() {
                         <div>
                           <label className="block text-xs text-slate-400 mb-1">{guardianEntry.orderType === 'limit' ? '挂单价' : '成交价'}</label>
                           {guardianEntry.orderType === 'limit' ? (
-                            <input
-                              type="number" min="0" step="any"
+                            <NumberInput
+                              min={0}
                               value={guardianEntry.limitPrice || ''}
-                              onChange={(e) => setGuardianEntry((g) => ({ ...g, limitPrice: e.target.value === '' ? 0 : Number(e.target.value) }))}
-                              className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                              onChange={(v) => setGuardianEntry((g) => ({ ...g, limitPrice: v === '' ? 0 : v }))}
+                              className={INPUT_CLASS}
                               placeholder={`例如 ${symbolPrice ?? '64000'}`}
                             />
                           ) : (
@@ -811,32 +700,22 @@ export default function Engine() {
                       </div>
                       {/* 杠杆:只在开新仓时才相关,所以跟着"顺便帮我开仓"一起 */}
                       {showLeverage && (
-                        <div>
-                          <div className="flex items-center justify-between mb-1">
-                            <label className="text-xs text-slate-400">杠杆<span className="text-slate-500 font-normal">(只影响新开仓保证金,守护已有仓不用设)</span></label>
-                            <span className="text-sm font-bold text-orange-300">{form.leverage}x</span>
-                          </div>
-                          <input
-                            type="range" min="1" max="20" step="1"
-                            value={form.leverage}
-                            onChange={(e) => setForm({ ...form, leverage: +e.target.value })}
-                            className="w-full accent-orange-500"
-                          />
-                          <div className="flex justify-between text-xs text-slate-500 mt-0.5">
-                            <span>1x</span><span>10x</span><span>20x</span>
-                          </div>
-                        </div>
+                        <LeverageSlider
+                          value={form.leverage}
+                          onChange={(v) => setForm({ ...form, leverage: v })}
+                          hint="(只影响新开仓保证金,守护已有仓不用设)"
+                        />
                       )}
                     </>
                   )}
                   {!guardianEntry.enabled && (
                     <div>
                       <label className="block text-xs text-slate-400 mb-1">持仓数量(用于估算盈亏,可留空)</label>
-                      <input
-                        type="number" min="0" step="0.001"
+                      <NumberInput
+                        min={0}
                         value={guardianAdoptQty || ''}
-                        onChange={(e) => setGuardianAdoptQty(e.target.value === '' ? 0 : Number(e.target.value))}
-                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                        onChange={(v) => setGuardianAdoptQty(v === '' ? 0 : v)}
+                        className={INPUT_CLASS}
                         placeholder="填上你账户里这个仓位的数量,下面各档就会显示 ≈ 多少 U"
                       />
                     </div>
@@ -883,19 +762,16 @@ export default function Engine() {
                           <label className="block text-xs text-slate-400 mb-1">
                             {f.label}{useU ? ' (U)' : ' (%)'}
                           </label>
-                          <input
-                            type="number"
+                          <NumberInput
                             value={displayVal}
-                            step={useU ? 'any' : f.step}
                             min={0}
-                            onChange={(e) => {
-                              const val = e.target.value
+                            onChange={(v) => {
                               setStratParams((p) => ({
                                 ...p,
-                                [f.key]: val === '' ? '' : (useU ? uToPct(Number(val)) : Number(val)),
+                                [f.key]: v === '' ? '' : (useU ? uToPct(v) : v),
                               }))
                             }}
-                            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                            className={INPUT_CLASS}
                           />
                           <div className="flex items-center justify-between mt-0.5 gap-2">
                             <span className="text-[10px] text-slate-400">
@@ -933,82 +809,7 @@ export default function Engine() {
               {/* Leverage slider — futures mode only, live only. Guardian 的杠杆已并入"顺便帮我开仓"卡片。 */}
               {showLeverage && !isGuardianForm && (
                 <div className="bg-orange-900/20 border border-orange-700/40 rounded-lg p-3">
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs text-slate-400">杠杆</label>
-                    <span className="text-sm font-bold text-orange-300">{form.leverage}x</span>
-                  </div>
-                  <input
-                    type="range" min="1" max="20" step="1"
-                    value={form.leverage}
-                    onChange={(e) => setForm({ ...form, leverage: +e.target.value })}
-                    className="w-full accent-orange-500"
-                  />
-                  <div className="flex justify-between text-xs text-slate-500 mt-0.5">
-                    <span>1x</span><span>10x</span><span>20x</span>
-                  </div>
-                </div>
-              )}
-
-              {/* Short toggle — futures mode, macross strategy only */}
-              {showShortToggle && (
-                <div className="bg-purple-900/20 border border-purple-700/40 rounded-lg p-3 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-semibold text-slate-300">Hedge Mode (Enable Short)</span>
-                      <p className="text-xs text-slate-500">Death cross opens SHORT position</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setForm({ ...form, enable_short: !form.enable_short })}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                        form.enable_short ? 'bg-purple-600' : 'bg-slate-600'
-                      }`}
-                    >
-                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        form.enable_short ? 'translate-x-6' : 'translate-x-1'
-                      }`} />
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Stop-loss and Take-profit — always visible for macross */}
-              {form.strategy_id === 'macross' && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">
-                      Stop Loss % <span className="text-slate-500">(0 = disabled)</span>
-                    </label>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" step="0.005" min="0" max="0.5"
-                        value={form.stop_loss_pct}
-                        onChange={(e) => setForm({ ...form, stop_loss_pct: +e.target.value })}
-                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                        placeholder="e.g. 0.02"
-                      />
-                      <span className="text-xs text-slate-500 shrink-0">
-                        {form.stop_loss_pct > 0 ? `${(form.stop_loss_pct * 100).toFixed(1)}%` : 'off'}
-                      </span>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">
-                      Take Profit % <span className="text-slate-500">(0 = disabled)</span>
-                    </label>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" step="0.005" min="0" max="1"
-                        value={form.take_profit_pct}
-                        onChange={(e) => setForm({ ...form, take_profit_pct: +e.target.value })}
-                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm"
-                        placeholder="e.g. 0.04"
-                      />
-                      <span className="text-xs text-slate-500 shrink-0">
-                        {form.take_profit_pct > 0 ? `${(form.take_profit_pct * 100).toFixed(1)}%` : 'off'}
-                      </span>
-                    </div>
-                  </div>
+                  <LeverageSlider value={form.leverage} onChange={(v) => setForm({ ...form, leverage: v })} />
                 </div>
               )}
 
@@ -1022,24 +823,24 @@ export default function Engine() {
                   <div className="grid grid-cols-3 gap-3 mt-2">
                     <div>
                       <label className="block text-xs text-slate-400 mb-1">Max Position %</label>
-                      <input type="number" step="0.01" min="0.01" max="1"
+                      <NumberInput min={0.01} max={1}
                         value={form.risk.max_position_pct}
-                        onChange={(e) => setForm({ ...form, risk: { ...form.risk, max_position_pct: +e.target.value } })}
-                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm" />
+                        onChange={(v) => setForm({ ...form, risk: { ...form.risk, max_position_pct: v === '' ? 0.01 : v } })}
+                        className={INPUT_CLASS} />
                     </div>
                     <div>
                       <label className="block text-xs text-slate-400 mb-1">Max Drawdown %</label>
-                      <input type="number" step="0.01" min="0.01" max="1"
+                      <NumberInput min={0.01} max={1}
                         value={form.risk.max_drawdown_pct}
-                        onChange={(e) => setForm({ ...form, risk: { ...form.risk, max_drawdown_pct: +e.target.value } })}
-                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm" />
+                        onChange={(v) => setForm({ ...form, risk: { ...form.risk, max_drawdown_pct: v === '' ? 0.01 : v } })}
+                        className={INPUT_CLASS} />
                     </div>
                     <div>
                       <label className="block text-xs text-slate-400 mb-1">Max Single Loss %</label>
-                      <input type="number" step="0.01" min="0.001" max="0.5"
+                      <NumberInput min={0.001} max={0.5}
                         value={form.risk.max_single_loss_pct}
-                        onChange={(e) => setForm({ ...form, risk: { ...form.risk, max_single_loss_pct: +e.target.value } })}
-                        className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm" />
+                        onChange={(v) => setForm({ ...form, risk: { ...form.risk, max_single_loss_pct: v === '' ? 0.001 : v } })}
+                        className={INPUT_CLASS} />
                     </div>
                   </div>
                 )}
@@ -1068,76 +869,20 @@ export default function Engine() {
         </div>
       )}
 
-      {/* Running engines */}
-      <div className="space-y-3">
-        <h2 className="text-sm font-semibold text-slate-400">
-          运行中 ({runningEngines.length})
-        </h2>
-        {runningEngines.length === 0 ? (
-          <div className="bg-slate-800 rounded-xl p-5 text-slate-500 text-sm">
-            暂无运行中的策略。点 <strong>+ 新建策略</strong> 启动一个。
-          </div>
-        ) : (
-          runningEngines.map((eng) => (
-            <div key={eng.engine_id} className="bg-slate-800 rounded-xl p-4 flex items-start gap-4">
-              <div className="w-2.5 h-2.5 mt-1.5 rounded-full bg-green-400 animate-pulse flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-semibold text-sm">{eng.engine_id}</span>
-                  <span className="text-xs bg-green-900/50 text-green-300 px-1.5 py-0.5 rounded">运行中</span>
-                  {(() => {
-                    const m = engineMoney(eng)
-                    return <span title={`mode=${eng.mode} · credential_id=${eng.credential_id}`} className={`text-xs ${m.cls} px-1.5 py-0.5 rounded`}>{m.text}</span>
-                  })()}
-                  {eng.leverage && eng.leverage > 1 && (
-                    <span className="text-xs bg-orange-900/50 text-orange-300 px-1.5 py-0.5 rounded font-mono">
-                      {eng.leverage}x
-                    </span>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-xs text-slate-400">
-                  <div><span className="block text-slate-500">策略</span>{strategyLabel(eng.strategy_id)}</div>
-                  <div><span className="block text-slate-500">交易对</span>{eng.symbol}</div>
-                  <div><span className="block text-slate-500">周期</span>{eng.interval}</div>
-                  <div><span className="block text-slate-500">启动于</span>{new Date(eng.started_at).toLocaleString()}</div>
-                </div>
-                {eng.mode === 'live' && <LiveStatus engineID={eng.engine_id} strategyId={eng.strategy_id} />}
-              </div>
-              <button
-                onClick={() => handleStop(eng.engine_id)}
-                disabled={stoppingId === eng.engine_id}
-                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded text-xs font-semibold flex-shrink-0"
-              >
-                {stoppingId === eng.engine_id ? '停止中…' : '⏹ 停止'}
-              </button>
-            </div>
-          ))
-        )}
-      </div>
+      <RunningEnginesList
+        engines={runningEngines}
+        credentials={creds}
+        positionsByEngine={positionsByEngine}
+        stoppingId={stoppingId}
+        onStop={handleStop}
+        onNavigate={handleNavigate}
+        onPositionClosed={loadPositions}
+      />
 
-      {/* Stopped engines */}
-      {stoppedEngines.length > 0 && (
-        <div className="space-y-3">
-          <h2 className="text-sm font-semibold text-slate-400">
-            Stopped ({stoppedEngines.length})
-          </h2>
-          {stoppedEngines.map((eng) => (
-            <div key={eng.engine_id} className="bg-slate-800/50 rounded-xl p-4 flex items-start gap-4">
-              <div className="w-2.5 h-2.5 mt-1.5 rounded-full bg-slate-500 flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-semibold text-sm text-slate-400">{eng.engine_id}</span>
-                  <span className="text-xs bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded">stopped</span>
-                  {eng.mode === 'paper' && (
-                    <span className="text-xs bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded">paper</span>
-                  )}
-                </div>
-                {eng.error && <p className="text-xs text-red-400 mt-1">Error: {eng.error}</p>}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <StoppedEnginesList
+        engines={allStoppedEngines}
+        onNavigate={handleNavigate}
+      />
     </div>
   )
 }

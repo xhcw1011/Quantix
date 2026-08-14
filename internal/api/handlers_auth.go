@@ -278,7 +278,7 @@ func (s *Server) handleTestNotification(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	n.SystemAlert("INFO", "Test notification from Quantix — your alerts are working!")
+	n.SystemAlert("INFO", "这是一条来自 Quantix 的测试通知——你的通知功能工作正常！")
 	jsonOK(w, map[string]string{"message": "test notification sent"})
 }
 

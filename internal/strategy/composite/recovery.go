@@ -37,13 +37,17 @@ type compositeState struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// stateKey returns the Redis key used to persist this strategy instance's state.
-// Empty engineID returns "" — caller must skip if so.
+// stateKey returns the Redis key used to persist this strategy instance's
+// state. Empty engineID returns "" — caller must skip if so. Includes
+// userID: engineID ("SYMBOL-INTERVAL-composite") is only unique WITHIN one
+// user's engines, so two users running composite on the same symbol+interval
+// would otherwise share one key and corrupt each other's posQty on restart
+// (2026-08-06 finding, same root cause as the guardian_state incident).
 func (s *Strategy) stateKey() string {
 	if s.engineID == "" {
 		return ""
 	}
-	return fmt.Sprintf("quantix:composite:%s:state", s.engineID)
+	return fmt.Sprintf("quantix:composite:%d:%s:state", s.userID, s.engineID)
 }
 
 // persistState writes posQty to Redis. Silently no-op when rdb or engineID

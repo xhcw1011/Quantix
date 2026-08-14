@@ -3,6 +3,7 @@
 package strategy
 
 import (
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -194,6 +195,23 @@ type TickReceiver interface {
 type StatusReporter interface {
 	Status() map[string]any
 }
+
+// Retired is an optional interface a strategy implements to signal that it
+// has permanently finished its job and the engine hosting it should stop
+// itself (rather than keep polling/subscribing forever and being blindly
+// resurrected on the next server restart — 2026-08-06 finding: guardian's own
+// retire() only quieted the strategy's OnBar/OnTick, but the surrounding
+// engine session had no way to learn about it).
+type Retired interface {
+	Retired() bool
+}
+
+// ErrRetired is returned by live.Engine.Run / paper.Engine.Run when they stop
+// because the strategy reported Retired() == true, distinguishing a
+// self-initiated stop from a genuine runtime error or an externally
+// requested Stop() (each of which the engine manager must handle
+// differently).
+var ErrRetired = errors.New("strategy retired")
 
 // LiveUpdatable is an optional interface a strategy implements to accept live
 // parameter changes on a running engine. The engine calls UpdateParams from its

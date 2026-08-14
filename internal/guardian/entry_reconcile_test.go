@@ -189,6 +189,136 @@ func TestGuardian_LimitEntry(t *testing.T) {
 	}
 }
 
+// TestGuardian_DoesNotReenterAfterRestartOnceEntryConsumed is the regression test
+// for the 2026-08-05 real-money incident: PlaceEntry/wantEntry is a standing
+// "open a position for me" instruction re-read from stored config on every
+// restart. entryPlaced (the in-memory re-fire guard) resets to false on every
+// new process, so once the entry had already fired once (in any prior run) and
+// the account is later flat again for ANY reason (closed by the user, by TP/SL,
+// or by an unrelated bug), a restart silently placed a brand-new entry the user
+// never asked for. The one-shot "entry consumed" fact must survive a restart via
+// the same persisted state store used for trail-stop restoration.
+func TestGuardian_DoesNotReenterAfterRestartOnceEntryConsumed(t *testing.T) {
+	store := NewMemStateStore()
+	const key = "BTCUSDT-5m-guardian"
+
+	// Run 1: fresh guardian, flat account -> places its one-shot entry.
+	g1 := NewEntryGuardian("BTCUSDT", SideLong, 0.011, entryCfg(), 14, zap.NewNop())
+	g1.SetStateStore(store, key)
+	b1 := &gBroker{}
+	ctx1 := strategy.NewContext(&gPortfolio{}, b1, zap.NewNop())
+	g1.OnBar(ctx1, exchange.Kline{Open: 65300, High: 65300, Low: 65300, Close: 65300})
+	if len(b1.orders) != 1 {
+		t.Fatalf("run 1: expected the one-shot entry to fire, got %d orders", len(b1.orders))
+	}
+
+	// Run 2 simulates a restart (fresh Guardian struct, same persisted state, same
+	// stateKey) with the account back to FLAT (the earlier position is gone --
+	// exactly what happened after the guardian_state cross-user-contamination bug
+	// closed it). It must NOT place a fresh entry.
+	g2 := NewEntryGuardian("BTCUSDT", SideLong, 0.011, entryCfg(), 14, zap.NewNop())
+	g2.SetStateStore(store, key)
+	b2 := &gBroker{}
+	ctx2 := strategy.NewContext(&gPortfolio{}, b2, zap.NewNop())
+	g2.OnBar(ctx2, exchange.Kline{Open: 64000, High: 64000, Low: 64000, Close: 64000})
+	if len(b2.orders) != 0 {
+		t.Fatalf("run 2 (post-restart, flat): expected NO re-entry, got %d orders: %+v", len(b2.orders), b2.orders)
+	}
+}
+
+// TestGuardian_ArmsFromLivePositionEvenWithoutFillNotification is the regression
+// test for the 2026-08-05 "unmatched fill" incident: a resting LIMIT entry order
+// filled on the exchange, but the fill was routed as an "unmatched fill" (the OMS
+// no longer recognized its client-order-ID, e.g. after an intervening restart)
+// and never reached guardian.OnFill. The guardian was stuck forever in
+// "entryPlaced=true, waiting for a fill notification that will never come" —
+// leaving a REAL exchange position with zero protection. It must instead notice
+// the live position on a later bar and arm from it directly, exactly like the
+// restart-adopt path does.
+func TestGuardian_ArmsFromLivePositionEvenWithoutFillNotification(t *testing.T) {
+	g := NewEntryGuardian("BTCUSDT", SideLong, 0.0015, entryCfg(), 14, zap.NewNop())
+	b := &gBroker{}
+	ctx := strategy.NewContext(&gPortfolio{}, b, zap.NewNop())
+
+	// Bar 1: flat -> places the one-shot limit entry as usual.
+	g.OnBar(ctx, exchange.Kline{Open: 65300, High: 65300, Low: 65300, Close: 65300})
+	if len(b.orders) != 1 {
+		t.Fatalf("expected the entry order to be placed, got %d", len(b.orders))
+	}
+	if g.Prot() != nil {
+		t.Fatal("must not be armed yet -- no fill has been delivered")
+	}
+
+	// Simulate the fill landing on the exchange WITHOUT ever calling g.OnFill
+	// (the "unmatched fill" case) -- the syncer now reports a live position.
+	livePos := &position.StrategyPosition{}
+	livePos.Symbol, livePos.Side, livePos.Qty, livePos.EntryPrice = "BTCUSDT", "LONG", 0.001, 65301
+	ctx.Extra["position_syncer"] = fakeLiveSource{long: livePos}
+
+	// Bar 2: still no OnFill was ever delivered, but the guardian must notice the
+	// live position and arm from it rather than waiting forever.
+	g.OnBar(ctx, exchange.Kline{Open: 65301, High: 65301, Low: 65301, Close: 65301})
+	if g.Prot() == nil {
+		t.Fatal("expected the guardian to arm from the live position despite the missed fill notification")
+	}
+	if g.Prot().Qty != 0.001 || g.Prot().Entry != 65301 {
+		t.Fatalf("armed with wrong entry/qty: %+v", g.Prot())
+	}
+	// Must NOT have placed a second (duplicate) entry order.
+	if len(b.orders) != 1 {
+		t.Fatalf("expected still exactly 1 order (no duplicate entry), got %d: %+v", len(b.orders), b.orders)
+	}
+}
+
+// TestGuardian_DoesNotDoublePartialTPAfterRestart is a second instance of the
+// same restart-state class of bug as the entry re-fire above: partialDone (the
+// in-memory guard against firing the partial take-profit twice) also isn't
+// persisted, so a restart while the position is still above the partial-TP
+// trigger price would close ANOTHER fraction of the (already-reduced) position
+// the user never asked to reduce again.
+func TestGuardian_DoesNotDoublePartialTPAfterRestart(t *testing.T) {
+	store := NewMemStateStore()
+	const key = "ETHUSDT-partial-guardian"
+	cfg := trailCfg() // R = 5% of 100 = 5
+	cfg.PartialTPAtR = 2
+	cfg.PartialTPFraction = 0.5
+
+	// Run 1: adopt a full 1.0 qty position, price runs to +2R -> partial fires,
+	// closing 0.5 and leaving 0.5 on the exchange.
+	g1 := NewAdoptGuardian("ETHUSDT", cfg, 14, zap.NewNop())
+	g1.SetStateStore(store, key)
+	b1 := &gBroker{}
+	ctx1 := strategy.NewContext(&gPortfolio{qty: 1, avg: 100}, b1, zap.NewNop())
+	g1.OnBar(ctx1, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
+	g1.OnTick(ctx1, 110) // pnlR = 2.0 -> partial fires
+	if n := countReason(b1.orders, "guardian_partial_tp"); n != 1 {
+		t.Fatalf("run 1: expected exactly 1 partial TP, got %d", n)
+	}
+
+	// Run 2 simulates a restart: fresh Guardian, same persisted state, and the
+	// account now genuinely holds only the REDUCED 0.5 qty (the real result of
+	// run 1's fill) at the SAME elevated price. It must NOT fire a second partial.
+	g2 := NewAdoptGuardian("ETHUSDT", cfg, 14, zap.NewNop())
+	g2.SetStateStore(store, key)
+	b2 := &gBroker{}
+	ctx2 := strategy.NewContext(&gPortfolio{qty: 0.5, avg: 100}, b2, zap.NewNop())
+	g2.OnBar(ctx2, exchange.Kline{Open: 110, High: 110, Low: 110, Close: 110})
+	g2.OnTick(ctx2, 110) // still pnlR = 2.0
+	if n := countReason(b2.orders, "guardian_partial_tp"); n != 0 {
+		t.Fatalf("run 2 (post-restart): expected NO second partial TP, got %d: %+v", n, b2.orders)
+	}
+}
+
+func countReason(orders []strategy.OrderRequest, reason string) int {
+	n := 0
+	for _, o := range orders {
+		if o.Reason == reason {
+			n++
+		}
+	}
+	return n
+}
+
 // TestGuardian_EntryPlacesWhenFlat guards first-run behaviour: with no existing
 // position, arm-with-entry must still place the entry once.
 func TestGuardian_EntryPlacesWhenFlat(t *testing.T) {

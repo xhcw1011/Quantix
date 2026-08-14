@@ -111,11 +111,11 @@ func (m *MarginMonitor) check(ctx context.Context) {
 		// Re-alert every 10 consecutive failures so operators aren't blind indefinitely.
 		if m.consecutiveFails >= 3 && m.consecutiveFails%10 == 3 && m.notif != nil {
 			m.notif.SystemAlert("CRITICAL", fmt.Sprintf(
-				"🚨 MARGIN MONITOR BLIND — %d consecutive query failures\n"+
-					"Strategy: %s\n"+
-					"Error: %s\n"+
-					"Margin status unknown — liquidation risk unmonitored.\n"+
-					"MANUAL INTERVENTION REQUIRED",
+				"🚨 保证金监控失明 — 连续 %d 次查询失败\n"+
+					"策略：%s\n"+
+					"错误：%s\n"+
+					"保证金状态未知，爆仓风险无法监控。\n"+
+					"需要人工介入",
 				m.consecutiveFails, m.strategyID, err.Error(),
 			))
 		}
@@ -144,13 +144,13 @@ func (m *MarginMonitor) evaluate(p exchange.PositionMarginInfo) {
 	case p.MarginRatio < m.criticalThreshold:
 		// Liquidation is imminent — escalate with maximum urgency.
 		msg := fmt.Sprintf(
-			"🚨 CRITICAL MARGIN — LIQUIDATION IMMINENT\n"+
-				"Strategy: %s | Position: %s\n"+
-				"Margin Ratio: %.1f%% (threshold: %.0f%%)\n"+
-				"Size: %.4f | MANUAL INTERVENTION REQUIRED",
+			"🚨 保证金危急 — 即将爆仓\n"+
+				"策略：%s | 仓位：%s\n"+
+				"保证金率：%.1f%%（阈值：%.0f%%）\n"+
+				"数量：%.4f | 需要人工介入",
 			m.strategyID, posDesc, p.MarginRatio*100, m.criticalThreshold*100, p.Size,
 		)
-		m.log.Error("CRITICAL: margin ratio below liquidation threshold",
+		m.log.Error("危急：保证金率已低于爆仓阈值",
 			zap.String("strategy", m.strategyID),
 			zap.String("symbol", p.Symbol),
 			zap.String("position_side", p.PositionSide),
@@ -164,13 +164,13 @@ func (m *MarginMonitor) evaluate(p exchange.PositionMarginInfo) {
 	case p.MarginRatio < m.warnThreshold:
 		// Approaching danger zone — warn operators.
 		msg := fmt.Sprintf(
-			"⚠️ LOW MARGIN WARNING\n"+
-				"Strategy: %s | Position: %s\n"+
-				"Margin Ratio: %.1f%% (threshold: %.0f%%)\n"+
-				"Size: %.4f",
+			"⚠️ 保证金偏低预警\n"+
+				"策略：%s | 仓位：%s\n"+
+				"保证金率：%.1f%%（阈值：%.0f%%）\n"+
+				"数量：%.4f",
 			m.strategyID, posDesc, p.MarginRatio*100, m.warnThreshold*100, p.Size,
 		)
-		m.log.Warn("low margin ratio detected",
+		m.log.Warn("检测到保证金率偏低",
 			zap.String("strategy", m.strategyID),
 			zap.String("symbol", p.Symbol),
 			zap.String("position_side", p.PositionSide),

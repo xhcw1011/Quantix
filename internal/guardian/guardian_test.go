@@ -94,12 +94,31 @@ func TestGuardian_OnFillMarksDone(t *testing.T) {
 	g.OnTick(ctx, 106) // activate, stop -> 101
 	g.OnTick(ctx, 100) // 100 <= 101 -> close placed
 	g.OnFill(ctx, strategy.Fill{Symbol: "ETHUSDT", Qty: 1, Price: 100})
-	if !g.done {
-		t.Fatalf("OnFill of the protective close should mark done")
+	if g.phase != PhaseClosed {
+		t.Fatalf("OnFill of the protective close should mark phase Closed, got %s", g.phase)
 	}
 	g.OnTick(ctx, 102) // no further action
 	if len(b.orders) != 1 {
 		t.Fatalf("no orders after done, got %d", len(b.orders))
+	}
+}
+
+// TestGuardian_RetiredMirrorsDone verifies Guardian implements
+// strategy.Retired so live/paper engines can learn a guardian has
+// permanently finished and stop hosting it (2026-08-06 finding: previously
+// nothing propagated g.done past the strategy itself).
+func TestGuardian_RetiredMirrorsDone(t *testing.T) {
+	var _ strategy.Retired = (*Guardian)(nil)
+
+	g, _, ctx := newLongGuardian(trailCfg())
+	if g.Retired() {
+		t.Fatal("a freshly armed guardian must not report Retired")
+	}
+	g.OnTick(ctx, 106) // activate, stop -> 101
+	g.OnTick(ctx, 100) // 100 <= 101 -> close placed
+	g.OnFill(ctx, strategy.Fill{Symbol: "ETHUSDT", Qty: 1, Price: 100})
+	if !g.Retired() {
+		t.Fatal("guardian must report Retired once its protective close has filled")
 	}
 }
 

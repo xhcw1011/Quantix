@@ -348,11 +348,11 @@ func (b *Broker) ReplaceSLOrder(ctx context.Context, symbol, posSide string, clo
 	// Place new SL
 	newID, err := b.orderClient.PlaceStopMarketOrder(ctx, symbol, closeSide, posSide, remainQty, newStopPrice, "")
 	if err != nil {
-		b.log.Error("ReplaceSL: failed to place new SL",
+		b.log.Error("更新止损：新止损单下单失败",
 			zap.Float64("new_stop", newStopPrice), zap.Error(err))
 		if b.notifier != nil {
 			b.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
-				"Failed to replace SL for %s %s @ %.2f: %v", symbol, posSide, newStopPrice, err))
+				"更新止损失败：%s %s @ %.2f：%v", symbol, posSide, newStopPrice, err))
 		}
 		return false
 	}
@@ -387,7 +387,7 @@ func (b *Broker) CancelAllPendingOrders(ctx context.Context) {
 			err = b.orderClient.CancelOrder(ctx, ord.Symbol, ord.ExchangeID)
 		}
 		if err != nil {
-			b.log.Warn("cancel order on shutdown failed (order may remain live on exchange)",
+			b.log.Warn("关闭时取消订单失败（订单可能仍在交易所生效）",
 				zap.String("order_id", ord.ID),
 				zap.String("exchange_id", ord.ExchangeID),
 				zap.String("symbol", ord.Symbol),
@@ -395,7 +395,7 @@ func (b *Broker) CancelAllPendingOrders(ctx context.Context) {
 				zap.Error(err))
 			if b.notifier != nil && (ord.Role == "stop_loss" || ord.Role == "take_profit") {
 				b.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
-					"🚨 SHUTDOWN: failed to cancel %s order %s on exchange\nSymbol: %s | ExchangeID: %s\nMANUAL CANCELLATION REQUIRED",
+					"🚨 关闭引擎时未能在交易所取消 %s 订单 %s\n交易对：%s | 交易所订单号：%s\n需要人工取消",
 					ord.Role, ord.ID, ord.Symbol, ord.ExchangeID,
 				))
 			}
@@ -437,7 +437,7 @@ func (b *Broker) placeProtectiveWithRetry(ctx context.Context, kind string, fn f
 // when a protective order (stop-loss or take-profit) fails to place.
 // This means the position is open with no risk protection.
 func (b *Broker) alertUnprotectedPosition(symbol, posSide, kind string, price float64, err error) {
-	b.log.Error("UNPROTECTED POSITION — protective order failed after retry",
+	b.log.Error("仓位无保护 — 保护性订单重试后仍下单失败",
 		zap.String("kind", kind),
 		zap.String("symbol", symbol),
 		zap.String("position_side", posSide),
@@ -445,10 +445,10 @@ func (b *Broker) alertUnprotectedPosition(symbol, posSide, kind string, price fl
 		zap.Error(err))
 	if b.notifier != nil {
 		b.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
-			"🚨 UNPROTECTED POSITION — %s order FAILED\n"+
-				"Symbol: %s | Side: %s | Price: %.8f\n"+
-				"Error: %s\n"+
-				"MANUAL INTERVENTION REQUIRED",
+			"🚨 仓位无保护 — %s 订单下单失败\n"+
+				"交易对：%s | 方向：%s | 价格：%.8f\n"+
+				"错误：%s\n"+
+				"需要人工介入",
 			kind, symbol, posSide, price, err.Error(),
 		))
 	}

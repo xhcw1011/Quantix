@@ -36,8 +36,6 @@ export const getTicker = (symbol: string) => api.get('/ticker', { params: { symb
 export const getEquity = (strategyId?: string, limit = 200, period?: '1d' | '7d' | '30d' | 'all') =>
   api.get('/equity', { params: { strategy_id: strategyId, limit, period } })
 
-export const getSummary = () => api.get('/summary')
-
 // Strategies
 export const listStrategies = () => api.get('/strategies')
 export const listStrategyPresets = (name: string) => api.get(`/strategies/${name}/presets`)
@@ -77,9 +75,3 @@ export const getLiveTrading = () => api.get('/users/me/live-trading')
 export const setLiveTrading = (enabled: boolean) =>
   api.put('/users/me/live-trading', { enabled })
 
-// Backtest
-export const submitBacktest = (data: object) => api.post('/backtest', data)
-export const listBacktests = (limit = 20, offset = 0) =>
-  api.get('/backtest', { params: { limit, offset } })
-export const getBacktest = (id: string) => api.get(`/backtest/${id}`)
-export const deleteBacktest = (id: string) => api.delete(`/backtest/${id}`)

@@ -27,6 +27,7 @@ import (
 
 type experiment struct {
 	ID                string
+	UserID            int
 	EngineID          string
 	Hypothesis        string
 	StartedAt         time.Time
@@ -137,7 +138,7 @@ func main() {
 }
 
 func loadExperiments(ctx context.Context, db *pgxpool.Pool, id string) ([]experiment, error) {
-	q := `SELECT id, engine_id, hypothesis, started_at, ended_at,
+	q := `SELECT id, user_id, engine_id, hypothesis, started_at, ended_at,
                  baseline_start, baseline_end, decision_after_days,
                  fail_metric, fail_op, fail_threshold, fail_relative,
                  status, notes
@@ -153,7 +154,7 @@ func loadExperiments(ctx context.Context, db *pgxpool.Pool, id string) ([]experi
 	var out []experiment
 	for rows.Next() {
 		var e experiment
-		if err := rows.Scan(&e.ID, &e.EngineID, &e.Hypothesis, &e.StartedAt, &e.EndedAt,
+		if err := rows.Scan(&e.ID, &e.UserID, &e.EngineID, &e.Hypothesis, &e.StartedAt, &e.EndedAt,
 			&e.BaselineStart, &e.BaselineEnd, &e.DecisionAfterDays,
 			&e.FailMetric, &e.FailOp, &e.FailThreshold, &e.FailRelative,
 			&e.Status, &e.Notes); err != nil {
@@ -171,9 +172,9 @@ func runOne(ctx context.Context, db *pgxpool.Pool, exp experiment) (string, stri
 
 	bStart, bEnd := autoBaseline(exp, winEnd)
 
-	cur, err := computeKPIs(ctx, db, exp.EngineID, exp.StartedAt, winEnd)
+	cur, err := computeKPIs(ctx, db, exp.UserID, exp.EngineID, exp.StartedAt, winEnd)
 	if err != nil { return "", "", fmt.Errorf("kpi current: %w", err) }
-	base, err := computeKPIs(ctx, db, exp.EngineID, bStart, bEnd)
+	base, err := computeKPIs(ctx, db, exp.UserID, exp.EngineID, bStart, bEnd)
 	if err != nil { return "", "", fmt.Errorf("kpi baseline: %w", err) }
 
 	decision := evaluate(exp, cur, now)
@@ -193,11 +194,15 @@ func autoBaseline(exp experiment, winEnd time.Time) (time.Time, time.Time) {
 	return exp.StartedAt.Add(-winLen), exp.StartedAt
 }
 
-func computeKPIs(ctx context.Context, db *pgxpool.Pool, engineID string, start, end time.Time) (kpis, error) {
+func computeKPIs(ctx context.Context, db *pgxpool.Pool, userID int, engineID string, start, end time.Time) (kpis, error) {
 	k := kpis{WindowStart: start, WindowEnd: end, Days: end.Sub(start).Hours() / 24}
 	if k.Days <= 0 { return k, nil }
 
-	// Closing fills: realized_pnl != 0
+	// Closing fills: realized_pnl != 0. engine_id ("SYMBOL-INTERVAL-STRATEGY")
+	// is only unique WITHIN one user's engines, so user_id must be part of
+	// every filter here — otherwise two users sharing the same engine_id would
+	// have their fills/trade_events blended into one experiment's KPIs (found
+	// 2026-08-06, see migration 016).
 	row := db.QueryRow(ctx, `
 		SELECT
 			COUNT(*),
@@ -207,9 +212,9 @@ func computeKPIs(ctx context.Context, db *pgxpool.Pool, engineID string, start, 
 			COALESCE(AVG(realized_pnl) FILTER (WHERE realized_pnl > 0), 0),
 			COALESCE(AVG(realized_pnl) FILTER (WHERE realized_pnl < 0), 0)
 		FROM fills
-		WHERE strategy_id=$1 AND realized_pnl <> 0
-		  AND filled_at >= $2 AND filled_at < $3`,
-		engineID, start, end)
+		WHERE user_id=$1 AND strategy_id=$2 AND realized_pnl <> 0
+		  AND filled_at >= $3 AND filled_at < $4`,
+		userID, engineID, start, end)
 	if err := row.Scan(&k.NCloses, &k.Wins, &k.Losses, &k.GrossPnL, &k.AvgWin, &k.AvgLoss); err != nil {
 		return k, err
 	}
@@ -217,17 +222,17 @@ func computeKPIs(ctx context.Context, db *pgxpool.Pool, engineID string, start, 
 	// All fills fees in window
 	if err := db.QueryRow(ctx, `
 		SELECT COALESCE(SUM(fee), 0) FROM fills
-		WHERE strategy_id=$1 AND filled_at >= $2 AND filled_at < $3`,
-		engineID, start, end).Scan(&k.Fees); err != nil {
+		WHERE user_id=$1 AND strategy_id=$2 AND filled_at >= $3 AND filled_at < $4`,
+		userID, engineID, start, end).Scan(&k.Fees); err != nil {
 		return k, err
 	}
 
 	// Opens in window
 	if err := db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM trade_events
-		WHERE engine_id=$1 AND event_type='open'
-		  AND created_at >= $2 AND created_at < $3`,
-		engineID, start, end).Scan(&k.NOpens); err != nil {
+		WHERE user_id=$1 AND engine_id=$2 AND event_type='open'
+		  AND created_at >= $3 AND created_at < $4`,
+		userID, engineID, start, end).Scan(&k.NOpens); err != nil {
 		return k, err
 	}
 
@@ -324,9 +329,9 @@ func buildTGSummary(ctx context.Context, db *pgxpool.Pool, exp experiment, decis
 	winEnd := now
 	if exp.EndedAt.Valid { winEnd = exp.EndedAt.Time }
 	bStart, bEnd := autoBaseline(exp, winEnd)
-	cur, err := computeKPIs(ctx, db, exp.EngineID, exp.StartedAt, winEnd)
+	cur, err := computeKPIs(ctx, db, exp.UserID, exp.EngineID, exp.StartedAt, winEnd)
 	if err != nil { return "", err }
-	base, err := computeKPIs(ctx, db, exp.EngineID, bStart, bEnd)
+	base, err := computeKPIs(ctx, db, exp.UserID, exp.EngineID, bStart, bEnd)
 	if err != nil { return "", err }
 
 	daysRunning := now.Sub(exp.StartedAt).Hours() / 24

@@ -39,7 +39,7 @@ func (e *Engine) printStatus() {
 		}
 	}
 
-	e.log.Info("──── Live Trading Status ────",
+	e.log.Info("──── 实盘交易状态 ────",
 		zap.Duration("uptime", elapsed),
 		zap.Float64("wallet_balance", e.broker.WalletBalance()),
 		zap.Float64("cash", cash),
@@ -118,13 +118,13 @@ func (e *Engine) printStatus() {
 	staleSince := time.Since(lastActivity)
 	if staleSince > staleThreshold && !e.staleAlerted {
 		e.staleAlerted = true
-		e.log.Error("no kline data received — possible WS disconnect",
+		e.log.Error("长时间未收到K线数据 — 可能是WS连接断开",
 			zap.Duration("silent_for", staleSince.Truncate(time.Second)),
 			zap.String("strategy", e.cfg.StrategyID),
 		)
 		if e.notifier != nil {
 			e.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
-				"⚠️ No kline data for %s\nStrategy %s may be stalled — check WS connection",
+				"⚠️ 已 %s 没收到K线数据\n策略 %s 可能卡住了，请检查WS连接",
 				staleSince.Truncate(time.Second), e.cfg.StrategyID,
 			))
 		}

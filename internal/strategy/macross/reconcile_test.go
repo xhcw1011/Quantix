@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Quantix/quantix/internal/exchange"
+	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
@@ -30,13 +31,37 @@ func (flatPV) Equity(map[string]float64) float64        { return 10_000 }
 
 // fakeSyncer satisfies the positionReporter interface macross reads from
 // ctx.Extra["position_syncer"].
-type fakeSyncer struct{ long, short bool }
+type fakeSyncer struct {
+	long, short          bool
+	longEntry, longQty   float64
+	shortEntry, shortQty float64
+}
 
 func (f fakeSyncer) HasPosition(side string) bool {
 	if side == "LONG" {
 		return f.long
 	}
 	return f.short
+}
+
+func (f fakeSyncer) GetLong() *position.StrategyPosition {
+	if !f.long {
+		return nil
+	}
+	p := &position.StrategyPosition{}
+	p.EntryPrice = f.longEntry
+	p.Qty = f.longQty
+	return p
+}
+
+func (f fakeSyncer) GetShort() *position.StrategyPosition {
+	if !f.short {
+		return nil
+	}
+	p := &position.StrategyPosition{}
+	p.EntryPrice = f.shortEntry
+	p.Qty = f.shortQty
+	return p
 }
 
 // downtrendBars builds a pure linear decline so fast SMA stays strictly below
@@ -94,6 +119,37 @@ func TestMACross_HedgeSkipsPrimingWhenSyncerHasPosition(t *testing.T) {
 	reqs := runReconcileScenario(t, fakeSyncer{short: true})
 	if len(reqs) != 0 {
 		t.Fatalf("expected NO order when syncer already reports a SHORT (must not re-open on restart), got %d: %+v", len(reqs), reqs)
+	}
+}
+
+// TestMACross_ReconcileRestoresEntryForAsymmetricExit reproduces the
+// 2026-08-06 finding: reconcilePosition seeded hasLong/hasShort from the
+// syncer but never posEntry/posQty, which OnFill is otherwise the only writer
+// of. Left at their zero-value after a restart, floatingPnLPct() is pinned at
+// 0 forever, so under AsymmetricExit a reverse cross can never close the
+// position again (it only closes when floatingPnLPct() > 0) no matter how
+// profitable it actually is.
+func TestMACross_ReconcileRestoresEntryForAsymmetricExit(t *testing.T) {
+	m := New(Config{
+		Symbol: "BTCUSDT", FastPeriod: 10, SlowPeriod: 30,
+		EnableShort: true, AsymmetricExit: true, TrendFilterMin: 0,
+	})
+	ctx := strategy.NewContext(flatPV{}, &captureBroker{}, zap.NewNop())
+	ctx.Extra["position_syncer"] = fakeSyncer{short: true, shortEntry: 100, shortQty: 2}
+
+	m.reconcilePosition(ctx)
+
+	if m.posEntry != 100 {
+		t.Fatalf("expected posEntry restored to 100 from the syncer, got %v", m.posEntry)
+	}
+	if m.posQty != 2 {
+		t.Fatalf("expected posQty restored to 2 from the syncer, got %v", m.posQty)
+	}
+	// Price fell well below the restored short entry → genuinely profitable.
+	// Before the fix this returned 0 (posEntry==0 short-circuits floatingPnLPct),
+	// which would keep a reverse cross from ever closing the leg again.
+	if fp := m.floatingPnLPct(90); fp <= 0 {
+		t.Fatalf("expected positive floating PnL after restoring entry, got %v", fp)
 	}
 }
 

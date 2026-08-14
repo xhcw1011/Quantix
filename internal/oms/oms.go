@@ -340,13 +340,20 @@ func (o *OMS) FindByClientOrderID(clientOrderID string) *Order {
 }
 
 // FindPending returns a copy of the first non-terminal order matching the given
-// symbol and side. Returns nil if no such order exists.
+// symbol, side, AND positionSide. Returns nil if no such order exists.
 // Used by Broker.PlaceOrder to block duplicate orders (soft idempotency).
-func (o *OMS) FindPending(symbol string, side strategy.Side) *Order {
+//
+// positionSide must be part of the match: in hedge mode, closing a SHORT
+// (BUY, PositionSide=SHORT) and opening a LONG (BUY, PositionSide=LONG) share
+// Symbol+Side but are independent legs — a same-bar direction flip (e.g.
+// macross's golden-cross close-then-open) would otherwise have its open leg
+// falsely blocked as a "duplicate" of the still-pending close, leaving the
+// engine stuck flat after its first flip (2026-08-12 finding).
+func (o *OMS) FindPending(symbol string, side strategy.Side, positionSide strategy.PositionSide) *Order {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	for _, ord := range o.orders {
-		if !ord.IsTerminal() && ord.Symbol == symbol && ord.Side == side {
+		if !ord.IsTerminal() && ord.Symbol == symbol && ord.Side == side && ord.PositionSide == positionSide {
 			cp := *ord
 			return &cp
 		}

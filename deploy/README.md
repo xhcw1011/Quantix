@@ -42,7 +42,7 @@ pkill -f quantix-api
 ```bash
 SSH_HOST=54.46.102.153 \
 SSH_USER=ubuntu \
-SSH_KEY=/Users/apexis-backdesk/work/pem/test.pem \
+SSH_KEY=/Users/apexis-backdesk/work/pem/calvin.chan_zttrust_go_20250821.pem \
 QUANTIX_DB_PASSWORD='YourStrongerPasswordHere' \
 ./deploy/deploy.sh
 ```
@@ -53,18 +53,18 @@ If you don't set these, defaults from `deploy.sh` top are used (matches your loc
 
 ```bash
 # Service status
-ssh -i ~/work/pem/test.pem ubuntu@54.46.102.153 'sudo systemctl status quantix-api'
+ssh -i ~/work/pem/calvin.chan_zttrust_go_20250821.pem ubuntu@54.46.102.153 'sudo systemctl status quantix-api'
 
 # Live log tail
-ssh -i ~/work/pem/test.pem ubuntu@54.46.102.153 \
+ssh -i ~/work/pem/calvin.chan_zttrust_go_20250821.pem ubuntu@54.46.102.153 \
   'tail -f /opt/quantix/logs/quantix-$(date +%Y%m%d).log'
 
 # Health check (backend) — bound 127.0.0.1:9118, only reachable from server
-ssh -i ~/work/pem/test.pem ubuntu@54.46.102.153 \
+ssh -i ~/work/pem/calvin.chan_zttrust_go_20250821.pem ubuntu@54.46.102.153 \
   'curl -s http://localhost:9118/api/health'
 
 # Health check (via nginx) — public-facing, what users actually hit
-ssh -i ~/work/pem/test.pem ubuntu@54.46.102.153 \
+ssh -i ~/work/pem/calvin.chan_zttrust_go_20250821.pem ubuntu@54.46.102.153 \
   'curl -s http://localhost:9119/api/health'
 ```
 
@@ -105,7 +105,7 @@ ssh ubuntu@54.46.102.153 'sudo mv /opt/quantix/bin/quantix-api.prev /opt/quantix
 
 | Symptom | Check |
 |---|---|
-| SSH fails | `chmod 600 ~/work/pem/test.pem`, security group allows :22 from your IP |
+| SSH fails | `chmod 600 ~/work/pem/calvin.chan_zttrust_go_20250821.pem`, security group allows :22 from your IP |
 | `psql: command not found` after install | `sudo apt install -y postgresql-client-17` |
 | Service won't start | `sudo journalctl -u quantix-api -n 50` |
 | "no migration files found" | `ls /opt/quantix/migrations/` should show 11 .sql files |

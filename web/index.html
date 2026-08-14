@@ -3,11 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <!-- Pin a desktop layout viewport: the app has no dedicated mobile UI (only a
-         cramped md-breakpoint fallback), so on phones we render the full PC layout
-         zoomed-to-fit and pannable instead of the broken narrow reflow. 1024 clears
-         the md (768px) breakpoint so the desktop sidebar + tables render, while
-         staying as large as possible on a phone. -->
+    <!-- Default to a pinned desktop layout viewport (zoomed-to-fit, no reflow) —
+         most of the app still has no dedicated mobile UI. App.tsx's ViewportManager
+         swaps this to a real `width=device-width` viewport on the handful of routes
+         (总览/引擎列表/引擎详情) that HAVE been adapted for narrow screens, so those
+         reflow properly instead of rendering shrunk. -->
     <meta name="viewport" content="width=1024" />
     <title>Quantix</title>
   </head>

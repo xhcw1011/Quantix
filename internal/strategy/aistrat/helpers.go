@@ -25,16 +25,87 @@ func (s *AIStrategy) barsForInterval(iv string) []exchange.Kline {
 	return s.barsByInterval[iv]
 }
 
+// resolveInterval returns iv, or "15m" if iv is empty — the long-standing
+// default that predates RegimeInterval/HTFInterval/EntryFilterInterval.
+// Centralizes the zero-value fallback so every call site (and any Config{}
+// literal built outside DefaultConfig()) behaves consistently.
+func resolveInterval(iv string) string {
+	if iv == "" {
+		return "15m"
+	}
+	return iv
+}
+
+// shouldWarnMissingInterval reports whether a context-interval consumer
+// (regimeBars/htfBars/entryFilterBars) should warn: a non-default interval
+// was configured but no bars are loaded for it. Skips "15m" itself — the
+// default's own emptiness (e.g. very early warmup) isn't a misconfiguration.
+func shouldWarnMissingInterval(iv string, barsLoaded int) bool {
+	return iv != "15m" && barsLoaded == 0
+}
+
+// regimeBars returns the bars detectRegime() classifies against, per
+// s.cfg.RegimeInterval (default "15m"). Warns if a non-default interval was
+// configured but its data isn't loaded — the silent-fallback trap that made
+// the HTF-alignment filter test a no-op.
+func (s *AIStrategy) regimeBars() []exchange.Kline {
+	iv := resolveInterval(s.cfg.RegimeInterval)
+	bars := s.barsForInterval(iv)
+	if shouldWarnMissingInterval(iv, len(bars)) {
+		s.log.Warn("AI: RegimeInterval configured but no data loaded — falling back",
+			zap.String("configured", iv))
+	}
+	return bars
+}
+
+// htfBars returns the bars hourlyTrendDir()/detectHourlyMode() read, per
+// s.cfg.HTFInterval (default "15m"). See regimeBars for the warn behavior.
+func (s *AIStrategy) htfBars() []exchange.Kline {
+	iv := resolveInterval(s.cfg.HTFInterval)
+	bars := s.barsForInterval(iv)
+	if shouldWarnMissingInterval(iv, len(bars)) {
+		s.log.Warn("AI: HTFInterval configured but no data loaded — falling back",
+			zap.String("configured", iv))
+	}
+	return bars
+}
+
+// entryFilterBars returns the bars the TrendExhaustPct distance check and
+// MTF confidence score read, per s.cfg.EntryFilterInterval (default "15m").
+// See regimeBars for the warn behavior.
+func (s *AIStrategy) entryFilterBars() []exchange.Kline {
+	iv := resolveInterval(s.cfg.EntryFilterInterval)
+	bars := s.barsForInterval(iv)
+	if shouldWarnMissingInterval(iv, len(bars)) {
+		s.log.Warn("AI: EntryFilterInterval configured but no data loaded — falling back",
+			zap.String("configured", iv))
+	}
+	return bars
+}
+
 func (s *AIStrategy) getCloses() []float64 {
 	bars := s.primaryBars()
 	c := make([]float64, len(bars))
-	for i, b := range bars { c[i] = b.Close }
+	for i, b := range bars {
+		c[i] = b.Close
+	}
 	return c
 }
 
 func (s *AIStrategy) calcATR() float64 {
-	n := s.cfg.ATRPeriod
-	if len(s.primaryBars()) < n+1 { n = len(s.primaryBars()) - 1; if n < 5 { return 0 } }
+	return s.calcATRN(s.cfg.ATRPeriod)
+}
+
+// calcATRN computes ATR over an arbitrary period (bars), same formula as
+// calcATR. Used for comparing a short-window ATR against the config-default
+// (longer) window, e.g. for the volatility-elevated entry filter.
+func (s *AIStrategy) calcATRN(n int) float64 {
+	if len(s.primaryBars()) < n+1 {
+		n = len(s.primaryBars()) - 1
+		if n < 5 {
+			return 0
+		}
+	}
 	recent := s.primaryBars()[len(s.primaryBars())-n-1:]
 	var sum float64
 	for i := 1; i < len(recent); i++ {
@@ -44,15 +115,160 @@ func (s *AIStrategy) calcATR() float64 {
 	return sum / float64(n)
 }
 
+// netMove returns the signed price change from the first to the last bar in
+// the slice, or 0 if there are fewer than 2 bars.
+func netMove(bars []exchange.Kline) float64 {
+	if len(bars) < 2 {
+		return 0
+	}
+	return bars[len(bars)-1].Close - bars[0].Close
+}
+
+// momentumDecayed reports whether recent net price momentum has weakened
+// relative to the preceding window of the same length — a proxy for "the
+// move that triggered this trend confirmation is already losing steam."
+// lookback <= 0 disables the filter (never blocks). Requires 2×lookback bars
+// of history; returns false (don't block) when there isn't enough.
+func momentumDecayed(bars []exchange.Kline, lookback int, decayRatio float64) bool {
+	if lookback <= 0 || len(bars) < lookback*2 {
+		return false
+	}
+	n := len(bars)
+	recentMove := math.Abs(netMove(bars[n-lookback:]))
+	priorMove := math.Abs(netMove(bars[n-2*lookback : n-lookback]))
+	if priorMove <= 0 {
+		return false
+	}
+	return recentMove/priorMove < decayRatio
+}
+
+// volatilityElevated reports whether a short-window ATR is elevated relative
+// to a longer-baseline ATR — a proxy for "this regime read is riding the
+// aftershock of a recent volatility spike" rather than a steadily-developing
+// trend. multiple <= 0 disables the filter (never blocks).
+func volatilityElevated(shortATR, longATR, multiple float64) bool {
+	if multiple <= 0 || longATR <= 0 {
+		return false
+	}
+	return shortATR > longATR*multiple
+}
+
+// trendEntryBlocked reports whether a trend-mode entry should be skipped by
+// any of the signal-quality filters (regime age, momentum decay, volatility
+// spike, price extension). Each filter is independently config-gated (off by
+// default) and evaluated against the current bar's state.
+func (s *AIStrategy) trendEntryBlocked(side string, price, atr float64) bool {
+	if s.cfg.DisableTrend {
+		return true
+	}
+	if trendAgeBlocked(s.regimeAge, s.cfg.TrendMaxRegimeAge) {
+		return true
+	}
+	if momentumDecayed(s.primaryBars(), s.cfg.TrendMomentumLookback, s.cfg.TrendMomentumDecayRatio) {
+		return true
+	}
+	if volatilityElevated(s.calcATRN(s.cfg.TrendVolShortATRPeriod), s.calcATR(), s.cfg.TrendVolATRMultiple) {
+		return true
+	}
+	swingLow := s.findSwingLow(s.cfg.TrendExtensionSwingBars)
+	swingHigh := s.findSwingHigh(s.cfg.TrendExtensionSwingBars)
+	if priceExtended(side, price, swingLow, swingHigh, atr, s.cfg.TrendMaxExtensionATR) {
+		return true
+	}
+	if s.cfg.TrendRequireHTFAlign && htfMisaligned(side, s.hourlyTrendDir()) {
+		return true
+	}
+	bars := s.primaryBars()
+	if s.cfg.TrendMinVolumeMultiple > 0 && len(bars) > 0 {
+		currentVol := bars[len(bars)-1].Volume
+		avg := avgVolume(bars, s.cfg.TrendVolumeLookback)
+		if volumeInsufficient(currentVol, avg, s.cfg.TrendMinVolumeMultiple) {
+			return true
+		}
+	}
+	return false
+}
+
+// htfMisaligned reports whether the higher-timeframe trend direction
+// (hourlyTrendDir — actually a ~4h EMA-slope read off 15m bars, see
+// hourlyTrendDir) actively opposes the entry side. htfDir==0 (no confirmed
+// htf trend) does NOT block — only a CONFIRMED opposing htf trend does; the
+// absence of confirmation isn't the same as active disagreement (same
+// philosophy as trendCutTriggered's hourlyDir gate).
+func htfMisaligned(side string, htfDir int) bool {
+	switch side {
+	case "LONG":
+		return htfDir < 0
+	case "SHORT":
+		return htfDir > 0
+	}
+	return false
+}
+
+// avgVolume returns the mean Volume over the n bars preceding the most
+// recent bar (excludes the last bar itself, which is what gets evaluated
+// against this baseline). Returns 0 if there isn't enough history.
+func avgVolume(bars []exchange.Kline, n int) float64 {
+	if n <= 0 || len(bars) < n+1 {
+		return 0
+	}
+	window := bars[len(bars)-1-n : len(bars)-1]
+	total := 0.0
+	for _, b := range window {
+		total += b.Volume
+	}
+	return total / float64(n)
+}
+
+// volumeInsufficient reports whether current volume is too low relative to
+// its recent baseline to confirm this regime read as a real move — a proxy
+// for "price moved on low participation," a common precursor to fake
+// breakouts / reversion. multiple <= 0 or a zero/unavailable baseline
+// disables the filter (never blocks).
+func volumeInsufficient(currentVol, avgVol, multiple float64) bool {
+	if multiple <= 0 || avgVol <= 0 {
+		return false
+	}
+	return currentVol < avgVol*multiple
+}
+
+// priceExtended reports whether price has already moved too far from the
+// recent swing extreme in the entry direction — a proxy for "chasing a move
+// already in progress" rather than catching its start. maxATRDist <= 0
+// disables the filter (never blocks).
+func priceExtended(side string, price, swingLow, swingHigh, atr, maxATRDist float64) bool {
+	if maxATRDist <= 0 || atr <= 0 {
+		return false
+	}
+	if side == "LONG" {
+		return price-swingLow > atr*maxATRDist
+	}
+	return swingHigh-price > atr*maxATRDist
+}
+
 func (s *AIStrategy) findSwingLow(n int) float64 {
-	if len(s.primaryBars()) < n { n = len(s.primaryBars()) }
+	if len(s.primaryBars()) < n {
+		n = len(s.primaryBars())
+	}
 	low := math.MaxFloat64
-	for i := len(s.primaryBars()) - n; i < len(s.primaryBars()); i++ { if s.primaryBars()[i].Low < low { low = s.primaryBars()[i].Low } }
+	for i := len(s.primaryBars()) - n; i < len(s.primaryBars()); i++ {
+		if s.primaryBars()[i].Low < low {
+			low = s.primaryBars()[i].Low
+		}
+	}
 	return low
 }
 func (s *AIStrategy) findSwingHigh(n int) float64 {
-	high := 0.0; start := len(s.primaryBars()) - n; if start < 0 { start = 0 }
-	for i := start; i < len(s.primaryBars()); i++ { if s.primaryBars()[i].High > high { high = s.primaryBars()[i].High } }
+	high := 0.0
+	start := len(s.primaryBars()) - n
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(s.primaryBars()); i++ {
+		if s.primaryBars()[i].High > high {
+			high = s.primaryBars()[i].High
+		}
+	}
 	return high
 }
 
@@ -65,15 +281,21 @@ func (s *AIStrategy) findSwingHigh(n int) float64 {
 // (the -121 long). A ~4h reference tracks the current trend; the slope threshold
 // keeps it neutral in a flat range.
 func (s *AIStrategy) hourlyTrendDir() int {
-	bars15 := s.barsForInterval("15m")
+	bars15 := s.htfBars()
 	emaN := s.cfg.HourlyTrendEMA
-	if emaN < 2 || len(bars15) < emaN+2 { return 0 }
+	if emaN < 2 || len(bars15) < emaN+2 {
+		return 0
+	}
 
 	closes := make([]float64, len(bars15))
-	for i, b := range bars15 { closes[i] = b.Close }
+	for i, b := range bars15 {
+		closes[i] = b.Close
+	}
 
 	ema := indicator.EMA(closes, emaN)
-	if len(ema) < 2 { return 0 }
+	if len(ema) < 2 {
+		return 0
+	}
 
 	// Check last 2 EMA values: both must agree on direction AND the EMA must slope
 	// with MEANINGFUL momentum. A bare slopeAt>0 also fires in a flat range where
@@ -90,12 +312,20 @@ func (s *AIStrategy) hourlyTrendDir() int {
 		slopeAt := ema[idx] - ema[idx-1]
 		thr := emaAt * s.cfg.HourlyTrendMinSlope
 
-		if !(priceAt > emaAt && slopeAt > thr) { allBull = false }
-		if !(priceAt < emaAt && slopeAt < -thr) { allBear = false }
+		if !(priceAt > emaAt && slopeAt > thr) {
+			allBull = false
+		}
+		if !(priceAt < emaAt && slopeAt < -thr) {
+			allBear = false
+		}
 	}
 
-	if allBull { return 1 }
-	if allBear { return -1 }
+	if allBull {
+		return 1
+	}
+	if allBear {
+		return -1
+	}
 	return 0
 }
 
@@ -125,12 +355,14 @@ func stickyHourlyDir(raw, prevSticky, cooldown, stickyBars int) (int, int) {
 // TREND_WEAK: everything else → normal management.
 // Results are cached and recomputed only when new 15m bars arrive.
 func (s *AIStrategy) detectHourlyMode(side string) hourlyMode {
-	bars15 := s.barsForInterval("15m")
+	bars15 := s.htfBars()
 	nBars := len(bars15)
 
 	// Return cached value if 15m bars haven't changed
 	if nBars == s.hourlyModeBars {
-		if side == "LONG" { return s.cachedHourlyLong }
+		if side == "LONG" {
+			return s.cachedHourlyLong
+		}
 		return s.cachedHourlyShort
 	}
 
@@ -139,19 +371,25 @@ func (s *AIStrategy) detectHourlyMode(side string) hourlyMode {
 		s.hourlyModeBars = nBars
 		s.cachedHourlyLong = hourlyTrendWeak
 		s.cachedHourlyShort = hourlyTrendWeak
-		if side == "LONG" { return s.cachedHourlyLong }
+		if side == "LONG" {
+			return s.cachedHourlyLong
+		}
 		return s.cachedHourlyShort
 	}
 
 	closes := make([]float64, nBars)
-	for i, b := range bars15 { closes[i] = b.Close }
+	for i, b := range bars15 {
+		closes[i] = b.Close
+	}
 
 	ema80 := indicator.EMA(closes, 80)
 	if len(ema80) < 2 {
 		s.hourlyModeBars = nBars
 		s.cachedHourlyLong = hourlyTrendWeak
 		s.cachedHourlyShort = hourlyTrendWeak
-		if side == "LONG" { return s.cachedHourlyLong }
+		if side == "LONG" {
+			return s.cachedHourlyLong
+		}
 		return s.cachedHourlyShort
 	}
 
@@ -161,19 +399,29 @@ func (s *AIStrategy) detectHourlyMode(side string) hourlyMode {
 
 	// Compute for both sides at once
 	s.cachedHourlyLong = hourlyTrendWeak
-	if price > emaNow && slope > 0 { s.cachedHourlyLong = hourlyTrendStrong }
-	if price < emaNow { s.cachedHourlyLong = hourlyExitMode }
+	if price > emaNow && slope > 0 {
+		s.cachedHourlyLong = hourlyTrendStrong
+	}
+	if price < emaNow {
+		s.cachedHourlyLong = hourlyExitMode
+	}
 
 	s.cachedHourlyShort = hourlyTrendWeak
-	if price < emaNow && slope < 0 { s.cachedHourlyShort = hourlyTrendStrong }
-	if price > emaNow { s.cachedHourlyShort = hourlyExitMode }
+	if price < emaNow && slope < 0 {
+		s.cachedHourlyShort = hourlyTrendStrong
+	}
+	if price > emaNow {
+		s.cachedHourlyShort = hourlyExitMode
+	}
 
 	s.hourlyModeBars = nBars
 	// NOTE: lastHourlyDir is owned by the per-primary-bar update in generateSignal
 	// (with hysteresis). Do NOT set it here — detectHourlyMode also runs on 1m bars
 	// and would clobber the sticky value with a raw reading between primary bars.
 
-	if side == "LONG" { return s.cachedHourlyLong }
+	if side == "LONG" {
+		return s.cachedHourlyLong
+	}
 	return s.cachedHourlyShort
 }
 
@@ -195,10 +443,10 @@ func (s *AIStrategy) detectRegime() Regime {
 	price := lastBar.Close
 
 	// ── Compute overall trend direction ──
-	// Prefer 15m bars (8 bars = 2h) for stable regime detection.
-	// Falls back to primary (5m) bars if 15m not available.
+	// Prefer RegimeInterval bars (default 15m, 8 bars = 2h) for stable regime
+	// detection. Falls back to primary bars if that interval's data isn't loaded.
 	var recentBars []exchange.Kline
-	bars15 := s.barsForInterval("15m")
+	bars15 := s.regimeBars()
 	regimeN := 8 // 8 × 15m = 2 hours
 	if len(bars15) >= regimeN+1 {
 		recentBars = bars15[len(bars15)-regimeN:]
@@ -207,8 +455,12 @@ func (s *AIStrategy) detectRegime() Regime {
 	}
 	priceChange := price - recentBars[0].Close
 	trendDir := 0
-	if priceChange > atr*0.5 { trendDir = 1 }   // bullish
-	if priceChange < -atr*0.5 { trendDir = -1 }  // bearish
+	if priceChange > atr*0.5 {
+		trendDir = 1
+	} // bullish
+	if priceChange < -atr*0.5 {
+		trendDir = -1
+	} // bearish
 	s.lastTrendDir = trendDir
 
 	// ── Efficiency ratio = |net move| / sum(|bar moves|) ──
@@ -238,15 +490,38 @@ func (s *AIStrategy) detectRegime() Regime {
 	// Expansion bar must align with overall trend direction.
 	// A big bullish bar in a bearish trend = bounce, not breakout.
 	barDir := 0
-	if lastBar.Close > lastBar.Open { barDir = 1 } else { barDir = -1 }
+	if lastBar.Close > lastBar.Open {
+		barDir = 1
+	} else {
+		barDir = -1
+	}
 	trendAligned := trendDir == 0 || barDir == trendDir
 	if barRange > atr*s.cfg.ExpansionATRK && body > atr*s.cfg.ExpansionBodyK && dirOK && confirmOK && trendAligned {
 		return RegimeExpansion
 	}
 
 	// ── 2. Force RANGE when efficiency is low ──
+	// Exception: if volume is flagging an incoming move (VolGateWindow > 0 and
+	// the composite score clears VolGateRegimeThresh), don't force Range just
+	// because price action looks calm — fall through to the trend-strength
+	// classification below instead. Cross-asset validated (2026-08-04): grid
+	// positions that later needed an emergency cut had a higher volGateScore
+	// at entry than ones that reverted normally. VolGateWindow <= 0 disables
+	// this (score is always the 0.5 neutral sentinel, never clears a
+	// meaningful threshold — original behavior unchanged).
 	if efficiency < s.cfg.TrendEfficiencyMin {
-		return RegimeRange
+		volBars := s.primaryBars()
+		if s.cfg.VolGateInterval != "" {
+			volBars = s.barsForInterval(s.cfg.VolGateInterval)
+			if len(volBars) == 0 {
+				s.log.Warn("AI: VolGateInterval configured but no data loaded — falling back to neutral score",
+					zap.String("configured", s.cfg.VolGateInterval))
+			}
+		}
+		score := volGateScore(volBars, s.cfg.VolGateWindow, s.cfg.VolGateRatioBars)
+		if s.cfg.VolGateWindow <= 0 || score < s.cfg.VolGateRegimeThresh {
+			return RegimeRange
+		}
 	}
 
 	// ── 3. Trend strength = |close_now - close_N| / ATR ──
@@ -264,6 +539,103 @@ func (s *AIStrategy) detectRegime() Regime {
 	}
 
 	return RegimeRange
+}
+
+// regimeAgeNext returns the next regimeAge value: incremented when this bar's
+// detected regime matches the previous one, reset to 0 on a regime change.
+func regimeAgeNext(prevAge int, sameRegime bool) int {
+	if sameRegime {
+		return prevAge + 1
+	}
+	return 0
+}
+
+// trendAgeBlocked reports whether a trend-mode entry should be blocked because
+// the current regime has held for longer than maxAge bars (TrendMaxRegimeAge).
+// maxAge <= 0 disables the filter (never blocks).
+func trendAgeBlocked(regimeAge, maxAge int) bool {
+	return maxAge > 0 && regimeAge > maxAge
+}
+
+// pctile returns the fraction of sample values <= val, in [0,1]. Empty → 0.5.
+// Mirrors internal/strategy/grid/volgate.go's pctile.
+func pctile(val float64, sample []float64) float64 {
+	if len(sample) == 0 {
+		return 0.5
+	}
+	c := 0
+	for _, x := range sample {
+		if x <= val {
+			c++
+		}
+	}
+	return float64(c) / float64(len(sample))
+}
+
+// volGateScore computes the composite volume-percentile score (0-1) for the
+// most recent bar in bars — a continuous "how unusual is this bar's volume"
+// read, ported from internal/strategy/grid/volgate.go's vol_hi/vol_up
+// composite (score = 0.5*vol_hi + 0.5*vol_up). Reimplemented here as a pure,
+// stateless function rather than shared, since detectRegime() consumes it as
+// a continuous classification input each bar, not grid.go's stateful
+// hysteresis/cooldown on/off switch. Cross-asset validated (2026-08-04): grid
+// positions that later hit trend_cut/catastrophic_stop had a meaningfully
+// higher entry-time score than grid_tp winners, on both ETHUSDT and BTCUSDT.
+// Returns 0.5 (neutral) when there isn't enough history. window <= 0 also
+// returns 0.5 (disabled sentinel — callers gate on window > 0 separately).
+func volGateScore(bars []exchange.Kline, window, ratioBars int) float64 {
+	n := len(bars)
+	if window <= 0 || ratioBars <= 0 || n < window || n <= ratioBars {
+		return 0.5
+	}
+	vols := make([]float64, n)
+	for i, b := range bars {
+		vols[i] = b.Volume
+	}
+	idx := n - 1
+	win := vols[idx-window+1 : idx+1]
+	volHi := pctile(vols[idx], win)
+
+	ratios := make([]float64, 0, window)
+	for i := idx - window + 1; i <= idx; i++ {
+		if i < ratioBars {
+			continue
+		}
+		var s float64
+		for j := i - ratioBars; j < i; j++ {
+			s += vols[j]
+		}
+		avg := s / float64(ratioBars)
+		if avg > 0 {
+			ratios = append(ratios, vols[i]/avg)
+		}
+	}
+	volUp := 0.5
+	if len(ratios) > 0 {
+		volUp = pctile(ratios[len(ratios)-1], ratios) // last = current bar's ratio
+	}
+	return 0.5*volHi + 0.5*volUp
+}
+
+// gridAgeSizeScale returns the position-size multiplier for a new grid base
+// open, as a continuous function of how long the current regime has already
+// held (regimeAge) — unlike trendAgeBlocked's binary cutoff, this never
+// fully zeroes out a signal, only tapers it. A freshly-confirmed regime
+// (age 1) gets full size; each additional bar of age reduces size by
+// decayRate, floored at floor so sizing never goes degenerate/zero.
+// decayRate <= 0 disables scaling (always returns 1.0).
+func gridAgeSizeScale(regimeAge int, decayRate, floor float64) float64 {
+	if decayRate <= 0 {
+		return 1.0
+	}
+	scale := 1.0 - float64(regimeAge-1)*decayRate
+	if scale < floor {
+		return floor
+	}
+	if scale > 1.0 {
+		return 1.0
+	}
+	return scale
 }
 
 // calcDirectionScore measures how consistently bars move in the overall direction.
@@ -293,8 +665,9 @@ func calcDirectionScore(bars []exchange.Kline) float64 {
 // of an inflated base → position grows each restart cycle.
 //
 // Conservative estimate: assume all GridMaxLayers were filled at GridQtyRatio.
-//   maxFactor = 1 + GridQtyRatio × GridMaxLayers
-//   initQty   = totalQty / maxFactor
+//
+//	maxFactor = 1 + GridQtyRatio × GridMaxLayers
+//	initQty   = totalQty / maxFactor
 //
 // If estimate is too low, the cap `totalQty > initQty*2` in manageGrid simply
 // blocks new layers — safe-fail, never over-grows.
@@ -319,9 +692,15 @@ func (s *AIStrategy) adoptBarsHeld(side string, persisted int) int {
 		return max(persisted, 10)
 	}
 	intervalSec := 300 // 5m default
-	if s.cfg.PrimaryInterval == "1m" { intervalSec = 60 }
-	if s.cfg.PrimaryInterval == "15m" { intervalSec = 900 }
-	if s.cfg.PrimaryInterval == "1h" { intervalSec = 3600 }
+	if s.cfg.PrimaryInterval == "1m" {
+		intervalSec = 60
+	}
+	if s.cfg.PrimaryInterval == "15m" {
+		intervalSec = 900
+	}
+	if s.cfg.PrimaryInterval == "1h" {
+		intervalSec = 3600
+	}
 	elapsed := int(time.Since(openedAt).Seconds() / float64(intervalSec))
 	if elapsed < max(persisted, 10) {
 		return max(persisted, 10)
@@ -375,35 +754,53 @@ func (s *AIStrategy) recoverFromSyncer(currentPrice float64) {
 			goto recoverShort
 		}
 		entry := lp.EntryPrice
-		if entry == 0 { entry = currentPrice }
+		if entry == 0 {
+			entry = currentPrice
+		}
 
 		sl := lp.StopLoss
 		if sl == 0 {
 			slDist := atr * s.cfg.ATRK
 			minDist := entry * s.cfg.MinSLDistPct
-			if slDist < minDist { slDist = minDist }
+			if slDist < minDist {
+				slDist = minDist
+			}
 			sl = entry - slDist
 		}
 		tp := lp.TakeProfit
-		if tp == 0 { tp = entry + entry*s.cfg.RangeTPPct }
+		if tp == 0 {
+			tp = entry + entry*s.cfg.RangeTPPct
+		}
 
 		s.longPos = &posState{
 			side: "LONG", mode: posMode(0), entryPrice: entry, entryATR: lp.EntryATR,
 			gptTPPrice: lp.GptTPPrice,
-			initQty: lp.InitQty, remainQty: lp.Qty,
+			initQty:    lp.InitQty, remainQty: lp.Qty,
 			R: lp.R, stopLoss: sl, takeProfit: tp,
 			trailing: lp.Trailing, peakPrice: lp.PeakPrice,
 			tp1RHit: lp.TP1Hit, barsHeld: s.adoptBarsHeld("LONG", lp.BarsHeld),
 			filled: true, firstFillSeen: true, filledAt: s.adoptOpenedAt("LONG"),
 		}
 		s.longPos.initQty = s.adoptInitQty(lp.InitQty, lp.Qty)
-		if s.longPos.R == 0 { s.longPos.R = math.Abs(entry - sl) }
-		if s.longPos.entryATR == 0 { s.longPos.entryATR = atr } // fallback to current ATR
+		if s.longPos.R == 0 {
+			s.longPos.R = math.Abs(entry - sl)
+		}
+		if s.longPos.entryATR == 0 {
+			s.longPos.entryATR = atr
+		} // fallback to current ATR
 		// R = |entry - SL|, no cap. Consistent with "only ATR determines risk, never limits profit".
-		if s.longPos.peakPrice == 0 { s.longPos.peakPrice = currentPrice }
-		if s.longPos.trailing == 0 { s.longPos.trailing = sl }
-		if lp.Mode == "trend" { s.longPos.mode = modeTrend }
-		if lp.Mode == "range" { s.longPos.mode = modeRange }
+		if s.longPos.peakPrice == 0 {
+			s.longPos.peakPrice = currentPrice
+		}
+		if s.longPos.trailing == 0 {
+			s.longPos.trailing = sl
+		}
+		if lp.Mode == "trend" {
+			s.longPos.mode = modeTrend
+		}
+		if lp.Mode == "range" {
+			s.longPos.mode = modeRange
+		}
 		if lp.EntryRegime != "" {
 			s.longPos.entryRegime = Regime(lp.EntryRegime)
 		} else {
@@ -442,34 +839,52 @@ recoverShort:
 			return
 		}
 		entry := sp.EntryPrice
-		if entry == 0 { entry = currentPrice }
+		if entry == 0 {
+			entry = currentPrice
+		}
 
 		sl := sp.StopLoss
 		if sl == 0 {
 			slDist := atr * s.cfg.ATRK
 			minDist := entry * s.cfg.MinSLDistPct
-			if slDist < minDist { slDist = minDist }
+			if slDist < minDist {
+				slDist = minDist
+			}
 			sl = entry + slDist
 		}
 		tp := sp.TakeProfit
-		if tp == 0 { tp = entry - entry*s.cfg.RangeTPPct }
+		if tp == 0 {
+			tp = entry - entry*s.cfg.RangeTPPct
+		}
 
 		s.shortPos = &posState{
 			side: "SHORT", mode: posMode(0), entryPrice: entry, entryATR: sp.EntryATR,
 			gptTPPrice: sp.GptTPPrice,
-			initQty: sp.InitQty, remainQty: sp.Qty,
+			initQty:    sp.InitQty, remainQty: sp.Qty,
 			R: sp.R, stopLoss: sl, takeProfit: tp,
 			trailing: sp.Trailing, peakPrice: sp.PeakPrice,
 			tp1RHit: sp.TP1Hit, barsHeld: s.adoptBarsHeld("SHORT", sp.BarsHeld),
 			filled: true, firstFillSeen: true, filledAt: s.adoptOpenedAt("SHORT"),
 		}
 		s.shortPos.initQty = s.adoptInitQty(sp.InitQty, sp.Qty)
-		if s.shortPos.R == 0 { s.shortPos.R = math.Abs(entry - sl) }
-		if s.shortPos.entryATR == 0 { s.shortPos.entryATR = atr } // fallback to current ATR
-		if s.shortPos.peakPrice == 0 { s.shortPos.peakPrice = currentPrice }
-		if s.shortPos.trailing == 0 { s.shortPos.trailing = sl }
-		if sp.Mode == "trend" { s.shortPos.mode = modeTrend }
-		if sp.Mode == "range" { s.shortPos.mode = modeRange }
+		if s.shortPos.R == 0 {
+			s.shortPos.R = math.Abs(entry - sl)
+		}
+		if s.shortPos.entryATR == 0 {
+			s.shortPos.entryATR = atr
+		} // fallback to current ATR
+		if s.shortPos.peakPrice == 0 {
+			s.shortPos.peakPrice = currentPrice
+		}
+		if s.shortPos.trailing == 0 {
+			s.shortPos.trailing = sl
+		}
+		if sp.Mode == "trend" {
+			s.shortPos.mode = modeTrend
+		}
+		if sp.Mode == "range" {
+			s.shortPos.mode = modeRange
+		}
 		if sp.EntryRegime != "" {
 			s.shortPos.entryRegime = Regime(sp.EntryRegime)
 		} else {
@@ -499,7 +914,9 @@ func (s *AIStrategy) syncToRedis(pos *posState) {
 		return
 	}
 	modeStr := "range"
-	if pos.mode == modeTrend { modeStr = "trend" }
+	if pos.mode == modeTrend {
+		modeStr = "trend"
+	}
 
 	// Persist grid layers for recovery
 	var gridRecords []position.GridOrderRecord
@@ -521,14 +938,16 @@ func (s *AIStrategy) syncToRedis(pos *posState) {
 		TP1Hit: pos.tp1RHit, BarsHeld: pos.barsHeld,
 		OrderID: pos.orderID, Filled: pos.filled,
 		EntryRegime: string(pos.entryRegime),
-		GridOrders: gridRecords,
+		GridOrders:  gridRecords,
 	}
 	s.syncer.UpdatePosition(context.Background(), sp)
 }
 
 // syncRemove clears a position from Syncer.
 func (s *AIStrategy) syncRemove(side string) {
-	if s.syncer == nil { return }
+	if s.syncer == nil {
+		return
+	}
 	s.syncer.RemovePosition(context.Background(), side)
 	s.deleteStagedTPsFromRedis(side)
 }
@@ -540,9 +959,13 @@ func (s *AIStrategy) stagedTPRedisKey(side string) string {
 
 // saveStagedTPsToRedis persists TP records for tracking and restart recovery.
 func (s *AIStrategy) saveStagedTPsToRedis(pos *posState) {
-	if s.rdb == nil || pos == nil || len(pos.stagedTPs) == 0 { return }
+	if s.rdb == nil || pos == nil || len(pos.stagedTPs) == 0 {
+		return
+	}
 	data, err := json.Marshal(pos.stagedTPs)
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	s.rdb.Set(context.Background(), s.stagedTPRedisKey(pos.side), string(data), 0)
 }
 
@@ -551,18 +974,26 @@ func (s *AIStrategy) saveStagedTPsToRedis(pos *posState) {
 // the next OnBar re-verifies protective orders on the exchange via recovery.
 // Exchange TP/SL orders are preserved across restarts (not cancelled on shutdown).
 func (s *AIStrategy) loadStagedTPsFromRedis(pos *posState) {
-	if s.rdb == nil || pos == nil { return }
+	if s.rdb == nil || pos == nil {
+		return
+	}
 	val, err := s.rdb.Get(context.Background(), s.stagedTPRedisKey(pos.side)).Result()
-	if err != nil || val == "" { return }
+	if err != nil || val == "" {
+		return
+	}
 	var records []stagedTPRecord
-	if err := json.Unmarshal([]byte(val), &records); err != nil { return }
+	if err := json.Unmarshal([]byte(val), &records); err != nil {
+		return
+	}
 	pos.stagedTPs = records
 	// stagedTPPlaced stays false — recovery flow will re-verify exchange orders.
 }
 
 // deleteStagedTPsFromRedis removes TP records when position is closed.
 func (s *AIStrategy) deleteStagedTPsFromRedis(side string) {
-	if s.rdb == nil { return }
+	if s.rdb == nil {
+		return
+	}
 	s.rdb.Del(context.Background(), s.stagedTPRedisKey(side))
 }
 
@@ -590,7 +1021,9 @@ func (s *AIStrategy) techSellSignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 	bars := s.primaryBars()
-	if len(bars) < 20 { return 0, 0 }
+	if len(bars) < 20 {
+		return 0, 0
+	}
 
 	price := bars[len(bars)-1].Close
 	lookback := 10 // breakout window
@@ -598,12 +1031,18 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 	// Find highest high of last N bars (excluding current)
 	highestHigh := 0.0
 	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
-		if i < 0 { continue }
-		if bars[i].High > highestHigh { highestHigh = bars[i].High }
+		if i < 0 {
+			continue
+		}
+		if bars[i].High > highestHigh {
+			highestHigh = bars[i].High
+		}
 	}
 
 	// Price must break above recent high
-	if price <= highestHigh { return 0, 0 }
+	if price <= highestHigh {
+		return 0, 0
+	}
 
 	curBar := bars[len(bars)-1]
 
@@ -611,25 +1050,39 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 	closes := s.getCloses()
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
-	if rsi > 80 { return 0, 0 }
+	if rsi > 80 {
+		return 0, 0
+	}
 
 	conf = 0.75
 	// Breakout strength
 	breakoutPct := (price - highestHigh) / highestHigh
-	if breakoutPct > 0.001 { conf += 0.05 }
-	if breakoutPct > 0.003 { conf += 0.05 }
+	if breakoutPct > 0.001 {
+		conf += 0.05
+	}
+	if breakoutPct > 0.003 {
+		conf += 0.05
+	}
 	// Bullish candle is a bonus, not a requirement
-	if curBar.Close > curBar.Open { conf += 0.05 }
+	if curBar.Close > curBar.Open {
+		conf += 0.05
+	}
 
 	// Volume confirmation
 	if len(bars) > 20 {
 		avgVol := 0.0
-		for i := len(bars) - 21; i < len(bars)-1; i++ { avgVol += bars[i].Volume }
+		for i := len(bars) - 21; i < len(bars)-1; i++ {
+			avgVol += bars[i].Volume
+		}
 		avgVol /= 20
-		if curBar.Volume > avgVol*1.2 { conf += 0.05 }
+		if curBar.Volume > avgVol*1.2 {
+			conf += 0.05
+		}
 	}
 
-	if conf > 0.95 { conf = 0.95 }
+	if conf > 0.95 {
+		conf = 0.95
+	}
 
 	// Breakout = urgency: enter at market price, don't wait for pullback.
 	entry = math.Round(price*100) / 100
@@ -639,7 +1092,9 @@ func (s *AIStrategy) breakoutBuySignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 	bars := s.primaryBars()
-	if len(bars) < 20 { return 0, 0 }
+	if len(bars) < 20 {
+		return 0, 0
+	}
 
 	price := bars[len(bars)-1].Close
 	lookback := 10
@@ -647,12 +1102,18 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 	// Find lowest low of last N bars (excluding current)
 	lowestLow := math.MaxFloat64
 	for i := len(bars) - lookback - 1; i < len(bars)-1; i++ {
-		if i < 0 { continue }
-		if bars[i].Low < lowestLow { lowestLow = bars[i].Low }
+		if i < 0 {
+			continue
+		}
+		if bars[i].Low < lowestLow {
+			lowestLow = bars[i].Low
+		}
 	}
 
 	// Price must break below recent low
-	if price >= lowestLow { return 0, 0 }
+	if price >= lowestLow {
+		return 0, 0
+	}
 
 	curBar := bars[len(bars)-1]
 
@@ -660,23 +1121,37 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 	closes := s.getCloses()
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
-	if rsi < 20 { return 0, 0 }
+	if rsi < 20 {
+		return 0, 0
+	}
 
 	conf = 0.75
 	breakoutPct := (lowestLow - price) / lowestLow
-	if breakoutPct > 0.001 { conf += 0.05 }
-	if breakoutPct > 0.003 { conf += 0.05 }
+	if breakoutPct > 0.001 {
+		conf += 0.05
+	}
+	if breakoutPct > 0.003 {
+		conf += 0.05
+	}
 	// Bearish candle is a bonus, not a requirement
-	if curBar.Close < curBar.Open { conf += 0.05 }
+	if curBar.Close < curBar.Open {
+		conf += 0.05
+	}
 
 	if len(bars) > 20 {
 		avgVol := 0.0
-		for i := len(bars) - 21; i < len(bars)-1; i++ { avgVol += bars[i].Volume }
+		for i := len(bars) - 21; i < len(bars)-1; i++ {
+			avgVol += bars[i].Volume
+		}
 		avgVol /= 20
-		if curBar.Volume > avgVol*1.2 { conf += 0.05 }
+		if curBar.Volume > avgVol*1.2 {
+			conf += 0.05
+		}
 	}
 
-	if conf > 0.95 { conf = 0.95 }
+	if conf > 0.95 {
+		conf = 0.95
+	}
 
 	// Breakout = urgency: enter at market price.
 	entry = math.Round(price*100) / 100
@@ -690,32 +1165,50 @@ func (s *AIStrategy) breakoutSellSignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 	closes := s.getCloses()
-	if len(closes) < 30 { return 0, 0 }
+	if len(closes) < 30 {
+		return 0, 0
+	}
 
 	price := closes[len(closes)-1]
 
 	// BB is the SOLE hard condition: price within 0.5% of lower band
 	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-	if len(bb.Lower) == 0 { return 0, 0 }
+	if len(bb.Lower) == 0 {
+		return 0, 0
+	}
 	bbLower := bb.Lower[len(bb.Lower)-1]
 	bbUpper := bb.Upper[len(bb.Upper)-1]
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
 
-	if price > bbLower*1.005 { return 0, 0 }
-	if price >= bbMiddle { return 0, 0 } // lower-half only — kills the long-bias tie vs the sell signal in a BB squeeze
+	if price > bbLower*1.005 {
+		return 0, 0
+	}
+	if price >= bbMiddle {
+		return 0, 0
+	} // lower-half only — kills the long-bias tie vs the sell signal in a BB squeeze
 
 	// Base confidence: 0.76 ensures entry when price touches BB band (RangeEntryConf=0.75).
 	// Bonuses from RSI and BB penetration push conf higher for stronger signals.
 	conf = 0.76
-	if price < bbLower { conf += 0.05 } // actually below band
+	if price < bbLower {
+		conf += 0.05
+	} // actually below band
 
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
-	if rsi < 40 { conf += 0.03 }
-	if rsi < 35 { conf += 0.03 }
-	if rsi < 30 { conf += 0.03 }
+	if rsi < 40 {
+		conf += 0.03
+	}
+	if rsi < 35 {
+		conf += 0.03
+	}
+	if rsi < 30 {
+		conf += 0.03
+	}
 
-	if conf > 0.95 { conf = 0.95 }
+	if conf > 0.95 {
+		conf = 0.95
+	}
 
 	atr := s.calcATR()
 	entryBuf := atr * 0.2
@@ -730,29 +1223,47 @@ func (s *AIStrategy) reversionBuySignal() (conf float64, entry float64) {
 
 func (s *AIStrategy) reversionSellSignal() (conf float64, entry float64) {
 	closes := s.getCloses()
-	if len(closes) < 30 { return 0, 0 }
+	if len(closes) < 30 {
+		return 0, 0
+	}
 
 	price := closes[len(closes)-1]
 
 	bb := indicator.BollingerBands(closes, s.cfg.BBPeriod, s.cfg.BBStdDev)
-	if len(bb.Upper) == 0 { return 0, 0 }
+	if len(bb.Upper) == 0 {
+		return 0, 0
+	}
 	bbLower := bb.Lower[len(bb.Lower)-1]
 	bbUpper := bb.Upper[len(bb.Upper)-1]
 	bbMiddle := bb.Middle[len(bb.Middle)-1]
 
-	if price < bbUpper*0.995 { return 0, 0 }
-	if price <= bbMiddle { return 0, 0 } // upper-half only — kills the long-bias tie vs the buy signal in a BB squeeze
+	if price < bbUpper*0.995 {
+		return 0, 0
+	}
+	if price <= bbMiddle {
+		return 0, 0
+	} // upper-half only — kills the long-bias tie vs the buy signal in a BB squeeze
 
 	conf = 0.76
-	if price > bbUpper { conf += 0.05 }
+	if price > bbUpper {
+		conf += 0.05
+	}
 
 	rsiVals := indicator.RSI(closes, s.cfg.RSIPeriod)
 	rsi := indicator.Last(rsiVals)
-	if rsi > 60 { conf += 0.03 }
-	if rsi > 65 { conf += 0.03 }
-	if rsi > 70 { conf += 0.03 }
+	if rsi > 60 {
+		conf += 0.03
+	}
+	if rsi > 65 {
+		conf += 0.03
+	}
+	if rsi > 70 {
+		conf += 0.03
+	}
 
-	if conf > 0.95 { conf = 0.95 }
+	if conf > 0.95 {
+		conf = 0.95
+	}
 
 	atr := s.calcATR()
 	entryBuf := atr * 0.2
@@ -770,7 +1281,9 @@ func r3(v float64) float64 { return math.Round(v*1000) / 1000 }
 
 // logEvent writes a trade event to DB for persistent analysis.
 func (s *AIStrategy) logEvent(eventType, side, reason string, price, entryPrice, qty, confidence, pnl float64, details string) {
-	if s.store == nil { return }
+	if s.store == nil {
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -782,4 +1295,3 @@ func (s *AIStrategy) logEvent(eventType, side, reason string, price, entryPrice,
 		})
 	}()
 }
-

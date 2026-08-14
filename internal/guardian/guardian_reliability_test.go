@@ -71,8 +71,8 @@ func TestGuardian_RestingMode_NoTickCloseUntilFill(t *testing.T) {
 		t.Fatalf("resting mode must not place a market close, got %d", n)
 	}
 	g.OnFill(ctx, strategy.Fill{Symbol: "ETHUSDT", Qty: 1, Price: 95}) // exchange stop filled
-	if !g.done {
-		t.Fatal("OnFill of the resting stop should mark done")
+	if g.phase != PhaseClosed {
+		t.Fatalf("OnFill of the resting stop should mark phase Closed, got %s", g.phase)
 	}
 }
 
@@ -162,8 +162,8 @@ func TestGuardian_RetiresWhenPositionClosedExternally(t *testing.T) {
 	pf.qty = 0                                                              // user closes / liquidation
 	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // detect flat
 
-	if !g.done {
-		t.Fatal("guardian must retire (done) when the position is closed externally")
+	if g.phase != PhaseClosed {
+		t.Fatalf("guardian must retire (phase Closed) when the position is closed externally, got %s", g.phase)
 	}
 	if len(b.canceled) < 1 {
 		t.Fatal("guardian must cancel its resting stop on retire (no orphan)")
@@ -201,7 +201,7 @@ func TestGuardian_PartialTakeProfit(t *testing.T) {
 	if len(pt) != 1 || pt[0].Qty != 0.5 {
 		t.Fatalf("partial should close 0.5 once, got %+v", pt)
 	}
-	if g.done {
+	if g.phase == PhaseClosed {
 		t.Fatal("a partial take-profit must not end the guardian")
 	}
 	g.OnTick(ctx, 112) // must not fire a second partial

@@ -30,6 +30,9 @@ func TestParseConfig_Defaults(t *testing.T) {
 	if gc.ATRWindow != 14 {
 		t.Fatalf("default ATRWindow = %d", gc.ATRWindow)
 	}
+	if gc.Mode != ModeAdopt {
+		t.Fatalf("default mode should be ModeAdopt, got %v", gc.Mode)
+	}
 }
 
 func TestParseConfig_Explicit(t *testing.T) {
@@ -47,6 +50,9 @@ func TestParseConfig_Explicit(t *testing.T) {
 	}
 	if gc.Adopt || gc.Side != SideShort || gc.Entry != 2400 || gc.Qty != 2 {
 		t.Fatalf("explicit position wrong: %+v", gc)
+	}
+	if gc.Mode != ModeExplicit {
+		t.Fatalf("explicit Adopt:false should resolve ModeExplicit, got %v", gc.Mode)
 	}
 	if gc.Prot.StopMode != StopPct || gc.Prot.StopValue != 0.03 {
 		t.Fatalf("stop parse wrong: %+v", gc.Prot)
@@ -78,6 +84,33 @@ func TestFactory_BuildsGuardian(t *testing.T) {
 	}
 	if s.Name() != "guardian" {
 		t.Fatalf("name = %q", s.Name())
+	}
+}
+
+// TestResolveMode locks down the precedence Factory relies on and that
+// internal/api/manager.go's guardianAdoptOnly delegates to (2026-08-07
+// refactor): PlaceEntry beats Adopt, Adopt defaults true, and an explicit
+// Adopt:false with no PlaceEntry is ModeExplicit — not adopt-only, a case
+// the old hand-duplicated predicate in manager.go silently mislabeled.
+func TestResolveMode(t *testing.T) {
+	cases := []struct {
+		name string
+		p    map[string]any
+		want Mode
+	}{
+		{"defaults to adopt", map[string]any{}, ModeAdopt},
+		{"nil params default to adopt", nil, ModeAdopt},
+		{"PlaceEntry true wins", map[string]any{"PlaceEntry": true, "Adopt": true}, ModeEntry},
+		{"PlaceEntry true beats explicit Adopt false", map[string]any{"PlaceEntry": true, "Adopt": false}, ModeEntry},
+		{"Adopt false without PlaceEntry is explicit", map[string]any{"Adopt": false}, ModeExplicit},
+		{"PlaceEntry false, Adopt default is adopt", map[string]any{"PlaceEntry": false}, ModeAdopt},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ResolveMode(c.p); got != c.want {
+				t.Errorf("ResolveMode(%+v) = %v, want %v", c.p, got, c.want)
+			}
+		})
 	}
 }
 

@@ -2,17 +2,14 @@ import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
 
-// 顺序按"日常看盘动线"排:先看整体→看现在持仓→去引擎开/停策略→再翻委托和成交流水,
-// 回测/账户/日志/设置这类偏配置的靠后。
+// 顺序按"日常看盘动线"排:先看整体→去引擎开/停策略(持仓已内嵌在引擎卡片里)→
+// 再翻委托和成交流水,账户/设置这类偏配置的靠后。
 const navItems = [
   { path: '/', label: '总览', icon: '📊' },
-  { path: '/positions', label: '持仓', icon: '📈' },
   { path: '/engine', label: '引擎', icon: '⚙️' },
   { path: '/orders', label: '委托', icon: '📋' },
   { path: '/fills', label: '成交', icon: '✅' },
-  { path: '/backtest', label: '回测', icon: '🔬' },
   { path: '/credentials', label: '账户', icon: '🔑' },
-  { path: '/logs', label: '日志', icon: '📜' },
   { path: '/settings', label: '设置', icon: '🔧' },
 ]
 
@@ -109,7 +106,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Main content — add top padding on mobile to clear the fixed header */}
-      <main className="flex-1 overflow-auto p-6 pt-16 md:pt-6">{children}</main>
+      <main className="flex-1 overflow-auto p-3 sm:p-6 pt-16 md:pt-6">{children}</main>
     </div>
   )
 }

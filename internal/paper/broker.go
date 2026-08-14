@@ -199,7 +199,7 @@ func (b *Broker) PlaceOrder(req strategy.OrderRequest) string {
 	}
 
 	if err := b.risk.Check(req, equity, posValue, currentPrice); err != nil {
-		b.log.Warn("order blocked by risk",
+		b.log.Warn("订单被风控拦截",
 			zap.String("symbol", req.Symbol),
 			zap.String("side", string(req.Side)),
 			zap.Error(err))

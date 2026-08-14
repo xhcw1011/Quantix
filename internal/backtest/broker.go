@@ -135,8 +135,8 @@ func (b *SimBroker) Process(bar exchange.Kline) []strategy.Fill {
 			fills = append(fills, fill)
 
 			// Update portfolio
-			if trade := b.portfolio.applyFill(fill, bar.CloseTime); trade != nil {
-				b.portfolio.Trades = append(b.portfolio.Trades, *trade)
+			if trades := b.portfolio.applyFill(fill, bar.CloseTime); len(trades) > 0 {
+				b.portfolio.Trades = append(b.portfolio.Trades, trades...)
 			}
 
 			// 3. Register / clear active stop for this symbol.
@@ -224,11 +224,11 @@ func (b *SimBroker) executeLong(req strategy.OrderRequest, bar exchange.Kline) (
 
 	case strategy.SideSell:
 		pos, exists := b.portfolio.longPositions[req.Symbol]
-		if !exists || pos.Qty <= 0 {
+		if !exists || pos.Qty() <= 0 {
 			return strategy.Fill{}, fmt.Errorf("no long position to sell for %s", req.Symbol)
 		}
-		if qty == 0 || qty > pos.Qty {
-			qty = pos.Qty
+		if qty == 0 || qty > pos.Qty() {
+			qty = pos.Qty()
 		}
 		proceeds := qty * execPrice
 		fee := proceeds * b.FeeRate
@@ -282,11 +282,11 @@ func (b *SimBroker) executeShort(req strategy.OrderRequest, bar exchange.Kline) 
 
 	case strategy.SideBuy:
 		pos, exists := b.portfolio.shortPositions[req.Symbol]
-		if !exists || pos.Qty <= 0 {
+		if !exists || pos.Qty() <= 0 {
 			return strategy.Fill{}, fmt.Errorf("no short position to cover for %s", req.Symbol)
 		}
-		if qty == 0 || qty > pos.Qty {
-			qty = pos.Qty
+		if qty == 0 || qty > pos.Qty() {
+			qty = pos.Qty()
 		}
 		fee := qty * execPrice * b.FeeRate
 		b.nextID++
@@ -364,8 +364,8 @@ func (b *SimBroker) checkStops(bar exchange.Kline) []strategy.Fill {
 			Reason:       "stop_loss", // triggered protective stop
 		}
 		fills = append(fills, fill)
-		if trade := b.portfolio.applyFill(fill, bar.CloseTime); trade != nil {
-			b.portfolio.Trades = append(b.portfolio.Trades, *trade)
+		if trades := b.portfolio.applyFill(fill, bar.CloseTime); len(trades) > 0 {
+			b.portfolio.Trades = append(b.portfolio.Trades, trades...)
 		}
 		delete(b.activeStops, sym)
 	}

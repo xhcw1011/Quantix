@@ -1,34 +1,37 @@
 import { useEffect, useState } from 'react'
-import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
-} from 'recharts'
-import { getEquity, getSummary, getFills } from '../api/trading'
+import { getFills, listEngines, getPositions } from '../api/trading'
 import { useTradeSocket } from '../hooks/useTradeSocket'
+import { actionLabel } from '../lib/positionFormat'
 
-interface Snapshot {
-  id: number
-  equity: number
-  cash: number
-  unrealized_pnl: number
-  realized_pnl: number
-  snapshotted_at: string
+interface EngineInfo {
+  engine_id: string
+  strategy_id: string
+  symbol: string
+  mode: string
+  running: boolean
 }
 
-interface Summary {
-  equity: number
-  cash: number
+interface PositionView {
+  symbol: string
+  position_side: string
+  qty: number
+  avg_entry_price: number
   unrealized_pnl: number
   realized_pnl: number
-  total_fills: number
-  win_rate: number
-  engine_status: string
-  strategy_id: string
+}
+
+interface EnginePositions {
+  engine_id: string
+  equity: number
+  positions: PositionView[]
 }
 
 interface Fill {
   id: number
+  strategy_id: string
   symbol: string
   side: string
+  position_side: string // "LONG" | "SHORT" | "" (hedge mode direction)
   qty: number
   price: number
   fee: number
@@ -48,66 +51,62 @@ function StatCard({ label, value, sub, color = 'text-white' }: {
   )
 }
 
-type Period = '1d' | '7d' | '30d' | 'all'
-
 export default function Dashboard() {
-  const [summary, setSummary] = useState<Summary | null>(null)
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([])
+  const [engines, setEngines] = useState<EngineInfo[]>([])
+  const [positionsByEngine, setPositionsByEngine] = useState<Record<string, EnginePositions>>({})
   const [fills, setFills] = useState<Fill[]>([])
   const [apiError, setApiError] = useState<string | null>(null)
-  const [period, setPeriod] = useState<Period>('7d')
+
+  // 引擎列表+持仓/权益 —— 跟 /engine 页面用的是同一套接口,统计口径永远跟引擎页保持一致,
+  // 不再走那个"随便挑一个引擎代表全局状态"的旧版单引擎 /summary 接口。
+  const refresh = () => {
+    listEngines()
+      .then((r) => { setEngines(r.data || []); setApiError(null) })
+      .catch((e) => setApiError(e.response?.data?.error || '加载引擎列表失败'))
+    getPositions()
+      .then((r) => {
+        const byEngine: Record<string, EnginePositions> = {}
+        for (const eng of (r.data.positions || []) as EnginePositions[]) {
+          byEngine[eng.engine_id] = eng
+        }
+        setPositionsByEngine(byEngine)
+      })
+      .catch(() => {})
+  }
 
   useEffect(() => {
-    getSummary()
-      .then((r) => setSummary(r.data))
-      .catch((e) => setApiError(e.response?.data?.error || 'Failed to load summary'))
-    getFills(10, 0)
-      .then((r) => setFills(r.data.fills || []))
-      .catch(() => {})
-
-    const interval = setInterval(() => {
-      getSummary().then((r) => { setSummary(r.data); setApiError(null) }).catch(() => {})
-    }, 30000)
+    refresh()
+    getFills(200, 0).then((r) => setFills(r.data.fills || [])).catch(() => {})
+    const interval = setInterval(refresh, 10000)
     return () => clearInterval(interval)
   }, [])
 
-  // Refetch equity whenever period changes.
-  useEffect(() => {
-    getEquity(undefined, 5000, period)
-      .then((r) => setSnapshots(r.data.snapshots || []))
-      .catch(() => {})
-  }, [period])
-
-  // Real-time WS: update summary equity on equity events, prepend fills on fill events
+  // Real-time WS: refresh on every fill so the stat cards and recent-activity
+  // feed stay current without waiting for the next 10s poll.
   useTradeSocket((msg: any) => {
-    if (msg?.type === 'equity' && typeof msg.equity === 'number') {
-      setSummary((prev) => prev ? { ...prev, equity: msg.equity } : prev)
-    } else if (msg?.type === 'fill' && msg.data) {
-      setFills((prev) => [msg.data as Fill, ...prev].slice(0, 10))
-      // Refresh summary to pick up win_rate / total_fills changes
-      getSummary().then((r) => setSummary(r.data)).catch(() => {})
+    if (msg?.type === 'fill' && msg.data) {
+      setFills((prev) => [msg.data as Fill, ...prev].slice(0, 200))
+      refresh()
     }
   })
 
-  // For multi-day periods, show date+time on x-axis; for 1d, show time only.
-  const longRange = period !== '1d'
-  const chartData = snapshots.map((s) => {
-    const d = new Date(s.snapshotted_at)
-    return {
-      time: longRange
-        ? `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
-        : d.toLocaleTimeString(),
-      equity: +s.equity.toFixed(2),
-      cash: +s.cash.toFixed(2),
-    }
-  })
+  const runningEngines = engines.filter((e) => e.running)
+  const totalEquity = runningEngines.reduce((sum, e) => sum + (positionsByEngine[e.engine_id]?.equity ?? 0), 0)
+  const totalUnrealized = runningEngines.reduce((sum, e) => {
+    const positions = positionsByEngine[e.engine_id]?.positions ?? []
+    return sum + positions.reduce((s, p) => s + p.unrealized_pnl, 0)
+  }, 0)
+
+  const totalFills = fills.length
+  const wins = fills.filter((f) => f.realized_pnl > 0).length
+  const winRate = totalFills > 0 ? (wins / totalFills) * 100 : 0
 
   const fmt = (n: number) => `$${n.toFixed(2)}`
-  const statusColor = summary?.engine_status === 'running' ? 'text-green-400' : 'text-slate-400'
+  const recentFills = fills.slice(0, 10)
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-bold">Dashboard</h1>
+      <h1 className="text-xl font-bold">总览</h1>
 
       {apiError && (
         <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-2 text-red-400 text-sm">
@@ -115,112 +114,84 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Stat cards */}
+      {/* Stat cards — aggregated across every currently running engine */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Equity" value={fmt(summary?.equity || 0)} />
-        <StatCard label="Cash" value={fmt(summary?.cash || 0)} />
+        <StatCard label="运行中引擎" value={`${runningEngines.length}`} sub={`共 ${engines.length} 个(含已停止)`} />
+        <StatCard label="总权益" value={fmt(totalEquity)} />
         <StatCard
-          label="Realized P&L"
-          value={fmt(summary?.realized_pnl || 0)}
-          color={summary?.realized_pnl && summary.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}
+          label="总浮动盈亏"
+          value={fmt(totalUnrealized)}
+          color={totalUnrealized >= 0 ? 'text-green-400' : 'text-red-400'}
         />
         <StatCard
-          label="Win Rate"
-          value={`${(summary?.win_rate || 0).toFixed(1)}%`}
-          sub={`${summary?.total_fills || 0} trades`}
+          label="胜率"
+          value={`${winRate.toFixed(1)}%`}
+          sub={`最近 ${totalFills} 笔成交`}
         />
-      </div>
-
-      {/* Engine status */}
-      <div className="bg-slate-800 rounded-xl p-4 flex items-center gap-3">
-        <div className={`w-2.5 h-2.5 rounded-full ${summary?.engine_status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-slate-500'}`} />
-        <span className={`text-sm font-medium ${statusColor}`}>
-          Engine: {summary?.engine_status || 'stopped'}
-        </span>
-        {summary?.strategy_id && (
-          <span className="text-xs text-slate-400 ml-2">Strategy: {summary.strategy_id}</span>
-        )}
-      </div>
-
-      {/* Equity chart */}
-      <div className="bg-slate-800 rounded-xl p-4">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-slate-300">Equity Curve</h2>
-          <div className="flex gap-1">
-            {(['1d', '7d', '30d', 'all'] as Period[]).map(p => (
-              <button
-                key={p}
-                onClick={() => setPeriod(p)}
-                className={`px-2 py-0.5 text-xs rounded ${
-                  period === p
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-700 text-slate-400 hover:bg-slate-600 hover:text-slate-200'
-                }`}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-        </div>
-        {chartData.length === 0 ? (
-          <p className="text-slate-500 text-sm text-center py-8">
-            No equity data yet. Start the engine to begin recording.
-          </p>
-        ) : (
-          <ResponsiveContainer width="100%" height={240}>
-            <LineChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#94a3b8' }} />
-              <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} />
-              <Tooltip
-                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8 }}
-                labelStyle={{ color: '#94a3b8' }}
-              />
-              <Line type="monotone" dataKey="equity" stroke="#3b82f6" strokeWidth={2} dot={false} name="Equity" />
-              <Line type="monotone" dataKey="cash" stroke="#10b981" strokeWidth={1.5} dot={false} name="Cash" strokeDasharray="4 4" />
-            </LineChart>
-          </ResponsiveContainer>
-        )}
       </div>
 
       {/* Recent fills */}
       <div className="bg-slate-800 rounded-xl p-4">
-        <h2 className="text-sm font-semibold text-slate-300 mb-4">Recent Fills</h2>
-        {fills.length === 0 ? (
-          <p className="text-slate-500 text-sm">No fills recorded yet.</p>
+        <h2 className="text-sm font-semibold text-slate-300 mb-4">最近成交</h2>
+        {recentFills.length === 0 ? (
+          <p className="text-slate-500 text-sm">暂无成交记录。</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-slate-400 text-xs border-b border-slate-700">
-                  <th className="pb-2">Symbol</th>
-                  <th className="pb-2">Side</th>
-                  <th className="pb-2 text-right">Qty</th>
-                  <th className="pb-2 text-right">Price</th>
-                  <th className="pb-2 text-right">P&L</th>
-                  <th className="pb-2 text-right">Time</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fills.map((f) => (
-                  <tr key={f.id} className="border-b border-slate-700/50">
-                    <td className="py-1.5 font-medium">{f.symbol}</td>
-                    <td className={`py-1.5 font-medium ${f.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
-                      {f.side}
-                    </td>
-                    <td className="py-1.5 text-right">{f.qty.toFixed(6)}</td>
-                    <td className="py-1.5 text-right">{f.price.toFixed(2)}</td>
-                    <td className={`py-1.5 text-right ${f.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                      {f.realized_pnl === 0 ? '—' : `$${f.realized_pnl.toFixed(2)}`}
-                    </td>
-                    <td className="py-1.5 text-right text-slate-400">
-                      {new Date(f.filled_at).toLocaleString()}
-                    </td>
+          <>
+            {/* Table — sm and up. */}
+            <div className="hidden sm:block overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-slate-400 text-xs border-b border-slate-700">
+                    <th className="pb-2">引擎</th>
+                    <th className="pb-2">交易对</th>
+                    <th className="pb-2">方向</th>
+                    <th className="pb-2 text-right">数量</th>
+                    <th className="pb-2 text-right">价格</th>
+                    <th className="pb-2 text-right">盈亏</th>
+                    <th className="pb-2 text-right">时间</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {recentFills.map((f) => (
+                    <tr key={f.id} className="border-b border-slate-700/50">
+                      <td className="py-1.5 text-xs text-slate-400">{f.strategy_id}</td>
+                      <td className="py-1.5 font-medium">{f.symbol}</td>
+                      <td className={`py-1.5 font-medium ${f.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
+                        {actionLabel(f.side, f.position_side)}
+                      </td>
+                      <td className="py-1.5 text-right">{f.qty.toFixed(6)}</td>
+                      <td className="py-1.5 text-right">{f.price.toFixed(2)}</td>
+                      <td className={`py-1.5 text-right ${f.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {f.realized_pnl === 0 ? '—' : `$${f.realized_pnl.toFixed(2)}`}
+                      </td>
+                      <td className="py-1.5 text-right text-slate-400">
+                        {new Date(f.filled_at).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Cards — below sm. */}
+            <div className="sm:hidden space-y-2">
+              {recentFills.map((f) => (
+                <div key={f.id} className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 text-xs">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="font-medium text-slate-200">{f.symbol}</span>
+                    <span className={`font-semibold ${f.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>{actionLabel(f.side, f.position_side)}</span>
+                  </div>
+                  <div className="text-slate-400 mb-2">{f.strategy_id}</div>
+                  <div className="grid grid-cols-2 gap-y-1.5 gap-x-3 text-slate-300">
+                    <div><span className="block text-slate-500">数量</span>{f.qty.toFixed(6)}</div>
+                    <div><span className="block text-slate-500">价格</span>{f.price.toFixed(2)}</div>
+                    <div><span className="block text-slate-500">盈亏</span><span className={f.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}>{f.realized_pnl === 0 ? '—' : `$${f.realized_pnl.toFixed(2)}`}</span></div>
+                  </div>
+                  <div className="mt-1.5 text-slate-500">{new Date(f.filled_at).toLocaleString()}</div>
+                </div>
+              ))}
+            </div>
+          </>
         )}
       </div>
     </div>

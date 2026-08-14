@@ -158,7 +158,7 @@ func (e *Engine) processFills(ctx context.Context) {
 				)
 			}
 
-			e.log.Info("live fill",
+			e.log.Info("实盘成交",
 				zap.String("order_id", event.Order.ID),
 				zap.String("symbol", event.Fill.Symbol),
 				zap.String("side", string(event.Fill.Side)),
@@ -255,7 +255,7 @@ func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
 	equity := e.broker.WalletBalance() + unrealizedPnL
 	e.broker.equity.Store(equity)
 
-	e.log.Info("unmatched fill: cash updated",
+	e.log.Info("检测到非本引擎下的成交（如交易所原生止损/止盈或手动交易），已更新现金余额",
 		zap.String("side", fill.Side),
 		zap.String("position_side", fill.PositionSide),
 		zap.Float64("qty", fill.FilledQty),

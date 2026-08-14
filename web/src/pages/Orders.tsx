@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
 import { getOrders, listCredentials } from '../api/trading'
+import StatusBadge from '../components/StatusBadge'
+import { FILTER_INPUT_CLASS } from '../lib/inputStyles'
+import { isClosingSide, actionLabel } from '../lib/positionFormat'
 
 interface Order {
   id: string
@@ -17,6 +20,8 @@ interface Order {
   mode: string
   credential_id: number
   created_at: string
+  position_side: string // "LONG" | "SHORT" | "" (hedge mode direction)
+  stop_price: number // stop trigger price (STOP_MARKET / STOP_LIMIT only); 0 otherwise
 }
 
 // 该订单对应账户的真钱属性(判断是否真金白银)
@@ -25,21 +30,17 @@ interface CredMeta {
   demo: boolean
 }
 
-const statusColor: Record<string, string> = {
-  FILLED: 'bg-green-900/50 text-green-300',
-  CANCELLED: 'bg-slate-600 text-slate-300',
-  REJECTED: 'bg-red-900/50 text-red-300',
-  PENDING: 'bg-yellow-900/50 text-yellow-300',
-  OPEN: 'bg-blue-900/50 text-blue-300',
-}
-
-const inputCls = 'bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+const inputCls = FILTER_INPUT_CLASS
 
 // 守护仓 = 守护你手动开的仓位;否则是机器人自动交易
 const isGuardian = (strategyId: string) => (strategyId || '').includes('guardian')
 
-// 方向的中文
-const sideLabel = (side: string) => (side === 'BUY' ? '买' : side === 'SELL' ? '卖' : side)
+// 一条记录只会是开仓或平仓之一(不会同时是两者),未成交时两者都显示 '—'。
+const entryExitPrice = (o: Order): { entry: string; exit: string } => {
+  if (o.avg_fill_price <= 0) return { entry: '—', exit: '—' }
+  const priceStr = o.avg_fill_price.toFixed(2)
+  return isClosingSide(o.side, o.position_side) ? { entry: '—', exit: priceStr } : { entry: priceStr, exit: '—' }
+}
 
 // 订单类型的中文(未知类型原样显示)
 const typeLabel = (type: string): string => {
@@ -188,66 +189,107 @@ export default function Orders() {
             {hasFilters ? '没有符合筛选条件的订单。' : '暂无订单。启动机器人后产生的订单会显示在这里。'}
           </p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-slate-400 text-xs border-b border-slate-700">
-                  <th className="pb-2">交易对</th>
-                  <th className="pb-2">方向</th>
-                  <th className="pb-2">类型</th>
-                  <th className="pb-2">状态</th>
-                  <th className="pb-2 text-right">数量</th>
-                  <th className="pb-2 text-right">已成交</th>
-                  <th className="pb-2 text-right">均价</th>
-                  <th className="pb-2 text-right">手续费</th>
-                  <th className="pb-2">来源</th>
-                  <th className="pb-2">资金</th>
-                  <th className="pb-2 text-right">时间</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.map((o) => (
-                  <tr key={o.id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
-                    <td className="py-2 font-medium">{o.symbol}</td>
-                    <td className={`py-2 font-semibold ${o.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
-                      {sideLabel(o.side)}
-                    </td>
-                    <td className="py-2 text-slate-400">{typeLabel(o.type)}</td>
-                    <td className="py-2">
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${statusColor[o.status] || 'bg-slate-600 text-slate-300'}`}>
-                        {statusLabel(o.status)}
-                      </span>
-                    </td>
-                    <td className="py-2 text-right font-mono">{o.quantity.toFixed(6)}</td>
-                    <td className="py-2 text-right font-mono">{o.filled_quantity.toFixed(6)}</td>
-                    <td className="py-2 text-right font-mono">{o.avg_fill_price > 0 ? o.avg_fill_price.toFixed(2) : '—'}</td>
-                    <td className="py-2 text-right font-mono text-slate-400">{o.commission.toFixed(4)}</td>
-                    <td className="py-2">
-                      <span
-                        title={o.strategy_id}
-                        className={`text-xs px-1.5 py-0.5 rounded ${isGuardian(o.strategy_id) ? 'bg-emerald-900/50 text-emerald-300' : 'bg-blue-900/50 text-blue-300'}`}
-                      >
+          <>
+            {/* Table — sm and up. */}
+            <div className="hidden sm:block overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-slate-400 text-xs border-b border-slate-700">
+                    <th className="pb-2">交易对</th>
+                    <th className="pb-2">方向</th>
+                    <th className="pb-2">类型</th>
+                    <th className="pb-2">状态</th>
+                    <th className="pb-2 text-right">数量</th>
+                    <th className="pb-2 text-right">已成交</th>
+                    <th className="pb-2 text-right">开仓价格</th>
+                    <th className="pb-2 text-right">平仓价格</th>
+                    <th className="pb-2 text-right">止损价</th>
+                    <th className="pb-2 text-right">手续费</th>
+                    <th className="pb-2">来源</th>
+                    <th className="pb-2">资金</th>
+                    <th className="pb-2 text-right">时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orders.map((o) => {
+                    const { entry, exit } = entryExitPrice(o)
+                    return (
+                    <tr key={o.id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
+                      <td className="py-2 font-medium">{o.symbol}</td>
+                      <td className={`py-2 font-semibold ${o.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
+                        {actionLabel(o.side, o.position_side)}
+                      </td>
+                      <td className="py-2 text-slate-400">{typeLabel(o.type)}</td>
+                      <td className="py-2">
+                        <StatusBadge status={o.status} label={statusLabel(o.status)} />
+                      </td>
+                      <td className="py-2 text-right font-mono">{o.quantity.toFixed(6)}</td>
+                      <td className="py-2 text-right font-mono">{o.filled_quantity.toFixed(6)}</td>
+                      <td className="py-2 text-right font-mono">{entry}</td>
+                      <td className="py-2 text-right font-mono">{exit}</td>
+                      <td className="py-2 text-right font-mono text-slate-400">{o.stop_price > 0 ? o.stop_price.toFixed(2) : '—'}</td>
+                      <td className="py-2 text-right font-mono text-slate-400">{o.commission.toFixed(4)}</td>
+                      <td className="py-2">
+                        <span
+                          title={o.strategy_id}
+                          className={`text-xs px-1.5 py-0.5 rounded ${isGuardian(o.strategy_id) ? 'bg-emerald-900/50 text-emerald-300' : 'bg-blue-900/50 text-blue-300'}`}
+                        >
+                          {isGuardian(o.strategy_id) ? '守护仓' : '机器人自动'}
+                        </span>
+                      </td>
+                      <td className="py-2">
+                        {(() => {
+                          const b = moneyBadge(o)
+                          return (
+                            <span title={b.title} className={`text-xs px-1.5 py-0.5 rounded ${b.cls}`}>
+                              {b.text}
+                            </span>
+                          )
+                        })()}
+                      </td>
+                      <td className="py-2 text-right text-xs text-slate-400">
+                        {new Date(o.created_at).toLocaleString()}
+                      </td>
+                    </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Cards — below sm. */}
+            <div className="sm:hidden space-y-2">
+              {orders.map((o) => {
+                const b = moneyBadge(o)
+                const { entry, exit } = entryExitPrice(o)
+                return (
+                  <div key={o.id} className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 text-xs">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-medium text-slate-200">{o.symbol}</span>
+                      <StatusBadge status={o.status} label={statusLabel(o.status)} />
+                    </div>
+                    <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+                      <span className={`font-semibold ${o.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>{actionLabel(o.side, o.position_side)}</span>
+                      <span className="text-slate-400">· {typeLabel(o.type)}</span>
+                      <span title={o.strategy_id} className={`px-1.5 py-0.5 rounded ${isGuardian(o.strategy_id) ? 'bg-emerald-900/50 text-emerald-300' : 'bg-blue-900/50 text-blue-300'}`}>
                         {isGuardian(o.strategy_id) ? '守护仓' : '机器人自动'}
                       </span>
-                    </td>
-                    <td className="py-2">
-                      {(() => {
-                        const b = moneyBadge(o)
-                        return (
-                          <span title={b.title} className={`text-xs px-1.5 py-0.5 rounded ${b.cls}`}>
-                            {b.text}
-                          </span>
-                        )
-                      })()}
-                    </td>
-                    <td className="py-2 text-right text-xs text-slate-400">
-                      {new Date(o.created_at).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                      <span title={b.title} className={`px-1.5 py-0.5 rounded ${b.cls}`}>{b.text}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-y-1.5 gap-x-3 text-slate-300">
+                      <div><span className="block text-slate-500">数量</span><span className="font-mono">{o.quantity.toFixed(6)}</span></div>
+                      <div><span className="block text-slate-500">已成交</span><span className="font-mono">{o.filled_quantity.toFixed(6)}</span></div>
+                      <div><span className="block text-slate-500">开仓价格</span><span className="font-mono">{entry}</span></div>
+                      <div><span className="block text-slate-500">平仓价格</span><span className="font-mono">{exit}</span></div>
+                      <div><span className="block text-slate-500">止损价</span><span className="font-mono">{o.stop_price > 0 ? o.stop_price.toFixed(2) : '—'}</span></div>
+                      <div><span className="block text-slate-500">手续费</span><span className="font-mono">{o.commission.toFixed(4)}</span></div>
+                    </div>
+                    <div className="mt-1.5 text-slate-500">{new Date(o.created_at).toLocaleString()}</div>
+                  </div>
+                )
+              })}
+            </div>
+          </>
         )}
         <div className="flex gap-2 mt-4">
           <button

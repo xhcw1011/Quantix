@@ -128,68 +128,109 @@ export default function Admin() {
       {tab === 'users' && (
         <div className="bg-slate-800 rounded-xl overflow-hidden">
           {loadingUsers ? (
-            <div className="p-8 text-center text-slate-500 text-sm">Loading users…</div>
+            <div className="p-8 text-center text-slate-500 text-sm">加载中…</div>
           ) : users.length === 0 ? (
             <div className="p-8 text-center text-slate-500 text-sm">No users found.</div>
           ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-700 text-xs text-slate-400">
-                  <th className="px-4 py-3 text-left">User</th>
-                  <th className="px-4 py-3 text-left">Email</th>
-                  <th className="px-4 py-3 text-left">Role</th>
-                  <th className="px-4 py-3 text-left">Engines</th>
-                  <th className="px-4 py-3 text-left">Joined</th>
-                  <th className="px-4 py-3 text-left">Status</th>
-                </tr>
-              </thead>
-              <tbody>
+            <>
+              {/* Table — sm and up. */}
+              <div className="hidden sm:block overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-700 text-xs text-slate-400">
+                      <th className="px-4 py-3 text-left">User</th>
+                      <th className="px-4 py-3 text-left">Email</th>
+                      <th className="px-4 py-3 text-left">Role</th>
+                      <th className="px-4 py-3 text-left">Engines</th>
+                      <th className="px-4 py-3 text-left">Joined</th>
+                      <th className="px-4 py-3 text-left">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.map((u) => (
+                      <tr key={u.id} className="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors">
+                        <td className="px-4 py-3">
+                          <div className="font-medium">{u.username}</div>
+                          <div className="text-xs text-slate-500">#{u.id}</div>
+                        </td>
+                        <td className="px-4 py-3 text-slate-400">{u.email}</td>
+                        <td className="px-4 py-3">
+                          <span className={`text-xs px-2 py-0.5 rounded font-semibold ${
+                            u.role === 'admin'
+                              ? 'bg-yellow-900/50 text-yellow-300'
+                              : 'bg-slate-700 text-slate-400'
+                          }`}>
+                            {u.role}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          {u.running_engines > 0 ? (
+                            <span className="text-green-400 font-semibold">{u.running_engines} running</span>
+                          ) : (
+                            <span className="text-slate-500">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-slate-400 text-xs">
+                          {new Date(u.created_at).toLocaleDateString()}
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => handleToggleActive(u)}
+                            disabled={togglingId === u.id || u.role === 'admin'}
+                            className={`px-3 py-1 rounded text-xs font-semibold disabled:opacity-40 transition-colors ${
+                              u.is_active
+                                ? 'bg-red-900/40 text-red-300 hover:bg-red-900/70'
+                                : 'bg-green-900/40 text-green-300 hover:bg-green-900/70'
+                            }`}
+                            title={u.role === 'admin' ? 'Cannot deactivate admin' : undefined}
+                          >
+                            {togglingId === u.id
+                              ? '…'
+                              : u.is_active ? 'Deactivate' : 'Activate'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Cards — below sm. */}
+              <div className="sm:hidden divide-y divide-slate-700/50">
                 {users.map((u) => (
-                  <tr key={u.id} className="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors">
-                    <td className="px-4 py-3">
-                      <div className="font-medium">{u.username}</div>
-                      <div className="text-xs text-slate-500">#{u.id}</div>
-                    </td>
-                    <td className="px-4 py-3 text-slate-400">{u.email}</td>
-                    <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded font-semibold ${
-                        u.role === 'admin'
-                          ? 'bg-yellow-900/50 text-yellow-300'
-                          : 'bg-slate-700 text-slate-400'
+                  <div key={u.id} className="p-4 text-xs">
+                    <div className="flex items-center justify-between mb-2">
+                      <div>
+                        <div className="font-medium text-sm">{u.username}</div>
+                        <div className="text-slate-500">#{u.id}</div>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded font-semibold ${
+                        u.role === 'admin' ? 'bg-yellow-900/50 text-yellow-300' : 'bg-slate-700 text-slate-400'
                       }`}>
                         {u.role}
                       </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      {u.running_engines > 0 ? (
-                        <span className="text-green-400 font-semibold">{u.running_engines} running</span>
-                      ) : (
-                        <span className="text-slate-500">—</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-slate-400 text-xs">
-                      {new Date(u.created_at).toLocaleDateString()}
-                    </td>
-                    <td className="px-4 py-3">
-                      <button
-                        onClick={() => handleToggleActive(u)}
-                        disabled={togglingId === u.id || u.role === 'admin'}
-                        className={`px-3 py-1 rounded text-xs font-semibold disabled:opacity-40 transition-colors ${
-                          u.is_active
-                            ? 'bg-red-900/40 text-red-300 hover:bg-red-900/70'
-                            : 'bg-green-900/40 text-green-300 hover:bg-green-900/70'
-                        }`}
-                        title={u.role === 'admin' ? 'Cannot deactivate admin' : undefined}
-                      >
-                        {togglingId === u.id
-                          ? '…'
-                          : u.is_active ? 'Deactivate' : 'Activate'}
-                      </button>
-                    </td>
-                  </tr>
+                    </div>
+                    <div className="text-slate-400 mb-2">{u.email}</div>
+                    <div className="grid grid-cols-2 gap-y-1.5 gap-x-3 text-slate-300 mb-2.5">
+                      <div><span className="block text-slate-500">Engines</span>{u.running_engines > 0 ? <span className="text-green-400 font-semibold">{u.running_engines} running</span> : <span className="text-slate-500">—</span>}</div>
+                      <div><span className="block text-slate-500">Joined</span>{new Date(u.created_at).toLocaleDateString()}</div>
+                    </div>
+                    <button
+                      onClick={() => handleToggleActive(u)}
+                      disabled={togglingId === u.id || u.role === 'admin'}
+                      className={`w-full py-1.5 rounded font-semibold disabled:opacity-40 transition-colors ${
+                        u.is_active
+                          ? 'bg-red-900/40 text-red-300 hover:bg-red-900/70'
+                          : 'bg-green-900/40 text-green-300 hover:bg-green-900/70'
+                      }`}
+                      title={u.role === 'admin' ? 'Cannot deactivate admin' : undefined}
+                    >
+                      {togglingId === u.id ? '…' : u.is_active ? 'Deactivate' : 'Activate'}
+                    </button>
+                  </div>
                 ))}
-              </tbody>
-            </table>
+              </div>
+            </>
           )}
         </div>
       )}
@@ -199,7 +240,7 @@ export default function Admin() {
         <div className="space-y-3">
           {loadingEngines ? (
             <div className="bg-slate-800 rounded-xl p-8 text-center text-slate-500 text-sm">
-              Loading engines…
+              加载中…
             </div>
           ) : runningEngines.length === 0 ? (
             <div className="bg-slate-800 rounded-xl p-8 text-center text-slate-500 text-sm">

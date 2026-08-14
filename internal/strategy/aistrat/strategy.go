@@ -78,6 +78,7 @@ type AIStrategy struct {
 	hourlyModeBars    int        // 15m bar count when cache was last updated
 	lastTrendDir    int       // +1 = bullish, -1 = bearish, 0 = neutral (from detectRegime)
 	lastEfficiency  float64   // |net move|/sum(|bar moves|) from detectRegime; margin to TrendEfficiencyMin distinguishes a clean-Range read from a knife-edge one
+	regimeAge       int       // consecutive primary bars the current lastRegime has held; 0 on the bar it (re)started
 	lastSLReplace   time.Time // throttle ReplaceSLOrder calls (max 1 per 3s)
 	// Signal accumulation: tracks rolling GPT confidence across bars
 	accumLong       float64   // accumulated long signal strength (decays each bar)
@@ -214,7 +215,7 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 			}
 			pos.remainQty = totalQty
 			pos.initQty = totalQty
-			s.log.Info("AI: base partial fill accumulated",
+			s.log.Info("AI：底仓部分成交累加",
 				zap.String("side", pos.side), zap.Float64("fill_qty", fill.Qty),
 				zap.Float64("total_qty", totalQty), zap.Float64("avg_entry", pos.entryPrice))
 			s.syncToRedis(pos)
@@ -239,7 +240,7 @@ func (s *AIStrategy) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 		pos.remainQty = fill.Qty
 		pos.initQty = fill.Qty
 	}
-	s.log.Info("AI: fill confirmed",
+	s.log.Info("AI：成交确认",
 		zap.String("side", pos.side), zap.Float64("fill", fill.Price),
 		zap.Float64("qty", fill.Qty),
 		zap.Float64("stop", pos.stopLoss), zap.Float64("tp", pos.takeProfit))
@@ -288,7 +289,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 	if p.mode == modeRange {
 		if p.takeProfit > 0 {
 			if (p.side == "LONG" && price >= p.takeProfit) || (p.side == "SHORT" && price <= p.takeProfit) {
-				s.log.Info("TICK GRID TP", zap.String("side", p.side),
+				s.log.Info("实时行情：网格止盈触发", zap.String("side", p.side),
 					zap.Float64("price", price), zap.Float64("tp", p.takeProfit))
 				s.closePos(ctx, p, pptr, "grid_tp")
 				s.consecLoss = 0
@@ -304,14 +305,14 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		if p.side == "SHORT" { posSide = "SHORT" }
 		s.stagedEP.CancelExchangeSL(s.cfg.Symbol, posSide)
 		p.safetyNetSL = false
-		s.log.Info("AI: safety-net SL cancelled — local trailing active",
+		s.log.Info("AI：安全网止损已取消——本地跟踪止损已生效",
 			zap.String("side", p.side), zap.Float64("trailing", p.trailing))
 	}
 
 	// ── 1. Real-time SL check (must be instant, not wait for bar close) ──
 	if (p.side == "LONG" && price <= p.stopLoss) || (p.side == "SHORT" && price >= p.stopLoss) {
 		closedSide := p.side
-		s.log.Warn("TICK STOP-LOSS", zap.String("side", closedSide),
+		s.log.Warn("实时行情：止损触发", zap.String("side", closedSide),
 			zap.Float64("price", price), zap.Float64("stop", p.stopLoss))
 		s.closePos(ctx, p, pptr, "stop_loss")
 		s.consecLoss++
@@ -349,7 +350,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 				// Let the trade breathe — skip trailing update
 			} else {
 				tier := 1
-				trailDist := atr // tight: 1ATR
+				trailDist := atr * s.cfg.TrailingTightATRK // tight tier
 				if pnlR >= 2.0 {
 					tier = 2
 					trailDist = atr * s.cfg.TrailingATRK // wide: 3ATR
@@ -372,7 +373,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 				// Tier upgrade: allow trailing to widen (reset ratchet for this transition).
 				if tier > p.trailTier && p.trailTier > 0 {
 					p.trailing = newTrail
-					s.log.Info("AI: trail tier upgrade — widening trailing for trend ride",
+					s.log.Info("AI：跟踪止损档位上调——放宽跟踪距离以骑住趋势",
 						zap.String("side", p.side), zap.Float64("trailing", newTrail), zap.Float64("pnlR", pnlR))
 				}
 				p.trailTier = tier
@@ -386,7 +387,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 			// ATR*1.0 (not 0.5) to avoid jump-trigger when switching from STRONG (trail=SL).
 			// Stale peak exit: no new high/low for 45 min → close immediately.
 			if !p.lastPeakAt.IsZero() && time.Since(p.lastPeakAt) > 45*time.Minute {
-				s.log.Warn("TICK: stale peak exit — 45m no new high/low in EXIT_MODE",
+				s.log.Warn("实时行情：滞涨离场——退出模式下45分钟无新高/新低",
 					zap.String("side", p.side), zap.Float64("pnlR", pnlR))
 				s.closePos(ctx, p, pptr, "stale_peak_exit")
 				if pnlR > 0 { s.consecLoss = 0 } else { s.consecLoss++ }
@@ -444,7 +445,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 
 		// ── Time-based exit: close if held > 3h and NOT in strong trend ──
 		if p.filled && hMode != hourlyTrendStrong && time.Since(p.filledAt) > 3*time.Hour {
-			s.log.Warn("TICK: time exit — held >3h in weak/exit mode",
+			s.log.Warn("实时行情：超时离场——弱势/退出模式下已持仓超过3小时",
 				zap.String("side", p.side), zap.Float64("pnlR", pnlR),
 				zap.Duration("held", time.Since(p.filledAt)))
 			s.closePos(ctx, p, pptr, "time_exit")
@@ -456,14 +457,14 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		if p.remainQty < p.initQty && p.remainQty > 0 && pnlR > 0 {
 			bounceThreshold := s.cfg.BounceTPR * p.R
 			if p.side == "LONG" && p.peakPrice-price >= bounceThreshold {
-				s.log.Info("TICK: bounce TP", zap.String("side", p.side),
+				s.log.Info("实时行情：回撤止盈", zap.String("side", p.side),
 					zap.Float64("peak", p.peakPrice), zap.Float64("price", price))
 				s.closePos(ctx, p, pptr, "bounce_tp")
 				s.consecLoss = 0
 				return
 			}
 			if p.side == "SHORT" && price-p.peakPrice >= bounceThreshold {
-				s.log.Info("TICK: bounce TP", zap.String("side", p.side),
+				s.log.Info("实时行情：回撤止盈", zap.String("side", p.side),
 					zap.Float64("peak", p.peakPrice), zap.Float64("price", price))
 				s.closePos(ctx, p, pptr, "bounce_tp")
 				s.consecLoss = 0
@@ -474,7 +475,7 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 		// ── 4b. Emergency reversal: if losing > 0.9R, trigger async GPT check ──
 		// Raised from -0.8R to -0.9R, cooldown 30s→60s to avoid premature cuts.
 		if pnlR < s.cfg.EmergencyPnlR && hMode == hourlyExitMode {
-			s.log.Warn("TICK: emergency exit — losing >0.9R + 1h exit mode",
+			s.log.Warn("实时行情：紧急离场——亏损超0.9R且处于1小时退出模式",
 				zap.String("side", p.side), zap.Float64("pnlR", pnlR))
 			s.closePos(ctx, p, pptr, "emergency_exit")
 			s.consecLoss++
@@ -484,14 +485,14 @@ func (s *AIStrategy) tickManage(ctx *strategy.Context, price float64, p *posStat
 
 	// ── 5. Real-time trailing trigger ──
 	if p.side == "LONG" && p.trailing > p.stopLoss && price <= p.trailing {
-		s.log.Warn("TICK TRAILING", zap.String("side", p.side),
+		s.log.Warn("实时行情：跟踪止损触发", zap.String("side", p.side),
 			zap.Float64("price", price), zap.Float64("trail", p.trailing))
 		s.closePos(ctx, p, pptr, "trailing")
 		s.consecLoss = 0
 		return
 	}
 	if p.side == "SHORT" && p.trailing > 0 && p.trailing < p.stopLoss && price >= p.trailing {
-		s.log.Warn("TICK TRAILING", zap.String("side", p.side),
+		s.log.Warn("实时行情：跟踪止损触发", zap.String("side", p.side),
 			zap.Float64("price", price), zap.Float64("trail", p.trailing))
 		s.closePos(ctx, p, pptr, "trailing")
 		s.consecLoss = 0
@@ -517,14 +518,14 @@ func (s *AIStrategy) emergencyReversalCheck(ctx *strategy.Context, price float64
 	syntheticBar.Close = price
 	mktCtx := s.buildContext(ctx, syntheticBar)
 
-	s.log.Info("TICK: launching async emergency GPT check",
+	s.log.Info("实时行情：异步发起紧急GPT研判",
 		zap.String("side", side), zap.Float64("price", price))
 
 	go func() {
 		defer s.emergencyActive.Store(false)
 		signal, err := s.callGPT(mktCtx)
 		if err != nil {
-			s.log.Warn("emergency GPT call failed", zap.Error(err))
+			s.log.Warn("紧急GPT调用失败", zap.Error(err))
 			return
 		}
 		select {
@@ -547,7 +548,7 @@ func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice 
 			p = s.shortPos; pptr = &s.shortPos
 		}
 		if p == nil {
-			s.log.Info("TICK: emergency result arrived but position already closed")
+			s.log.Info("实时行情：紧急研判结果返回时仓位已平")
 			return
 		}
 
@@ -560,7 +561,7 @@ func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice 
 			if p.side == "SHORT" && signal.Action == "BUY" { reverseConf = signal.Confidence }
 		}
 
-		s.log.Info("TICK: emergency result received",
+		s.log.Info("实时行情：收到紧急研判结果",
 			zap.String("side", p.side), zap.Float64("price", currentPrice),
 			zap.Float64("reverse_conf", reverseConf))
 
@@ -571,7 +572,7 @@ func (s *AIStrategy) processEmergencyResult(ctx *strategy.Context, currentPrice 
 
 		if reverseConf >= emergencyThreshold {
 			closedSide := p.side
-			s.log.Warn("TICK: emergency reversal → close "+closedSide,
+			s.log.Warn("实时行情：紧急反转 → 平仓 "+closedSide,
 				zap.Float64("conf", reverseConf), zap.Float64("price", currentPrice))
 			s.closePos(ctx, p, pptr, "emergency_reversal")
 			// No flip — let next bar's normal flow decide new direction.
@@ -606,7 +607,7 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 	if pos.side == "LONG" { pnl = (fill.Price - pos.entryPrice) * fill.Qty }
 	if pos.side == "SHORT" { pnl = (pos.entryPrice - fill.Price) * fill.Qty }
 
-	s.log.Info("AI: staged TP fill",
+	s.log.Info("AI：分批止盈成交",
 		zap.String("side", pos.side),
 		zap.Float64("fill_price", fill.Price),
 		zap.Float64("fill_qty", fill.Qty),
@@ -619,7 +620,7 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 
 	// Position fully closed (SL fired or all TPs filled) — cancel remaining orders on exchange.
 	if pos.remainQty <= 0 {
-		s.log.Info("AI: position fully closed by exchange order",
+		s.log.Info("AI：仓位已被交易所订单完全平掉",
 			zap.String("side", pos.side))
 		if s.stagedEP != nil {
 			posSide := "LONG"
@@ -640,7 +641,7 @@ func (s *AIStrategy) handleStagedTPFill(fill strategy.Fill) bool {
 		if !pos.tp1RHit {
 			pos.tp1RHit = true
 			pos.trailing = pos.entryPrice
-			s.log.Info("AI: TP fill → trailing to breakeven",
+			s.log.Info("AI：止盈成交 → 跟踪止损移至保本位",
 				zap.String("side", pos.side), zap.Float64("entry", pos.entryPrice))
 		}
 		// No exchange SL — local trailing handles the breakeven exit.
@@ -663,7 +664,7 @@ func (s *AIStrategy) markTPFilled(pos *posState, fillPrice, fillQty float64) {
 	}
 	if bestIdx >= 0 && bestDist < pos.entryPrice*0.005 { // within 0.5% of expected price
 		pos.stagedTPs[bestIdx].Status = "filled"
-		s.log.Info("AI: staged TP level filled",
+		s.log.Info("AI：分批止盈档位已成交",
 			zap.Int("level", pos.stagedTPs[bestIdx].Level),
 			zap.Float64("expected_price", pos.stagedTPs[bestIdx].Price),
 			zap.Float64("fill_price", fillPrice))

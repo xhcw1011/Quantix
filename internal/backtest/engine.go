@@ -49,83 +49,6 @@ type Engine struct {
 	org       *orgateway.Gateway
 	stratCtx  *strategy.Context
 	log       *zap.Logger
-
-	// open tracks live positions for MFE/MAE excursion measurement, keyed by
-	// posExKey(symbol, side). Entries are created on opening fills and cleared
-	// on full closes.
-	open map[string]*posExcursion
-}
-
-// posExcursion accumulates the maximum favourable / adverse price a single open
-// position reaches over its lifetime, so the engine can stamp MFE/MAE onto the
-// resulting Trade at close.
-type posExcursion struct {
-	symbol    string
-	short     bool
-	favPrice  float64 // most favourable price seen while open (high for long, low for short)
-	advPrice  float64 // most adverse price seen while open (low for long, high for short)
-	stopDist  float64 // |entry − stop| at first entry, in price units; 0 if no stop
-	entryMeta map[string]float64
-}
-
-// update folds one bar's high/low into the running excursion extremes.
-func (x *posExcursion) update(bar exchange.Kline) {
-	if x.short {
-		if bar.Low < x.favPrice {
-			x.favPrice = bar.Low
-		}
-		if bar.High > x.advPrice {
-			x.advPrice = bar.High
-		}
-		return
-	}
-	if bar.High > x.favPrice {
-		x.favPrice = bar.High
-	}
-	if bar.Low < x.advPrice {
-		x.advPrice = bar.Low
-	}
-}
-
-// attach computes MFE/MAE (percent and R) from the accumulated extremes and the
-// trade's realised average entry, writing them onto the Trade.
-func (x *posExcursion) attach(t *Trade) {
-	ep := t.EntryPrice
-	if ep <= 0 {
-		return
-	}
-	if x.short {
-		t.MFEPct = (ep - x.favPrice) / ep * 100
-		t.MAEPct = (ep - x.advPrice) / ep * 100
-	} else {
-		t.MFEPct = (x.favPrice - ep) / ep * 100
-		t.MAEPct = (x.advPrice - ep) / ep * 100
-	}
-	if x.stopDist > 0 {
-		if sdPct := x.stopDist / ep * 100; sdPct > 0 {
-			t.MFER = t.MFEPct / sdPct
-			t.MAER = t.MAEPct / sdPct
-		}
-	}
-	t.EntryMeta = x.entryMeta
-}
-
-// posExKey identifies a tracked position by symbol and direction. Long and net
-// (spot) positions share the "L" bucket; short uses "S".
-func posExKey(symbol string, ps strategy.PositionSide) string {
-	if ps == strategy.PositionSideShort {
-		return symbol + "|S"
-	}
-	return symbol + "|L"
-}
-
-// openingFill reports whether a fill opens or adds to a position (vs closes it):
-// long opens via BUY, short opens via SELL.
-func openingFill(f strategy.Fill) bool {
-	if f.PositionSide == strategy.PositionSideShort {
-		return f.Side == strategy.SideSell
-	}
-	return f.Side == strategy.SideBuy
 }
 
 // New creates a ready-to-run backtest engine.
@@ -161,61 +84,6 @@ func New(cfg Config, store *data.Store, strat strategy.Strategy, log *zap.Logger
 		org:       org,
 		stratCtx:  stratCtx,
 		log:       log,
-		open:      make(map[string]*posExcursion),
-	}
-}
-
-// updateExcursions folds the current primary bar into every open position's
-// running MFE/MAE extremes. Called once per primary bar, before the broker
-// processes closes, so the exit bar's range is included.
-func (e *Engine) updateExcursions(bar exchange.Kline) {
-	for _, x := range e.open {
-		if bar.Symbol != "" && bar.Symbol != x.symbol {
-			continue
-		}
-		x.update(bar)
-	}
-}
-
-// reconcile pairs the fills produced this bar with the Trades the portfolio just
-// appended (indices ≥ preLen), starting excursion tracking on opening fills and
-// stamping MFE/MAE onto each closing Trade. Closing fills map 1:1, in order, to
-// the newly-appended Trades. A position is untracked only when fully closed, so
-// partial / staged exits keep accumulating.
-func (e *Engine) reconcile(fills []strategy.Fill, preLen int) {
-	tradeIdx := preLen
-	for _, fill := range fills {
-		key := posExKey(fill.Symbol, fill.PositionSide)
-		if openingFill(fill) {
-			if _, ok := e.open[key]; !ok {
-				x := &posExcursion{
-					symbol:    fill.Symbol,
-					short:     fill.PositionSide == strategy.PositionSideShort,
-					favPrice:  fill.Price,
-					advPrice:  fill.Price,
-					entryMeta: fill.Meta,
-				}
-				if fill.Meta != nil {
-					if stop := fill.Meta["entry_stop"]; stop != 0 {
-						x.stopDist = math.Abs(fill.Price - stop)
-					}
-				}
-				e.open[key] = x
-			}
-			continue
-		}
-		// Closing fill → next Trade appended by the portfolio this bar.
-		if tradeIdx >= len(e.portfolio.Trades) {
-			continue
-		}
-		t := &e.portfolio.Trades[tradeIdx]
-		tradeIdx++
-		if x := e.open[key]; x != nil {
-			x.attach(t)
-			if e.portfolio.OpenQty(fill.Symbol, fill.PositionSide) <= 1e-10 {
-				delete(e.open, key)
-			}
-		}
 	}
 }
 
@@ -329,12 +197,13 @@ func (e *Engine) Run(ctx context.Context) (Report, error) {
 			continue
 		}
 
-		// 2. Fold this bar into open positions' MFE/MAE before any close executes.
-		e.updateExcursions(ev.bar)
+		// 2. Fold this bar into open lots' MFE/MAE before any close executes.
+		e.portfolio.UpdateExcursions(ev.bar)
 
-		// 3. Broker processes queued orders against this primary bar's close
+		// 3. Broker processes queued orders against this primary bar's close.
+		// MFE/MAE/EntryMeta are stamped per-lot inside applyFill — no separate
+		// reconciliation pass needed.
 		currentPrice := map[string]float64{ev.bar.Symbol: ev.bar.Close}
-		preLen := len(e.portfolio.Trades)
 		fills := e.broker.Process(ev.bar)
 
 		// 4. Notify strategy of fills
@@ -342,10 +211,7 @@ func (e *Engine) Run(ctx context.Context) (Report, error) {
 			e.strategy.OnFill(e.stratCtx, fill)
 		}
 
-		// 5. Attribute: start/stop excursion tracking, stamp MFE/MAE on new Trades.
-		e.reconcile(fills, preLen)
-
-		// 6. Record equity snapshot after each primary bar
+		// 5. Record equity snapshot after each primary bar
 		e.portfolio.recordEquity(ev.bar.CloseTime, currentPrice)
 	}
 
@@ -444,11 +310,9 @@ func (e *Engine) closeOpenPositions(lastBar exchange.Kline) {
 			Reason:       "backtest_end",
 		})
 	}
-	e.updateExcursions(lastBar)
-	preLen := len(e.portfolio.Trades)
+	e.portfolio.UpdateExcursions(lastBar)
 	fills := e.broker.Process(lastBar)
 	for _, fill := range fills {
 		e.strategy.OnFill(e.stratCtx, fill)
 	}
-	e.reconcile(fills, preLen)
 }

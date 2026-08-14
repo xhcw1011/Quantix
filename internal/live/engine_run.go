@@ -15,6 +15,21 @@ import (
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
+// checkRetired reports whether the strategy has permanently retired (see
+// strategy.Retired) and logs it if so. Called right after every callback
+// into the strategy so Run can stop the engine promptly instead of
+// continuing to poll/subscribe on behalf of a strategy that will never act
+// again (2026-08-06 finding: guardian's own retire() only quieted itself,
+// never the surrounding engine session).
+func (e *Engine) checkRetired() bool {
+	r, ok := e.strategy.(strategy.Retired)
+	if !ok || !r.Retired() {
+		return false
+	}
+	e.log.Info("策略已退休，引擎停止", zap.String("id", e.cfg.StrategyID))
+	return true
+}
+
 // Run starts the live trading loop. Reads closed klines from klineCh.
 func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	e.startTime = time.Now()
@@ -162,14 +177,14 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				}
 				elapsed := time.Since(lastActivity)
 				if elapsed > staleKill {
-					e.log.Error("WATCHDOG: no bar/tick activity past stale threshold — stopping THIS engine only (feed likely dead); process + other engines keep running",
+					e.log.Error("看门狗：已超过无行情阈值时间没有K线/Tick活动，仅停止本引擎（行情源可能已断，进程和其他引擎继续运行）",
 						zap.String("engine_id", e.cfg.StrategyID),
 						zap.Int("user_id", e.cfg.UserID),
 						zap.Duration("since_last_bar", elapsed),
 						zap.Duration("threshold", staleKill))
 					if e.notifier != nil {
 						e.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
-							"engine %s (user %d) stopped: no market data for %s — restart it once the feed is healthy",
+							"引擎 %s（用户 %d）已停止：已 %s 没有行情数据 — 等行情恢复正常后重新启动",
 							e.cfg.StrategyID, e.cfg.UserID, elapsed.Truncate(time.Second)))
 					}
 					selfCancel() // stop only this engine, not the whole process
@@ -330,7 +345,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 		e.log.Info("user data stream: started (fills + account + positions)")
 	}
 
-	e.log.Warn("⚠️  LIVE TRADING ENGINE RUNNING — REAL MONEY AT RISK",
+	e.log.Warn("⚠️  实盘交易引擎运行中 — 真实资金正在承担风险",
 		zap.String("strategy", e.strategy.Name()),
 		zap.String("id", e.cfg.StrategyID),
 		zap.Float64("balance", e.broker.Cash()),
@@ -338,7 +353,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 
 	if e.notifier != nil {
 		e.notifier.SystemAlert("WARN", fmt.Sprintf(
-			"⚠️ Quantix LIVE trading started\nStrategy: %s | Balance: $%.2f",
+			"⚠️ Quantix 实盘交易已启动\n策略：%s | 余额：$%.2f",
 			e.strategy.Name(), e.broker.Cash(),
 		))
 	}
@@ -364,10 +379,10 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			e.printStatus()
 			if e.notifier != nil {
 				e.notifier.SystemAlert("INFO", fmt.Sprintf(
-					"Quantix LIVE stopped\n%s", e.Summary(),
+					"Quantix 实盘交易已停止\n%s", e.Summary(),
 				))
 			}
-			e.log.Info("live trading stopped")
+			e.log.Info("实盘交易已停止")
 			return nil
 
 		case kline, ok := <-klineCh:
@@ -380,6 +395,9 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				zap.String("symbol", kline.Symbol), zap.String("interval", kline.Interval),
 				zap.Float64("close", kline.Close), zap.Bool("closed", kline.IsClosed))
 			e.onBar(kline)
+			if e.checkRetired() {
+				return strategy.ErrRetired
+			}
 			// Go live once the pre-buffered warmup backfill is drained (channel
 			// empty after a warmup bar) or a real live bar arrives. Clearing the
 			// broker warmup here lets real-time OnTick actions (guardian
@@ -389,7 +407,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				e.engineLive = true
 				e.broker.SetWarmup(false)
 				e.stratCtx.Extra["engine_live"] = true
-				e.log.Info("engine live — warmup drained, real-time entry enabled")
+				e.log.Info("引擎已进入实时状态 — 预热完成，可实时开仓")
 			}
 
 		case tickPrice, ok := <-e.tickCh:
@@ -402,24 +420,31 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			if tr, ok := e.strategy.(strategy.TickReceiver); ok {
 				tr.OnTick(e.stratCtx, tickPrice)
 			}
+			if e.checkRetired() {
+				return strategy.ErrRetired
+			}
 
 		case params := <-e.updateCh:
 			if u, ok := e.strategy.(strategy.LiveUpdatable); ok {
 				if err := u.UpdateParams(e.stratCtx, params); err != nil {
-					e.log.Warn("live param update rejected", zap.Error(err))
+					e.log.Warn("实时参数更新被拒绝", zap.Error(err))
 				}
 			} else {
-				e.log.Warn("live param update ignored — strategy not updatable")
+				e.log.Warn("实时参数更新被忽略 — 该策略不支持热更新")
 			}
 
 		case fill := <-e.stratFillCh:
 			e.strategy.OnFill(e.stratCtx, fill)
+			if e.checkRetired() {
+				return strategy.ErrRetired
+			}
 
 		case <-statusTicker.C:
 			e.printStatus()
 			e.publishStatus()
 			e.persistEquitySnapshot()
 			e.omsInst.PruneTerminal(30 * time.Minute)
+			e.checkPositionDivergence()
 
 			// Stale bar watchdog moved to independent goroutine (lines 282-298).
 			// Independent goroutine can detect freezes even when this select loop is blocked.
@@ -447,7 +472,7 @@ func (e *Engine) closeAllPositionsOnShutdown() {
 
 	// Close LONG if exists
 	if lp := e.posSyncer.GetLong(); lp != nil && lp.Qty > 0 {
-		e.log.Warn("shutdown watchdog: closing LONG position at market",
+		e.log.Warn("关闭看门狗：以市价平多仓",
 			zap.String("symbol", symbol), zap.Float64("qty", lp.Qty),
 			zap.Float64("entry", lp.EntryPrice))
 		req := strategy.OrderRequest{
@@ -456,15 +481,15 @@ func (e *Engine) closeAllPositionsOnShutdown() {
 		}
 		if id := e.stratCtx.PlaceOrder(req); id != "" {
 			closed++
-			e.log.Info("shutdown watchdog: LONG close order placed", zap.String("id", id))
+			e.log.Info("关闭看门狗：平多单已提交", zap.String("id", id))
 		} else {
-			e.log.Error("shutdown watchdog: failed to close LONG position")
+			e.log.Error("关闭看门狗：平多仓失败")
 		}
 	}
 
 	// Close SHORT if exists
 	if sp := e.posSyncer.GetShort(); sp != nil && sp.Qty > 0 {
-		e.log.Warn("shutdown watchdog: closing SHORT position at market",
+		e.log.Warn("关闭看门狗：以市价平空仓",
 			zap.String("symbol", symbol), zap.Float64("qty", sp.Qty),
 			zap.Float64("entry", sp.EntryPrice))
 		req := strategy.OrderRequest{
@@ -473,20 +498,20 @@ func (e *Engine) closeAllPositionsOnShutdown() {
 		}
 		if id := e.stratCtx.PlaceOrder(req); id != "" {
 			closed++
-			e.log.Info("shutdown watchdog: SHORT close order placed", zap.String("id", id))
+			e.log.Info("关闭看门狗：平空单已提交", zap.String("id", id))
 		} else {
-			e.log.Error("shutdown watchdog: failed to close SHORT position")
+			e.log.Error("关闭看门狗：平空仓失败")
 		}
 	}
 
 	if closed > 0 {
 		// Give exchange time to process market orders
 		time.Sleep(3 * time.Second)
-		e.log.Warn("shutdown watchdog: closed positions before stop",
+		e.log.Warn("关闭看门狗：停止前已平掉仓位",
 			zap.Int("count", closed))
 		if e.notifier != nil {
 			e.notifier.SystemAlert("WARN", fmt.Sprintf(
-				"⚠️ Watchdog: closed %d position(s) at market on engine shutdown", closed))
+				"⚠️ 看门狗：引擎关闭时以市价平掉了 %d 个仓位", closed))
 		}
 	} else {
 		e.log.Info("shutdown watchdog: no open positions to close")
@@ -527,7 +552,7 @@ func (e *Engine) onBar(bar exchange.Kline) {
 	}
 
 	if err := e.risk.UpdateEquity(equity); err != nil {
-		e.log.Error("live trading halted by risk manager",
+		e.log.Error("风控已暂停实盘交易",
 			zap.Float64("equity", equity), zap.Error(err))
 		if e.notifier != nil {
 			var drawdown float64

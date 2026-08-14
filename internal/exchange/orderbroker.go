@@ -80,6 +80,22 @@ type OrderStatusChecker interface {
 	GetOrderStatus(ctx context.Context, symbol, orderID string) (status string, fill OrderFill, err error)
 }
 
+// PositionModeChecker reports whether the account's derivatives position mode
+// is Hedge Mode (separate LONG/SHORT sides, orders require an explicit
+// PositionSide) or One-way/net mode (a single position, PositionSide omitted).
+// This is a GLOBAL, account-level exchange setting — not selectable per engine
+// — so a strategy whose order construction assumes one mode will have every
+// order rejected if the account is actually in the other (2026-08-10
+// incident: macross's EnableShort:false path sends no PositionSide, but the
+// account was left in Hedge Mode from an earlier EnableShort:true run;
+// Binance rejected every entry for two days with no error surfaced anywhere
+// but the raw order log). Optional interface — only brokers with this
+// account-wide setting implement it (Binance USDM Futures; OKX SWAP uses a
+// different per-request posMode model handled entirely inside its own broker).
+type PositionModeChecker interface {
+	GetPositionMode(ctx context.Context) (hedgeMode bool, err error)
+}
+
 // OpenOrdersCanceller is an optional extension of OrderClient that supports
 // cancelling all open orders for a symbol in a single call.
 // Implemented by Binance USDM Futures and OKX SWAP brokers.
