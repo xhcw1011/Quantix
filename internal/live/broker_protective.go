@@ -14,6 +14,19 @@ import (
 	"github.com/Quantix/quantix/internal/strategy"
 )
 
+// closesEntirePosition reports whether a closing fill's qty covers the
+// ENTIRE remaining position (a full close) rather than only part of it (a
+// partial reduce). Only a full close should cancel protective orders —
+// cancelling on a partial reduce leaves the remainder with NO stop-loss at
+// all until it eventually closes some other way. Confirmed 2026-08-17: with
+// AsymmetricExit live-configured to reduce 50% on a confirmed adverse move,
+// this fired on every reduce, silently disabling the stop-loss for the
+// other 50% of the position.
+func closesEntirePosition(preFillQty, filledQty float64) bool {
+	const epsilon = 1e-9
+	return filledQty >= preFillQty-epsilon
+}
+
 // placeProtectiveOrders auto-places stop-loss and/or take-profit orders after an entry fill.
 // Each protective order is tracked in OMS (with Role set) so it is persisted to DB and
 // can be recovered across engine restarts via RebuildProtectiveOrders().

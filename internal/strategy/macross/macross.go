@@ -109,6 +109,15 @@ type Config struct {
 	// it's cancelled and replaced with a market order. Only used when
 	// EntryOrderType == "limit".
 	EntryTimeoutBars int
+
+	// CooldownBars blocks a new entry (hedge mode only) until this many live
+	// bars have passed since the position last fully closed. <= 0 disables it
+	// (default — unchanged behaviour). Unlike CrossBufferPct (which filters
+	// marginal/hairline crosses by signal quality), this is a blunt time-based
+	// debounce: it also blocks a clean, decisive reverse signal if it happens
+	// to land within the cooldown window. Intended as a second line of defense
+	// against rapid open/close/reopen whipsaws in chop (2026-08-17 finding).
+	CooldownBars int
 }
 
 // MACross is a dual-SMA crossover strategy with optional short-selling support.
@@ -133,9 +142,21 @@ type MACross struct {
 
 	// Warmup priming: sawWarmup records that a backfill replay happened; primed
 	// records that we've established the initial position from trend state on the
-	// first live bar afterwards (see primeDirection).
-	sawWarmup bool
-	primed    bool
+	// first live bar afterwards (see primeDirection). hadPosition latches true
+	// the first time hasLong/hasShort is observed true (restart-seeded or
+	// opened live) and never resets — it distinguishes "genuinely flat, never
+	// had a position" from "had one, our own exit logic already closed it",
+	// so priming doesn't undo an intentional close (see primeDirection).
+	sawWarmup   bool
+	primed      bool
+	hadPosition bool
+
+	// CooldownBars bookkeeping: barsSinceClose counts live bars since the
+	// position last fully closed (OnFill resets it to 0); everClosed latches
+	// true the first time that happens, so a run that has never closed a
+	// position yet is never blocked by the cooldown (see cooldownActive).
+	barsSinceClose int
+	everClosed     bool
 
 	// reconciled records that we've seeded hasLong/hasShort from the live account
 	// position once at startup. Without this, a restart resets the in-memory flags
@@ -223,6 +244,8 @@ func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	if bar.Warmup {
 		m.sawWarmup = true
+	} else if m.cfg.EnableShort {
+		m.barsSinceClose++
 	}
 	// Hedge mode: learn the real account position once, before any priming, so a
 	// restart doesn't re-open a position the account already holds.
@@ -243,7 +266,10 @@ func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	// warmup replay (hedge mode only — simple mode already re-checks Portfolio).
 	if m.cfg.EnableShort {
 		flat := !m.hasLong && !m.hasShort
-		if dir := primeDirection(m.sawWarmup, bar.Warmup, m.primed, flat, indicator.Last(fast), indicator.Last(slow)); dir != 0 {
+		if !flat {
+			m.hadPosition = true
+		}
+		if dir := primeDirection(m.sawWarmup, bar.Warmup, m.primed, flat, m.hadPosition, indicator.Last(fast), indicator.Last(slow)); dir != 0 {
 			// Only consume the prime once we actually enter. If the trend filter
 			// blocks it (choppy ER), leave primed=false so we retry on later bars
 			// and establish the position when the regime turns trending — otherwise
@@ -488,10 +514,12 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 			zap.Float64("close", bar.Close),
 		)
 		if m.hasShort && (!m.cfg.AsymmetricExit || m.profitableEnoughToClose(bar.Close)) {
-			ctx.PlaceOrder(strategy.CloseShort(bar.Symbol, 0))
+			req := strategy.CloseShort(bar.Symbol, 0)
+			req.Reason = "cross_reversal"
+			ctx.PlaceOrder(req)
 			stillShort = false
 		}
-		if !m.hasLong && !stillShort && m.trendOK() {
+		if !m.hasLong && !stillShort && m.trendOK() && !cooldownActive(m.everClosed, m.barsSinceClose, m.cfg.CooldownBars) {
 			m.openLong(ctx, bar)
 		}
 
@@ -505,10 +533,12 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 			zap.Float64("close", bar.Close),
 		)
 		if m.hasLong && (!m.cfg.AsymmetricExit || m.profitableEnoughToClose(bar.Close)) {
-			ctx.PlaceOrder(strategy.CloseLong(bar.Symbol, 0))
+			req := strategy.CloseLong(bar.Symbol, 0)
+			req.Reason = "cross_reversal"
+			ctx.PlaceOrder(req)
 			stillLong = false
 		}
-		if !m.hasShort && !stillLong && m.trendOK() {
+		if !m.hasShort && !stillLong && m.trendOK() && !cooldownActive(m.everClosed, m.barsSinceClose, m.cfg.CooldownBars) {
 			m.openShort(ctx, bar)
 		}
 	}
@@ -558,9 +588,13 @@ func (m *MACross) manageAsymmetricExit(ctx *strategy.Context, bar exchange.Kline
 		}
 		if shouldTrailClose(m.posPeakFP, fp, m.cfg.TrailActivatePct, m.cfg.TrailGivebackFrac) {
 			if m.hasLong {
-				ctx.PlaceOrder(strategy.CloseLong(bar.Symbol, 0))
+				req := strategy.CloseLong(bar.Symbol, 0)
+				req.Reason = "trail_giveback"
+				ctx.PlaceOrder(req)
 			} else if m.hasShort {
-				ctx.PlaceOrder(strategy.CloseShort(bar.Symbol, 0))
+				req := strategy.CloseShort(bar.Symbol, 0)
+				req.Reason = "trail_giveback"
+				ctx.PlaceOrder(req)
 			}
 		}
 	}
@@ -653,6 +687,8 @@ func (m *MACross) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 		if m.posQty <= positionEpsilon {
 			m.hasLong = false
 			m.posQty = 0
+			m.barsSinceClose = 0
+			m.everClosed = true
 		}
 	case fill.PositionSide == strategy.PositionSideShort && fill.Side == strategy.SideSell:
 		m.hasShort = true
@@ -664,6 +700,8 @@ func (m *MACross) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 		if m.posQty <= positionEpsilon {
 			m.hasShort = false
 			m.posQty = 0
+			m.barsSinceClose = 0
+			m.everClosed = true
 		}
 	}
 }
@@ -709,6 +747,9 @@ func init() {
 		}
 		if v, ok := params["CrossBufferPct"]; ok {
 			cfg.CrossBufferPct = toFloat(v) // opt-in; default 0 (backtest showed a buffer hurts)
+		}
+		if v, ok := params["CooldownBars"]; ok {
+			cfg.CooldownBars = toInt(v) // opt-in; default 0 (disabled, unchanged behaviour)
 		}
 		if v, ok := params["EntryOrderType"].(string); ok {
 			cfg.EntryOrderType = v

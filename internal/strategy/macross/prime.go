@@ -14,9 +14,17 @@ package macross
 //   - after a warmup actually happened (sawWarmup — so backtests / no-warmup runs
 //     are byte-for-byte unchanged),
 //   - on a live bar (not during warmup),
-//   - while flat (never stack onto an existing position).
-func primeDirection(sawWarmup, isWarmup, primed, flat bool, fast, slow float64) int {
-	if !sawWarmup || isWarmup || primed || !flat {
+//   - while flat (never stack onto an existing position),
+//   - and only if we've never actually held a position since warmup ended
+//     (hadPosition) — otherwise "flat" might mean the account genuinely never
+//     had one (missed-the-trend, prime as designed) OR it might mean a real
+//     position was seeded from the exchange at restart and our OWN exit logic
+//     (e.g. the trailing-giveback close) just closed it moments earlier. The
+//     latter is intentional profit-taking, not something to immediately undo
+//     by jumping back into the same trend (2026-08-14 incident: a giveback
+//     close was re-opened 5 minutes later by this same-direction "catch-up").
+func primeDirection(sawWarmup, isWarmup, primed, flat, hadPosition bool, fast, slow float64) int {
+	if !sawWarmup || isWarmup || primed || !flat || hadPosition {
 		return 0
 	}
 	switch {

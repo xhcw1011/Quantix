@@ -82,6 +82,58 @@ func TestLoadFromExchange_BothSourcesAgreeAbsent_ClearsPhantomPosition(t *testin
 	}
 }
 
+// TestLoadFromExchange_QtyDisagreementDoesNotCorrect reproduces the same
+// vulnerability class as the phantom-clear bug (2026-08-13), but in the
+// qty-mismatch CORRECTION branch instead of the clearing branch: a single
+// flaky GetMarginRatios read reporting a wrong size must not be enough to
+// overwrite a correct qty, when GetPositions (the same underlying exchange
+// call, independently parsed) disagrees.
+func TestLoadFromExchange_QtyDisagreementDoesNotCorrect(t *testing.T) {
+	s := &Syncer{log: zap.NewNop(), symbol: "BTCUSDT", short: shortPosition()} // local qty 0.002
+	q := &fakeFullQuerier{
+		ratios: []exchange.PositionMarginInfo{
+			{Symbol: "BTCUSDT", PositionSide: "SHORT", Size: 0.5}, // glitched: wildly wrong size
+		},
+		positions: []exchange.PositionInfo{
+			{Symbol: "BTCUSDT", PositionSide: "SHORT", Amt: -0.002, EntryPrice: 63839.7}, // agrees with local
+		},
+	}
+
+	s.loadFromExchange(context.Background(), q)
+
+	if s.short == nil {
+		t.Fatal("qty disagreement must not clear the position either")
+	}
+	if s.short.Qty != 0.002 {
+		t.Fatalf("expected qty to stay at 0.002 (GetPositions disagreed with GetMarginRatios' 0.5), got %v", s.short.Qty)
+	}
+}
+
+// TestLoadFromExchange_QtyAgreementStillCorrects confirms a genuine qty
+// change (both sources agree, e.g. after a partial fill happened while the
+// engine was down) still updates correctly — the cross-check is a guard
+// against disagreement, not a block on legitimate corrections.
+func TestLoadFromExchange_QtyAgreementStillCorrects(t *testing.T) {
+	s := &Syncer{log: zap.NewNop(), symbol: "BTCUSDT", short: shortPosition()} // local qty 0.002
+	q := &fakeFullQuerier{
+		ratios: []exchange.PositionMarginInfo{
+			{Symbol: "BTCUSDT", PositionSide: "SHORT", Size: 0.005},
+		},
+		positions: []exchange.PositionInfo{
+			{Symbol: "BTCUSDT", PositionSide: "SHORT", Amt: -0.005, EntryPrice: 63839.7}, // agrees with the new qty
+		},
+	}
+
+	s.loadFromExchange(context.Background(), q)
+
+	if s.short == nil {
+		t.Fatal("expected the position to still exist")
+	}
+	if s.short.Qty != 0.005 {
+		t.Fatalf("expected qty corrected to 0.005 (both sources agree), got %v", s.short.Qty)
+	}
+}
+
 // TestLoadFromExchange_NoPositionQuerier_FallsBackToMarginRatiosOnly confirms
 // brokers without a secondary PositionQuerier (e.g. OKX) still clear genuine
 // phantom positions using GetMarginRatios alone — the cross-check is a guard,

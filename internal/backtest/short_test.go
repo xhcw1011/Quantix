@@ -210,6 +210,29 @@ func TestShort_CoverAll_WhenQtyZero(t *testing.T) {
 	assert.InDelta(t, 100.0, p.Trades[0].GrossPnL, 1e-6)
 }
 
+// TestShort_OpenAutoSizesWhenQtyZero reproduces a 2026-08-14 finding: executeLong
+// auto-sizes a Qty:0 open using available cash, but executeShort's Qty:0 open
+// hard-errors ("short open requires explicit qty") instead of mirroring that.
+// Every strategy that opens shorts via the Qty:0 convention (e.g. macross's
+// openShort, matching its own openLong) silently never opens a real short in
+// a backtest — the order is rejected and logged as a WARN, but the JSON/CSV
+// report shows no error, just fewer (all long-only) trades, which is easy to
+// miss without specifically checking logs.
+func TestShort_OpenAutoSizesWhenQtyZero(t *testing.T) {
+	p := NewPortfolio(10_000)
+	b := NewSimBroker(0, 0, p, devLog())
+
+	b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "BTCUSDT", Side: strategy.SideSell,
+		PositionSide: strategy.PositionSideShort, Qty: 0,
+	})
+	b.Process(makeBar("BTCUSDT", 50_000, time.Now()))
+
+	pos, ok := p.shortPositions["BTCUSDT"]
+	require.True(t, ok, "auto-sized short open must actually open a position, not get silently rejected")
+	assert.InDelta(t, 10_000*0.99/50_000, pos.Qty(), 1e-9)
+}
+
 func TestShort_CoverWithNoPosition_Rejected(t *testing.T) {
 	// Buying to cover with no SHORT position should be rejected, not silently
 	// create a spurious LONG (the old behavior routed it into the LONG path).

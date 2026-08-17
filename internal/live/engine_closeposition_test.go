@@ -4,64 +4,83 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/exchange"
-	"github.com/Quantix/quantix/internal/oms"
 )
 
-// closePosMock is a mockOrderClient that also answers position queries
-// (PositionQuerier) and records which exchange order IDs were cancelled — enough
-// to verify Engine.ClosePosition cancels the position's paired protective stop.
-type closePosMock struct {
-	*mockOrderClient
-	positions    []exchange.PositionInfo
-	cancelledIDs []string
-}
+// TestClosePosition_PersistsOrderRecord reproduces a 2026-08-17 real-money
+// incident: closing a position via the web UI's "平仓" button places the
+// market order directly on the exchange client (Engine.ClosePosition),
+// bypassing the OMS entirely — so unlike every other order path, it never
+// generates an oms.OrderEvent, and persistOrderEvent (which only fires from
+// that event stream) never runs. The trade genuinely executed on the
+// exchange (confirmed independently) but left no row in the `orders` table
+// at all, on top of the separately-fixed missing `fills` row.
+func TestClosePosition_PersistsOrderRecord(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const userID = 90040
+	const credentialID = 90040
+	const strategyID = "test-close-position-persist"
 
-func (c *closePosMock) GetPositions(context.Context) ([]exchange.PositionInfo, error) {
-	return c.positions, nil
-}
-
-func (c *closePosMock) CancelOrder(_ context.Context, _, id string) error {
-	c.mu.Lock()
-	c.cancelledIDs = append(c.cancelledIDs, id)
-	c.mu.Unlock()
-	return c.cancelErr
-}
-
-// The web "close position" button routes through Engine.ClosePosition, which fires
-// a market close directly at the exchange client — bypassing the broker's normal
-// closing-fill flow where cancelProtectiveOrders runs. Without an explicit cancel
-// here, the resting stop-loss is orphaned on the exchange after the position closes.
-func TestEngineClosePositionCancelsProtectiveStop(t *testing.T) {
-	log := zap.NewNop()
-	mock := &closePosMock{
-		mockOrderClient: &mockOrderClient{
-			marketFill: exchange.OrderFill{ExchangeID: "close-1", FilledQty: 0.043, AvgPrice: 64000, Status: "filled"},
-		},
-		positions: []exchange.PositionInfo{
-			{Symbol: "BTCUSDT", PositionSide: "LONG", Amt: 0.043, EntryPrice: 64884},
-		},
+	rawPool, err := pgxpool.New(ctx, testDSN)
+	if err != nil {
+		t.Fatalf("raw pool for cleanup: %v", err)
 	}
-	o := oms.New(oms.ModeLive, log)
-	pm := oms.NewPositionManager()
-	b := New(mock, o, pm, nil, log)
-	b.SetEngineCtx(context.Background())
+	if _, err := rawPool.Exec(ctx,
+		`INSERT INTO users (id, username, email, password_hash) VALUES ($1, $2, $3, 'x')
+		 ON CONFLICT (id) DO NOTHING`,
+		userID, "test-close-position", "test-close-position@example.invalid"); err != nil {
+		t.Fatalf("insert throwaway test user: %v", err)
+	}
+	if _, err := rawPool.Exec(ctx,
+		`INSERT INTO exchange_credentials (id, user_id, exchange, label, api_key, api_secret)
+		 VALUES ($1, $2, 'binance', 'test-close-position', 'x', 'x')
+		 ON CONFLICT (id) DO NOTHING`,
+		credentialID, userID); err != nil {
+		t.Fatalf("insert throwaway test credential: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = rawPool.Exec(ctx, "DELETE FROM orders WHERE strategy_id = $1", strategyID)
+		_, _ = rawPool.Exec(ctx, "DELETE FROM users WHERE id = $1", userID)
+		rawPool.Close()
+	})
 
-	// A protective stop is resting for the LONG (as placeProtectiveOrders tracks it).
-	b.protMu.Lock()
-	b.protectiveOrders[brokerPosKey("BTCUSDT", "LONG")] = protectiveIDs{stopID: "stop-abc"}
-	b.protMu.Unlock()
+	mock := &mockOrderClient{
+		positions: []exchange.PositionInfo{
+			{Symbol: "BTCUSDT", PositionSide: "SHORT", Amt: -0.01, EntryPrice: 62792.5},
+		},
+		marketFill: exchange.OrderFill{ExchangeID: "1105049620912", FilledQty: 0.01, AvgPrice: 63434.8, Fee: 0.5, Status: "filled"},
+	}
+	broker, _ := newTestLiveBroker(mock)
+	e := &Engine{
+		cfg:    EngineConfig{UserID: userID, CredentialID: credentialID, StrategyID: strategyID, Store: store},
+		broker: broker,
+		log:    zap.NewNop(),
+	}
 
-	e := &Engine{broker: b, log: log}
-	_, _, err := e.ClosePosition(context.Background(), "BTCUSDT", "LONG")
-	require.NoError(t, err)
+	if _, _, err := e.ClosePosition(ctx, "BTCUSDT", "SHORT"); err != nil {
+		t.Fatalf("ClosePosition: %v", err)
+	}
 
-	mock.mu.Lock()
-	defer mock.mu.Unlock()
-	assert.Contains(t, mock.cancelledIDs, "stop-abc",
-		"web close-position must cancel the position's paired stop-loss (else it orphans on the exchange)")
+	orders, err := store.GetOrders(ctx, userID, 10, 0, data.RecordFilter{StrategyID: strategyID})
+	if err != nil {
+		t.Fatalf("GetOrders: %v", err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected exactly 1 persisted order for the manual close, got %d", len(orders))
+	}
+	got := orders[0]
+	if got.Status != "FILLED" {
+		t.Errorf("status = %q, want FILLED", got.Status)
+	}
+	if got.FilledQuantity != 0.01 || got.AvgFillPrice != 63434.8 {
+		t.Errorf("filled_quantity/avg_fill_price = %v/%v, want 0.01/63434.8", got.FilledQuantity, got.AvgFillPrice)
+	}
+	if got.ExchangeID != "1105049620912" {
+		t.Errorf("exchange_id = %q, want 1105049620912", got.ExchangeID)
+	}
 }

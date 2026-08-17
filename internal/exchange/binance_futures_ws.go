@@ -41,6 +41,29 @@ func NewBinanceFuturesWSClient(cfg config.BinanceConfig, wsCfg config.WSConfig, 
 	}
 }
 
+// minDemoStaleTimeout is the floor applied to the stale-data watchdog for
+// demo/testnet connections. Binance's testnet environment has far sparser
+// trading activity than production, so its kline/ticker WS streams can
+// legitimately go several minutes with zero pushes — even non-final,
+// intermediate ticks — on a perfectly healthy connection (confirmed via an
+// isolated diagnostic: 0 messages in a clean 3-minute window against
+// testnet, vs 337 against production in the same window). Applying
+// production's tight default there tears down a healthy-but-quiet
+// connection before it ever gets a chance, and since every reconnect is
+// just as quiet as the one it replaced, it never escapes the resulting
+// endless reconnect loop (2026-08-17 finding).
+const minDemoStaleTimeout = 5 * time.Minute
+
+// effectiveStaleTimeout returns the stale-data timeout to actually use for a
+// connection: base unchanged for production, widened to at least
+// minDemoStaleTimeout for demo/testnet. Pure, for testability.
+func effectiveStaleTimeout(base time.Duration, demo, testnet bool) time.Duration {
+	if (demo || testnet) && base < minDemoStaleTimeout {
+		return minDemoStaleTimeout
+	}
+	return base
+}
+
 // SubscribeKlines opens a combined kline stream for Futures symbols/intervals.
 func (w *BinanceFuturesWSClient) SubscribeKlines(ctx context.Context, symbols []string, intervals []string, handler KlineHandler) {
 	for {
@@ -185,6 +208,7 @@ func (w *BinanceFuturesWSClient) openKlineStreams(ctx context.Context, symbols, 
 	}
 
 	// Stale data watchdog: if no data received for staleTimeout, force reconnect.
+	staleTimeout := effectiveStaleTimeout(w.staleTimeout, w.demo, w.testnet)
 	go func() {
 		ticker := time.NewTicker(w.staleCheck)
 		defer ticker.Stop()
@@ -192,7 +216,7 @@ func (w *BinanceFuturesWSClient) openKlineStreams(ctx context.Context, symbols, 
 			select {
 			case <-ticker.C:
 				last := time.Unix(0, lastDataTime.Load())
-				if time.Since(last) > w.staleTimeout {
+				if time.Since(last) > staleTimeout {
 					teardown(fmt.Sprintf("no kline data for %s", time.Since(last).Round(time.Second)))
 					return
 				}
@@ -270,6 +294,7 @@ func (w *BinanceFuturesWSClient) openTickerStreams(ctx context.Context, symbols 
 	}
 
 	// Stale data watchdog.
+	staleTimeout := effectiveStaleTimeout(w.staleTimeout, w.demo, w.testnet)
 	go func() {
 		ticker := time.NewTicker(w.staleCheck)
 		defer ticker.Stop()
@@ -277,7 +302,7 @@ func (w *BinanceFuturesWSClient) openTickerStreams(ctx context.Context, symbols 
 			select {
 			case <-ticker.C:
 				last := time.Unix(0, lastDataTime.Load())
-				if time.Since(last) > w.staleTimeout {
+				if time.Since(last) > staleTimeout {
 					teardown(fmt.Sprintf("no ticker data for %s", time.Since(last).Round(time.Second)))
 					return
 				}

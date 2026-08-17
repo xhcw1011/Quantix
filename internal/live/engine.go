@@ -342,8 +342,10 @@ func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, f
 	}
 
 	closeSide := exchange.OrderSideBuy
+	stratSide := strategy.SideBuy
 	if side == "LONG" {
 		closeSide = exchange.OrderSideSell
+		stratSide = strategy.SideSell
 	}
 	closeQty := math.Abs(amt)
 	clientOrderID := fmt.Sprintf("api-close-%d", time.Now().UnixNano())
@@ -368,6 +370,29 @@ func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, f
 		protPosSide = ""
 	}
 	e.broker.cancelProtectiveOrders(ctx, symbol, protPosSide)
+
+	// This whole close path bypasses the OMS (PlaceMarketOrder is called
+	// directly on the exchange client above), so it never produces an
+	// oms.OrderEvent — persistOrderEvent, which only fires from that event
+	// stream, never runs for it either. Without this, a web "平仓" leaves no
+	// row in the orders table at all, even though the trade genuinely
+	// executed (2026-08-17 finding — cash/equity/the fills row are separately
+	// covered by the unmatched-fill detector once the exchange reports this
+	// same fill back over the user-data-stream).
+	e.persistOrderEvent(oms.OrderEvent{Order: oms.Order{
+		ClientOrderID: clientOrderID,
+		ExchangeID:    fill.ExchangeID,
+		Symbol:        symbol,
+		Side:          stratSide,
+		PositionSide:  strategy.PositionSide(protPosSide),
+		Type:          strategy.OrderMarket,
+		Status:        oms.StatusFilled,
+		Qty:           closeQty,
+		FilledQty:     closeQty,
+		AvgFillPrice:  fill.AvgPrice,
+		Commission:    fill.Fee,
+		CreatedAt:     time.Now(),
+	}})
 
 	return closeQty, fill.AvgPrice, nil
 }

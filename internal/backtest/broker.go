@@ -262,8 +262,16 @@ func (b *SimBroker) executeShort(req strategy.OrderRequest, bar exchange.Kline) 
 	switch req.Side {
 	case strategy.SideSell:
 		// Open / add to SHORT. Margin assumed sufficient (no cash check).
+		// Qty:0 auto-sizes against available cash, mirroring executeLong's Qty:0
+		// handling — strategies that open shorts via Qty:0 (e.g. macross's
+		// openShort, matching its own openLong) must actually open a position in
+		// a backtest instead of getting silently rejected (2026-08-14 finding).
 		if qty <= 0 {
-			return strategy.Fill{}, fmt.Errorf("short open requires explicit qty")
+			available := b.portfolio.cash * 0.99
+			if available <= 0 {
+				return strategy.Fill{}, fmt.Errorf("insufficient cash: %.4f", b.portfolio.cash)
+			}
+			qty = available / execPrice
 		}
 		fee := qty * execPrice * b.FeeRate
 		b.nextID++

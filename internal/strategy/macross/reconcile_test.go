@@ -153,6 +153,53 @@ func TestMACross_ReconcileRestoresEntryForAsymmetricExit(t *testing.T) {
 	}
 }
 
+// TestMACross_DoesNotRePrimeAfterOwnExitClosesRestartSeededPosition reproduces
+// the 2026-08-14 incident: a SHORT position seeded from the syncer at restart
+// closed via the trailing-giveback mechanism minutes into live trading, and
+// the post-warmup priming logic — seeing the account flat again with the
+// trend still favoring short — immediately re-opened a new short, undoing the
+// giveback's intentional profit-take.
+func TestMACross_DoesNotRePrimeAfterOwnExitClosesRestartSeededPosition(t *testing.T) {
+	log := zap.NewNop()
+	m := New(Config{
+		Symbol: "BTCUSDT", FastPeriod: 10, SlowPeriod: 30,
+		EnableShort: true, TrendFilterMin: 0,
+	})
+	broker := &captureBroker{}
+	ctx := strategy.NewContext(flatPV{}, broker, log)
+	ctx.Extra["position_syncer"] = fakeSyncer{short: true, shortEntry: 100, shortQty: 2}
+
+	bars := downtrendBars("BTCUSDT", 42)
+	for i := 0; i < 40; i++ {
+		bars[i].Warmup = true
+		m.OnBar(ctx, bars[i])
+	}
+	// First live bar: still short (as seeded from the syncer) — hadPosition
+	// must latch true, and (matching TestMACross_HedgeSkipsPrimingWhenSyncerHasPosition)
+	// no order fires since we're not flat.
+	bars[40].Warmup = false
+	m.OnBar(ctx, bars[40])
+	if !m.hadPosition {
+		t.Fatalf("hadPosition should have latched true once the restart-seeded SHORT was observed")
+	}
+	if len(broker.reqs) != 0 {
+		t.Fatalf("expected no order on the bar that merely observes the seeded position, got %+v", broker.reqs)
+	}
+
+	// Simulate the trailing-giveback mechanism (covered separately by exit.go's
+	// own unit tests) having just closed the position — the account is flat.
+	m.hasShort = false
+	broker.reqs = nil
+
+	// Next live bar: trend still favors short (monotonic downtrend) — priming
+	// must NOT re-open, since hadPosition is now true.
+	bars[41].Warmup = false
+	m.OnBar(ctx, bars[41])
+	if len(broker.reqs) != 0 {
+		t.Fatalf("expected NO re-entry after our own exit closed a restart-seeded position, got %d orders: %+v", len(broker.reqs), broker.reqs)
+	}
+}
+
 // TestMACross_HedgePrimesWhenGenuinelyFlat guards the intended behaviour: with no
 // existing position (no syncer / empty syncer), priming still establishes the
 // trend position after warmup (the original 补建仓 fix must be preserved).

@@ -51,6 +51,16 @@ type mockOrderClient struct {
 	balanceErr error
 
 	leverageErr error
+
+	positions    []exchange.PositionInfo
+	positionsErr error
+}
+
+// GetPositions implements exchange.PositionQuerier (used by Engine.ClosePosition).
+func (m *mockOrderClient) GetPositions(_ context.Context) ([]exchange.PositionInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.positions, m.positionsErr
 }
 
 type mockStatusClient struct {

@@ -9,8 +9,47 @@ import (
 	"github.com/Quantix/quantix/internal/bus"
 	"github.com/Quantix/quantix/internal/data"
 	"github.com/Quantix/quantix/internal/exchange"
+	"github.com/Quantix/quantix/internal/oms"
+	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/strategy"
 )
+
+// syncFillToPositionSyncer mirrors a fill WE OURSELVES just placed and had
+// confirmed into the position syncer, synchronously. The syncer otherwise
+// only updates via a separate, async exchange account-update WS message —
+// fine for detecting a desync we didn't cause, but too slow for a same-bar
+// flip (close one side, immediately open the other): the exposure guard
+// reads gross exposure from the syncer, and without this it can still see
+// the just-closed leg's stale qty when the opening leg's check runs a moment
+// later, incorrectly blocking a legitimate flip (2026-08-17 finding). Uses
+// the OMS's own post-ApplyFill belief (already authoritative for a fill we
+// directly confirmed) rather than recomputing qty by hand here.
+func (e *Engine) syncFillToPositionSyncer(ctx context.Context, fill strategy.Fill) {
+	if e.posSyncer == nil {
+		return
+	}
+	side := string(fill.PositionSide)
+	if side != "LONG" && side != "SHORT" {
+		return
+	}
+	var pos oms.LivePosition
+	var ok bool
+	if side == "LONG" {
+		pos, ok = e.positions.LongPosition(fill.Symbol)
+	} else {
+		pos, ok = e.positions.ShortPosition(fill.Symbol)
+	}
+	if !ok || pos.Qty <= 0 {
+		e.posSyncer.RemovePosition(ctx, side)
+		return
+	}
+	e.posSyncer.UpdatePosition(ctx, &position.StrategyPosition{
+		ExchangePosition: position.ExchangePosition{
+			Symbol: fill.Symbol, Side: side, Qty: pos.Qty, EntryPrice: pos.AvgEntryPrice,
+		},
+		Filled: true,
+	})
+}
 
 func (e *Engine) processFills(ctx context.Context) {
 	defer func() {
@@ -28,6 +67,7 @@ func (e *Engine) processFills(ctx context.Context) {
 			}
 			fillTime := time.Now()
 			realized := e.positions.ApplyFill(event.Fill)
+			e.syncFillToPositionSyncer(ctx, event.Fill)
 
 			e.fillMu.Lock()
 			e.realizedPnL += realized
@@ -207,7 +247,7 @@ func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
 	if sym == "" {
 		sym = "ETHUSDT"
 	} // fallback
-	realized := e.positions.ApplyFill(strategy.Fill{
+	stratFill := strategy.Fill{
 		Symbol:       sym,
 		Side:         strategy.Side(fill.Side),
 		PositionSide: strategy.PositionSide(fill.PositionSide),
@@ -215,7 +255,9 @@ func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
 		Price:        fill.AvgPrice,
 		Fee:          fill.Fee,
 		Timestamp:    time.Now(),
-	})
+	}
+	realized := e.positions.ApplyFill(stratFill)
+	e.syncFillToPositionSyncer(context.Background(), stratFill)
 
 	e.fillMu.Lock()
 	e.realizedPnL += realized
@@ -264,6 +306,54 @@ func (e *Engine) applyUnmatchedFillCash(fill exchange.OrderFill) {
 		zap.Float64("cash", e.broker.Cash()),
 		zap.Float64("equity", equity),
 	)
+
+	// Persist to DB exactly like processFills does for our own fills —
+	// without this, an unmatched fill (exchange-native SL/TP, or a manual
+	// close via the web UI's "平仓" button, which places its order directly
+	// on the exchange client and so is never tracked as an "order" either —
+	// see Engine.ClosePosition) is fully accounted for in cash/equity but
+	// invisible in the order/fill history, even though real money moved
+	// (2026-08-17 finding: a real $6.74 realized loss from a manual close
+	// left no trace anywhere in the UI).
+	if e.cfg.Store != nil {
+		dbFill := &data.Fill{
+			UserID:          e.cfg.UserID,
+			StrategyID:      e.cfg.StrategyID,
+			Symbol:          sym,
+			Side:            fill.Side,
+			PositionSide:    fill.PositionSide,
+			Qty:             fill.FilledQty,
+			Price:           fill.AvgPrice,
+			Fee:             fill.Fee,
+			RealizedPnL:     realized,
+			ExchangeOrderID: fill.ExchangeID,
+			Mode:            "live",
+			FilledAt:        stratFill.Timestamp,
+		}
+		e.dbWg.Add(1)
+		go func() {
+			defer e.dbWg.Done()
+			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := e.cfg.Store.InsertFill(dbCtx, dbFill); err != nil {
+				e.log.Error("persist unmatched fill failed", zap.Error(err))
+			}
+		}()
+	}
+
+	// Route to strategy.OnFill exactly like processFills does for our own
+	// fills — without this, an exchange-native stop-loss/take-profit trigger
+	// (the primary case here) never updates the strategy's own hasLong/
+	// hasShort belief. It stays permanently stuck thinking the position is
+	// still open (reconcilePosition only runs once, at startup), which can
+	// silently block all future entries on that side until the process
+	// restarts (2026-08-17 finding — the hard StopLossPct backstop firing was
+	// capable of freezing the strategy that depends on it).
+	select {
+	case e.stratFillCh <- stratFill:
+	default:
+		e.log.Warn("strategy fill channel full — unmatched-fill OnFill delayed")
+	}
 
 	if e.notifier != nil {
 		isClose := isClosingLong || isClosingShort

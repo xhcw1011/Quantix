@@ -120,7 +120,12 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 	// GetMarginRatios carries size but not entry price. Fetch entry prices via the
 	// position query so a recovered (untracked) position gets a real cost basis —
 	// otherwise a strategy adopting it (e.g. guardian) can't compute the stop.
+	// qtyBySide additionally lets the qty-mismatch correction below cross-check
+	// against this independent read before trusting a lone GetMarginRatios value
+	// (same rationale as the phantom-clear cross-check further down: a single
+	// flaky read must not be enough to overwrite good data — 2026-08-17 finding).
 	entryBySide := map[string]float64{}
+	qtyBySide := map[string]float64{}
 	positionsQueryOK := false
 	if pq, ok := querier.(exchange.PositionQuerier); ok {
 		if positions, perr := pq.GetPositions(ctx); perr == nil {
@@ -138,6 +143,7 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 					}
 				}
 				entryBySide[side] = p.EntryPrice
+				qtyBySide[side] = math.Abs(p.Amt)
 			}
 		} else {
 			s.log.Warn("syncer: entry-price query failed (recovered positions may lack cost basis)", zap.Error(perr))
@@ -166,17 +172,25 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 			exchangeShort = true
 		}
 
-		// Check if we already have this position tracked
-		s.mu.RLock()
+		// Check if we already have this position tracked. current, when non-nil,
+		// is the SAME pointer as s.long/s.short (not a copy) — every read or
+		// mutation of its fields below must stay inside the lock. A prior
+		// version released the lock right after this pointer read and mutated
+		// current.Filled/EntryPrice/Qty completely unprotected, racing against
+		// GetLong()/GetShort() (called concurrently from the exposure guard on
+		// every PlaceOrder, and from syncFillToPositionSyncer) copying *current
+		// under RLock elsewhere — a classic torn-read data race (2026-08-17
+		// finding).
+		s.mu.Lock()
 		var current *StrategyPosition
 		if side == "LONG" {
 			current = s.long
 		} else {
 			current = s.short
 		}
-		s.mu.RUnlock()
 
 		if current == nil {
+			s.mu.Unlock()
 			// Exchange has position but we don't → untracked (likely from before restart)
 			if s.IgnoreUntracked {
 				s.log.Info("syncer: ignoring untracked position (manual trading mode)",
@@ -202,7 +216,11 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 			s.log.Info("syncer: recovered untracked position from exchange",
 				zap.String("side", side), zap.Float64("qty", math.Abs(r.Size)))
 		} else {
-			// Exchange confirms this position exists — ensure filled=true
+			// Exchange confirms this position exists — ensure filled=true. All
+			// mutation of current's fields happens here, still under the lock
+			// taken above; everything needed for logging/Redis (I/O) is
+			// captured into local values first, then the lock is released
+			// before that I/O runs.
 			needsUpdate := false
 			if !current.Filled {
 				current.Filled = true
@@ -214,16 +232,49 @@ func (s *Syncer) loadFromExchange(ctx context.Context, querier exchange.MarginQu
 				current.EntryPrice = entryBySide[side]
 				needsUpdate = true
 			}
+			oldQty := current.Qty
+			mismatched := false
+			disagreement := false
+			var otherQty float64
 			if math.Abs(current.Qty-math.Abs(r.Size)) > 0.0001 {
+				// A single flaky GetMarginRatios read must not be enough to
+				// overwrite a good qty (same rationale as the phantom-clear
+				// cross-check below). If GetPositions ran and reports a
+				// DIFFERENT qty for this side than GetMarginRatios, the two
+				// reads disagree — treat as inconclusive and skip the
+				// correction this round rather than trust either blindly.
+				var sawInPositions bool
+				otherQty, sawInPositions = qtyBySide[side]
+				disagreement = positionsQueryOK && sawInPositions && math.Abs(otherQty-math.Abs(r.Size)) > 0.0001
+				if disagreement {
+					mismatched = false
+				} else {
+					mismatched = true
+					current.Qty = math.Abs(r.Size)
+					needsUpdate = true
+				}
+			}
+			var toPersist *StrategyPosition
+			if needsUpdate {
+				cp := *current
+				toPersist = &cp
+			}
+			s.mu.Unlock()
+
+			if disagreement {
+				s.log.Warn("syncer: GetMarginRatios and GetPositions disagree on qty — treating as inconclusive, not correcting",
+					zap.String("side", side),
+					zap.Float64("local", oldQty),
+					zap.Float64("margin_ratios_qty", math.Abs(r.Size)),
+					zap.Float64("positions_qty", otherQty))
+			} else if mismatched {
 				s.log.Warn("syncer: qty mismatch with exchange",
 					zap.String("side", side),
-					zap.Float64("local", current.Qty),
+					zap.Float64("local", oldQty),
 					zap.Float64("exchange", math.Abs(r.Size)))
-				current.Qty = math.Abs(r.Size)
-				needsUpdate = true
 			}
-			if needsUpdate {
-				s.writeToRedis(ctx, current)
+			if toPersist != nil {
+				s.writeToRedis(ctx, toPersist)
 			}
 		}
 	}

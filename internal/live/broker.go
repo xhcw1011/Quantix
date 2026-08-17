@@ -360,6 +360,11 @@ func (b *Broker) placeMarketOrder(ctx context.Context, ordID string, req strateg
 
 // applyMarketFill processes a market order fill (called synchronously or from async poller).
 func (b *Broker) applyMarketFill(ordID string, req strategy.OrderRequest, posSide string, fill exchange.OrderFill) {
+	// Captured before b.omsInst.Fill below — that call's ApplyFill happens
+	// asynchronously later (via the engine's fill-processing loop), so
+	// b.positions still reflects the position as it was BEFORE this fill.
+	preFillQty := b.currentPositionQty(req.Symbol, posSide)
+
 	stratFill := strategy.Fill{
 		ID:           ordID + "-live",
 		Symbol:       req.Symbol,
@@ -377,11 +382,39 @@ func (b *Broker) applyMarketFill(ordID string, req strategy.OrderRequest, posSid
 		defer cancel()
 		b.placeProtectiveOrders(ctx, req, "", fill.FilledQty)
 	}
-	if b.isClosingFill(req) {
+	// Only cancel protective orders on a FULL close — a partial reduce (e.g.
+	// macross's AsymmetricExit confirmed-loss reduce) must leave the
+	// remaining position's stop-loss/take-profit in place (2026-08-17
+	// finding: cancelling here on every reduce left the remainder with zero
+	// exchange-side protection until the position eventually closed some
+	// other way). Hedge-mode protective orders are position-side-scoped on
+	// the exchange, so leaving one in place after a partial reduce is safe —
+	// it can never close more than what's actually still open.
+	if b.isClosingFill(req) && closesEntirePosition(preFillQty, fill.FilledQty) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		b.cancelProtectiveOrders(ctx, req.Symbol, posSide)
 	}
+}
+
+// currentPositionQty returns the qty currently believed open for the given
+// symbol/positionSide ("" for one-way/net mode), or 0 if none is tracked.
+func (b *Broker) currentPositionQty(symbol, posSide string) float64 {
+	switch posSide {
+	case string(strategy.PositionSideLong):
+		if p, ok := b.positions.LongPosition(symbol); ok {
+			return p.Qty
+		}
+	case string(strategy.PositionSideShort):
+		if p, ok := b.positions.ShortPosition(symbol); ok {
+			return p.Qty
+		}
+	default:
+		if p, ok := b.positions.Position(symbol); ok {
+			return p.Qty
+		}
+	}
+	return 0
 }
 
 // pollMarketOrderFill polls for market order fill in background goroutine.
