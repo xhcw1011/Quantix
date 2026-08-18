@@ -491,7 +491,21 @@ func (m *MACross) onBarSimple(ctx *strategy.Context, bar exchange.Kline, fast, s
 
 // onBarHedge handles the hedge mode (simultaneous LONG/SHORT for futures/swap).
 func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, slow []float64) {
-	if m.cfg.AsymmetricExit && (m.hasLong || m.hasShort) {
+	// !bar.Warmup matters: a restart's warmup replay walks through historical
+	// bars that have nothing to do with a restart-seeded leg's real holding
+	// period (reconcilePosition seeds hasLong/posEntry from the real account
+	// on the FIRST bar processed, which during a restart is deep in warmup).
+	// manageAsymmetricExit's posPeakFP is a ratchet that never decreases
+	// within a leg's life — a single warmup bar with a price far from the
+	// real entry (pure backfill coincidence, unrelated to this leg) can
+	// permanently inflate it, making the first LIVE bar look like a huge
+	// giveback from a peak the position never actually reached and firing a
+	// bogus trail-close (2026-08-18 incident: a real LONG closed for a net
+	// loss after fees this way, floating profit never exceeding 0.185% the
+	// entire real hold vs a warmup-polluted "peak" past TrailActivatePct).
+	// primeDirection already follows this convention (takes isWarmup
+	// explicitly); this brings manageAsymmetricExit in line with it.
+	if m.cfg.AsymmetricExit && !bar.Warmup && (m.hasLong || m.hasShort) {
 		m.manageAsymmetricExit(ctx, bar)
 	}
 
