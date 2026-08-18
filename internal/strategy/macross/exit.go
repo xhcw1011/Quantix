@@ -46,3 +46,15 @@ func shouldScaleOut(fired bool, floatingPnLPct, triggerPct float64) bool {
 	}
 	return floatingPnLPct >= triggerPct
 }
+
+// shouldBreakEvenClose reports whether the optional breakeven stop should
+// fire: the leg must already be armed (see Config.BreakEvenTriggerPct — the
+// arming decision itself lives in manageBreakEven, not here, since it's a
+// ratchet rather than a plain threshold comparison), and current floating
+// profit must have fallen to bufferPct or below.
+func shouldBreakEvenClose(armed bool, floatingPnLPct, bufferPct float64) bool {
+	if !armed {
+		return false
+	}
+	return floatingPnLPct <= bufferPct
+}

@@ -137,6 +137,25 @@ type Config struct {
 	ScaleOut1Frac       float64
 	ScaleOut2TriggerPct float64
 	ScaleOut2Frac       float64
+
+	// BreakEvenTriggerPct/BreakEvenBufferPct: optional breakeven stop
+	// (保本止损), INDEPENDENT of AsymmetricExit — runs even when
+	// AsymmetricExit=false, same status as ScaleOut above. Once a leg's
+	// floating profit first reaches BreakEvenTriggerPct, the leg is armed;
+	// from then on, if floating profit falls to BreakEvenBufferPct or below,
+	// the ENTIRE remaining position closes immediately. Targets a pattern
+	// seen 2026-08-18: on the best base config tested, cross_reversal exits
+	// averaged only +0.16% even though avg WIN was +1.87% — real, substantial
+	// upside was reached and then given back entirely before any exit fired.
+	// This is a floor, not a profit cap: an armed leg that stays comfortably
+	// above the buffer is never touched. BreakEvenBufferPct=0 means "closes
+	// at exactly the entry price" (before fees, so still a small net loss
+	// after round-trip costs) — set it to something like MinProfitToClosePct
+	// (~0.001, clearing the ~0.08% round-trip fee) for a true no-loss floor.
+	// BreakEvenTriggerPct <= 0 disables the mechanism entirely (default —
+	// zero behavior change for any existing config).
+	BreakEvenTriggerPct float64
+	BreakEvenBufferPct  float64
 }
 
 // MACross is a dual-SMA crossover strategy with optional short-selling support.
@@ -164,6 +183,14 @@ type MACross struct {
 	// fresh open, same as posReduced/posLossStreak/posPeakFP.
 	scaleOut1Fired bool
 	scaleOut2Fired bool
+
+	// breakEvenArmed: per-leg, one-shot latch for the optional breakeven stop
+	// (see Config.BreakEvenTriggerPct). Once floating profit first reaches
+	// the trigger, stays true for the rest of the leg's life — it does not
+	// un-arm if profit temporarily dips back below the trigger without
+	// hitting the buffer. Reset on every fresh open, same as
+	// posReduced/scaleOut1Fired/etc.
+	breakEvenArmed bool
 
 	// Warmup priming: sawWarmup records that a backfill replay happened; primed
 	// records that we've established the initial position from trend state on the
@@ -540,6 +567,13 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 	if !bar.Warmup && (m.hasLong || m.hasShort) {
 		m.manageScaleOut(ctx, bar)
 	}
+	// Breakeven stop runs independently of AsymmetricExit too (see
+	// Config.BreakEvenTriggerPct) — same !bar.Warmup reasoning: a
+	// warmup-replayed bar has nothing to do with a restart-seeded leg's real
+	// holding period and must not be able to arm or fire this mechanism.
+	if !bar.Warmup && (m.hasLong || m.hasShort) {
+		m.manageBreakEven(ctx, bar)
+	}
 
 	// Track, for THIS bar's cross decision, whether a close order was just
 	// queued above/below — fills are applied asynchronously (OnFill runs after
@@ -686,6 +720,28 @@ func (m *MACross) manageScaleOut(ctx *strategy.Context, bar exchange.Kline) {
 	}
 }
 
+// manageBreakEven runs the optional breakeven stop for the currently open leg
+// (see Config.BreakEvenTriggerPct) — independent of AsymmetricExit, so it
+// applies even to a plain flip-on-cross config. Once armed, fires at most
+// once per leg: a full close, not a partial reduce.
+func (m *MACross) manageBreakEven(ctx *strategy.Context, bar exchange.Kline) {
+	fp := m.floatingPnLPct(bar.Close)
+	if !m.breakEvenArmed && m.cfg.BreakEvenTriggerPct > 0 && fp >= m.cfg.BreakEvenTriggerPct {
+		m.breakEvenArmed = true
+	}
+	if shouldBreakEvenClose(m.breakEvenArmed, fp, m.cfg.BreakEvenBufferPct) {
+		if m.hasLong {
+			req := strategy.CloseLong(bar.Symbol, 0)
+			req.Reason = "breakeven_stop"
+			ctx.PlaceOrder(req)
+		} else if m.hasShort {
+			req := strategy.CloseShort(bar.Symbol, 0)
+			req.Reason = "breakeven_stop"
+			ctx.PlaceOrder(req)
+		}
+	}
+}
+
 // openLong places a hedge-mode long entry with optional stop-loss / take-profit.
 func (m *MACross) openLong(ctx *strategy.Context, bar exchange.Kline) {
 	req := strategy.OpenLong(bar.Symbol, 0)
@@ -721,6 +777,7 @@ func (m *MACross) resetPosState() {
 	m.posPeakFP = 0
 	m.scaleOut1Fired = false
 	m.scaleOut2Fired = false
+	m.breakEvenArmed = false
 }
 
 // OnFill implements strategy.Strategy.
@@ -877,6 +934,12 @@ func init() {
 		}
 		if v, ok := params["ScaleOut2Frac"]; ok {
 			cfg.ScaleOut2Frac = toFloat(v)
+		}
+		if v, ok := params["BreakEvenTriggerPct"]; ok {
+			cfg.BreakEvenTriggerPct = toFloat(v)
+		} // default 0 == disabled, independent of AsymmetricExit
+		if v, ok := params["BreakEvenBufferPct"]; ok {
+			cfg.BreakEvenBufferPct = toFloat(v)
 		}
 		if cfg.FastPeriod == 0 {
 			cfg.FastPeriod = 10
