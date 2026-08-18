@@ -35,3 +35,14 @@ func shouldTrailClose(peakPct, currentPct, activatePct, givebackFrac float64) bo
 	}
 	return currentPct <= peakPct*(1-givebackFrac)
 }
+
+// shouldScaleOut reports whether a laddered profit-taking level should fire:
+// it hasn't already fired for this leg, and floating profit has reached
+// triggerPct. triggerPct <= 0 disables the level unconditionally (default —
+// see Config.ScaleOut1TriggerPct).
+func shouldScaleOut(fired bool, floatingPnLPct, triggerPct float64) bool {
+	if triggerPct <= 0 || fired {
+		return false
+	}
+	return floatingPnLPct >= triggerPct
+}

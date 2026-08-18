@@ -118,6 +118,25 @@ type Config struct {
 	// to land within the cooldown window. Intended as a second line of defense
 	// against rapid open/close/reopen whipsaws in chop (2026-08-17 finding).
 	CooldownBars int
+
+	// ScaleOut1TriggerPct/ScaleOut1Frac and ScaleOut2TriggerPct/ScaleOut2Frac:
+	// optional laddered profit-taking (分批止盈), INDEPENDENT of
+	// AsymmetricExit — runs even when AsymmetricExit=false (2026-08-18
+	// finding: the closest-to-breakeven config tested was 15m 30/90 WITHOUT
+	// AsymmetricExit, PF 1.01, but its cross_reversal exits blend big winners
+	// with many small losers down to a +0.16% average — MFEPct on losing
+	// trades regularly ran well past the eventual exit price, i.e. real
+	// upside was reached and then given back entirely before any exit fired).
+	// Once a leg's floating profit first reaches <N>TriggerPct, a ONE-TIME
+	// partial close of <N>Frac of the qty remaining AT THAT MOMENT fires
+	// (same convention as ReduceFrac/reducePosition). Each level fires at
+	// most once per leg and both are independent — level 2 does not require
+	// level 1 to have fired first. TriggerPct <= 0 disables that level
+	// (default — both off, zero behavior change for any existing config).
+	ScaleOut1TriggerPct float64
+	ScaleOut1Frac       float64
+	ScaleOut2TriggerPct float64
+	ScaleOut2Frac       float64
 }
 
 // MACross is a dual-SMA crossover strategy with optional short-selling support.
@@ -139,6 +158,12 @@ type MACross struct {
 	posReduced    bool    // the one-time confirmed-loss reduce has already fired
 	posLossStreak int     // consecutive bars with floating loss >= ReduceTriggerPct
 	posPeakFP     float64 // peak floating-profit fraction seen this leg (for trailing)
+
+	// ScaleOut1/2Fired: per-leg, one-shot latches for the optional laddered
+	// profit-taking levels (see Config.ScaleOut1TriggerPct). Reset on every
+	// fresh open, same as posReduced/posLossStreak/posPeakFP.
+	scaleOut1Fired bool
+	scaleOut2Fired bool
 
 	// Warmup priming: sawWarmup records that a backfill replay happened; primed
 	// records that we've established the initial position from trend state on the
@@ -508,6 +533,13 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 	if m.cfg.AsymmetricExit && !bar.Warmup && (m.hasLong || m.hasShort) {
 		m.manageAsymmetricExit(ctx, bar)
 	}
+	// Laddered profit-taking runs independently of AsymmetricExit (see
+	// Config.ScaleOut1TriggerPct) — the same !bar.Warmup reasoning applies:
+	// a warmup-replayed bar has nothing to do with a restart-seeded leg's
+	// real holding period and must not be able to consume a scale-out level.
+	if !bar.Warmup && (m.hasLong || m.hasShort) {
+		m.manageScaleOut(ctx, bar)
+	}
 
 	// Track, for THIS bar's cross decision, whether a close order was just
 	// queued above/below — fills are applied asynchronously (OnFill runs after
@@ -591,7 +623,7 @@ func (m *MACross) manageAsymmetricExit(ctx *strategy.Context, bar exchange.Kline
 
 	m.posLossStreak = updateLossStreak(m.posLossStreak, fp, m.cfg.ReduceTriggerPct)
 	if m.cfg.ReduceTriggerPct > 0 && shouldReduce(m.posLossStreak, m.cfg.ReduceConfirmBars, m.posReduced) {
-		m.reducePosition(ctx, bar, m.cfg.ReduceFrac)
+		m.reducePosition(ctx, bar, m.cfg.ReduceFrac, "asymmetric_reduce")
 		m.posReduced = true
 		m.posLossStreak = 0
 	}
@@ -615,9 +647,11 @@ func (m *MACross) manageAsymmetricExit(ctx *strategy.Context, bar exchange.Kline
 }
 
 // reducePosition partially closes the currently open leg by frac (e.g. 0.5 =
-// half). No-op if the leg's qty isn't known yet (shouldn't happen in practice —
-// OnFill always sets it on open — but guards against div-by-zero-style orders).
-func (m *MACross) reducePosition(ctx *strategy.Context, bar exchange.Kline, frac float64) {
+// half) of the qty remaining at the moment it's called. No-op if the leg's
+// qty isn't known yet (shouldn't happen in practice — OnFill always sets it
+// on open — but guards against div-by-zero-style orders). reason tags the
+// order (e.g. "asymmetric_reduce", "scale_out_1") for exit-reason breakdowns.
+func (m *MACross) reducePosition(ctx *strategy.Context, bar exchange.Kline, frac float64, reason string) {
 	if m.posQty <= 0 {
 		return
 	}
@@ -625,13 +659,30 @@ func (m *MACross) reducePosition(ctx *strategy.Context, bar exchange.Kline, frac
 	if m.hasLong {
 		ctx.PlaceOrder(strategy.OrderRequest{
 			Symbol: bar.Symbol, Side: strategy.SideSell, PositionSide: strategy.PositionSideLong,
-			Type: strategy.OrderMarket, Qty: qty, Reason: "asymmetric_reduce",
+			Type: strategy.OrderMarket, Qty: qty, Reason: reason,
 		})
 	} else if m.hasShort {
 		ctx.PlaceOrder(strategy.OrderRequest{
 			Symbol: bar.Symbol, Side: strategy.SideBuy, PositionSide: strategy.PositionSideShort,
-			Type: strategy.OrderMarket, Qty: qty, Reason: "asymmetric_reduce",
+			Type: strategy.OrderMarket, Qty: qty, Reason: reason,
 		})
+	}
+}
+
+// manageScaleOut runs optional laddered profit-taking for the currently open
+// leg (see Config.ScaleOut1TriggerPct) — independent of AsymmetricExit, so it
+// applies even to a plain flip-on-cross config. Each level is a one-shot
+// latch: it fires at most once per leg and does not require the other level
+// to have fired first.
+func (m *MACross) manageScaleOut(ctx *strategy.Context, bar exchange.Kline) {
+	fp := m.floatingPnLPct(bar.Close)
+	if shouldScaleOut(m.scaleOut1Fired, fp, m.cfg.ScaleOut1TriggerPct) {
+		m.scaleOut1Fired = true
+		m.reducePosition(ctx, bar, m.cfg.ScaleOut1Frac, "scale_out_1")
+	}
+	if shouldScaleOut(m.scaleOut2Fired, fp, m.cfg.ScaleOut2TriggerPct) {
+		m.scaleOut2Fired = true
+		m.reducePosition(ctx, bar, m.cfg.ScaleOut2Frac, "scale_out_2")
 	}
 }
 
@@ -668,6 +719,8 @@ func (m *MACross) resetPosState() {
 	m.posReduced = false
 	m.posLossStreak = 0
 	m.posPeakFP = 0
+	m.scaleOut1Fired = false
+	m.scaleOut2Fired = false
 }
 
 // OnFill implements strategy.Strategy.
@@ -813,6 +866,18 @@ func init() {
 		} else {
 			cfg.TrailGivebackFrac = 0.35
 		}
+		if v, ok := params["ScaleOut1TriggerPct"]; ok {
+			cfg.ScaleOut1TriggerPct = toFloat(v)
+		} // default 0 == disabled, independent of AsymmetricExit
+		if v, ok := params["ScaleOut1Frac"]; ok {
+			cfg.ScaleOut1Frac = toFloat(v)
+		}
+		if v, ok := params["ScaleOut2TriggerPct"]; ok {
+			cfg.ScaleOut2TriggerPct = toFloat(v)
+		}
+		if v, ok := params["ScaleOut2Frac"]; ok {
+			cfg.ScaleOut2Frac = toFloat(v)
+		}
 		if cfg.FastPeriod == 0 {
 			cfg.FastPeriod = 10
 		}
@@ -834,6 +899,12 @@ func init() {
 		}
 		if cfg.TrailGivebackFrac < 0 || cfg.TrailGivebackFrac > 1 {
 			return nil, fmt.Errorf("TrailGivebackFrac must be in [0, 1] (got %.4f)", cfg.TrailGivebackFrac)
+		}
+		if cfg.ScaleOut1Frac < 0 || cfg.ScaleOut1Frac > 1 {
+			return nil, fmt.Errorf("ScaleOut1Frac must be in [0, 1] (got %.4f)", cfg.ScaleOut1Frac)
+		}
+		if cfg.ScaleOut2Frac < 0 || cfg.ScaleOut2Frac > 1 {
+			return nil, fmt.Errorf("ScaleOut2Frac must be in [0, 1] (got %.4f)", cfg.ScaleOut2Frac)
 		}
 		return New(cfg), nil
 	})
