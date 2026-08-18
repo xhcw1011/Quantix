@@ -156,6 +156,27 @@ type Config struct {
 	// zero behavior change for any existing config).
 	BreakEvenTriggerPct float64
 	BreakEvenBufferPct  float64
+
+	// StopOut1TriggerPct/StopOut1Frac and StopOut2TriggerPct/StopOut2Frac:
+	// optional laddered stop-loss (分批止损), the loss-side mirror of
+	// ScaleOut1/2 above — INDEPENDENT of AsymmetricExit, so it applies even
+	// to a plain flip-on-cross config (unlike the existing
+	// ReduceTriggerPct/ReduceConfirmBars/ReduceFrac mechanism, which stays
+	// gated behind AsymmetricExit=true and is untouched by this feature).
+	// TriggerPct is a positive magnitude: once a leg's floating profit first
+	// falls to -<N>TriggerPct or below (an ADVERSE move of that size), a
+	// ONE-TIME partial close of <N>Frac of the qty remaining AT THAT MOMENT
+	// fires (same convention as ReduceFrac/ScaleOut/reducePosition). Each
+	// level fires at most once per leg and both are independent — level 2
+	// does not require level 1 to have fired first. TriggerPct <= 0 disables
+	// that level (default — both off, zero behavior change for any existing
+	// config). The hard StopLossPct backstop is unaffected — it's placed as
+	// an exchange-native protective order at entry time and fires
+	// independently on whatever qty remains after any StopOut levels fire.
+	StopOut1TriggerPct float64
+	StopOut1Frac       float64
+	StopOut2TriggerPct float64
+	StopOut2Frac       float64
 }
 
 // MACross is a dual-SMA crossover strategy with optional short-selling support.
@@ -191,6 +212,12 @@ type MACross struct {
 	// hitting the buffer. Reset on every fresh open, same as
 	// posReduced/scaleOut1Fired/etc.
 	breakEvenArmed bool
+
+	// StopOut1/2Fired: per-leg, one-shot latches for the optional laddered
+	// stop-loss levels (see Config.StopOut1TriggerPct) — the loss-side
+	// mirror of scaleOut1Fired/scaleOut2Fired. Reset on every fresh open.
+	stopOut1Fired bool
+	stopOut2Fired bool
 
 	// Warmup priming: sawWarmup records that a backfill replay happened; primed
 	// records that we've established the initial position from trend state on the
@@ -574,6 +601,11 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 	if !bar.Warmup && (m.hasLong || m.hasShort) {
 		m.manageBreakEven(ctx, bar)
 	}
+	// Laddered stop-loss runs independently of AsymmetricExit too (see
+	// Config.StopOut1TriggerPct) — same !bar.Warmup reasoning as ScaleOut.
+	if !bar.Warmup && (m.hasLong || m.hasShort) {
+		m.manageStopOut(ctx, bar)
+	}
 
 	// Track, for THIS bar's cross decision, whether a close order was just
 	// queued above/below — fills are applied asynchronously (OnFill runs after
@@ -742,6 +774,26 @@ func (m *MACross) manageBreakEven(ctx *strategy.Context, bar exchange.Kline) {
 	}
 }
 
+// manageStopOut runs optional laddered stop-loss for the currently open leg
+// (see Config.StopOut1TriggerPct) — the loss-side mirror of manageScaleOut,
+// independent of AsymmetricExit and of the existing
+// ReduceTriggerPct/ReduceConfirmBars/ReduceFrac mechanism (which stays gated
+// behind AsymmetricExit=true and is untouched by this feature). Each level is
+// a one-shot latch: fires at most once per leg and does not require the
+// other level to have fired first. The hard StopLossPct backstop is
+// unaffected and fires independently on whatever qty remains.
+func (m *MACross) manageStopOut(ctx *strategy.Context, bar exchange.Kline) {
+	fp := m.floatingPnLPct(bar.Close)
+	if shouldStopOut(m.stopOut1Fired, fp, m.cfg.StopOut1TriggerPct) {
+		m.stopOut1Fired = true
+		m.reducePosition(ctx, bar, m.cfg.StopOut1Frac, "stop_out_1")
+	}
+	if shouldStopOut(m.stopOut2Fired, fp, m.cfg.StopOut2TriggerPct) {
+		m.stopOut2Fired = true
+		m.reducePosition(ctx, bar, m.cfg.StopOut2Frac, "stop_out_2")
+	}
+}
+
 // openLong places a hedge-mode long entry with optional stop-loss / take-profit.
 func (m *MACross) openLong(ctx *strategy.Context, bar exchange.Kline) {
 	req := strategy.OpenLong(bar.Symbol, 0)
@@ -778,6 +830,8 @@ func (m *MACross) resetPosState() {
 	m.scaleOut1Fired = false
 	m.scaleOut2Fired = false
 	m.breakEvenArmed = false
+	m.stopOut1Fired = false
+	m.stopOut2Fired = false
 }
 
 // OnFill implements strategy.Strategy.
@@ -941,6 +995,18 @@ func init() {
 		if v, ok := params["BreakEvenBufferPct"]; ok {
 			cfg.BreakEvenBufferPct = toFloat(v)
 		}
+		if v, ok := params["StopOut1TriggerPct"]; ok {
+			cfg.StopOut1TriggerPct = toFloat(v)
+		} // default 0 == disabled, independent of AsymmetricExit
+		if v, ok := params["StopOut1Frac"]; ok {
+			cfg.StopOut1Frac = toFloat(v)
+		}
+		if v, ok := params["StopOut2TriggerPct"]; ok {
+			cfg.StopOut2TriggerPct = toFloat(v)
+		}
+		if v, ok := params["StopOut2Frac"]; ok {
+			cfg.StopOut2Frac = toFloat(v)
+		}
 		if cfg.FastPeriod == 0 {
 			cfg.FastPeriod = 10
 		}
@@ -968,6 +1034,12 @@ func init() {
 		}
 		if cfg.ScaleOut2Frac < 0 || cfg.ScaleOut2Frac > 1 {
 			return nil, fmt.Errorf("ScaleOut2Frac must be in [0, 1] (got %.4f)", cfg.ScaleOut2Frac)
+		}
+		if cfg.StopOut1Frac < 0 || cfg.StopOut1Frac > 1 {
+			return nil, fmt.Errorf("StopOut1Frac must be in [0, 1] (got %.4f)", cfg.StopOut1Frac)
+		}
+		if cfg.StopOut2Frac < 0 || cfg.StopOut2Frac > 1 {
+			return nil, fmt.Errorf("StopOut2Frac must be in [0, 1] (got %.4f)", cfg.StopOut2Frac)
 		}
 		return New(cfg), nil
 	})

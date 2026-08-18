@@ -58,3 +58,15 @@ func shouldBreakEvenClose(armed bool, floatingPnLPct, bufferPct float64) bool {
 	}
 	return floatingPnLPct <= bufferPct
 }
+
+// shouldStopOut reports whether a laddered stop-loss level should fire: the
+// loss-side mirror of shouldScaleOut. It hasn't already fired for this leg,
+// and floating profit has fallen to -triggerPct or below (triggerPct is a
+// positive magnitude — see Config.StopOut1TriggerPct). triggerPct <= 0
+// disables the level unconditionally (default).
+func shouldStopOut(fired bool, floatingPnLPct, triggerPct float64) bool {
+	if triggerPct <= 0 || fired {
+		return false
+	}
+	return floatingPnLPct <= -triggerPct
+}
