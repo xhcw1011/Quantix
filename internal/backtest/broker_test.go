@@ -237,3 +237,46 @@ func TestSimBroker_StopLoss_ClosingFillClearsStop(t *testing.T) {
 		t.Fatalf("expected no stop fill after manual close, got %d: %+v", len(fills), fills)
 	}
 }
+
+// TestSimBroker_StopLoss_SurvivesPartialReduce reproduces a 2026-08-18
+// backtest finding: macross's AsymmetricExit issues a partial reduce (e.g.
+// ReduceFrac=0.5) while a position is underwater, expecting the STOP-LOSS
+// registered at entry to keep protecting the remaining half. Process()
+// treated ANY closing-direction fill as a full close and deleted the active
+// stop outright — leaving the remainder with zero protection for the rest
+// of that leg's life (real backtest MAE on affected legs reached -23.9%
+// against a configured StopLossPct of 3%). This mirrors the already-fixed
+// live/broker.go bug (2026-08-17: "a partial reduce must not cancel the
+// remaining position's stop-loss") — the fix was never ported to the
+// backtest simulator, silently making every AsymmetricExit backtest since
+// then measure a harsher, unrealistic exit dynamic than live actually has.
+func TestSimBroker_StopLoss_SurvivesPartialReduce(t *testing.T) {
+	pf := newTestPortfolio(10000)
+	b := NewSimBroker(0.001, 0.0005, pf, devLog())
+
+	// Open long 1.0 ETH with a 95 stop.
+	b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "ETH", Side: strategy.SideBuy, Qty: 1.0, StopLoss: 95.0,
+	})
+	bar1 := exchange.Kline{Symbol: "ETH", High: 101, Low: 99, Close: 100, CloseTime: time.Unix(0, 0)}
+	b.Process(bar1)
+
+	// Partial reduce: sell HALF (0.5), leaving 0.5 still open — not a full close.
+	b.PlaceOrder(strategy.OrderRequest{
+		Symbol: "ETH", Side: strategy.SideSell, Qty: 0.5, Reason: "asymmetric_reduce",
+	})
+	bar2 := exchange.Kline{Symbol: "ETH", High: 101, Low: 99, Close: 100, CloseTime: time.Unix(300, 0)}
+	b.Process(bar2)
+
+	// Bar 3: Low dives through the original 95 stop — the remaining 0.5 must
+	// still be protected and close via the stop, not ride unprotected.
+	bar3 := exchange.Kline{Symbol: "ETH", High: 96, Low: 90, Close: 92, CloseTime: time.Unix(600, 0)}
+	fills := b.Process(bar3)
+	if len(fills) != 1 {
+		t.Fatalf("expected the remaining half to still be stop-protected, got %d fills: %+v", len(fills), fills)
+	}
+	if fills[0].Reason != "stop_loss" {
+		t.Fatalf("expected a stop_loss fill, got reason %q", fills[0].Reason)
+	}
+	assert.InDelta(t, 0.5, fills[0].Qty, 1e-9, "the stop must close only the remaining half, not the original full qty")
+}

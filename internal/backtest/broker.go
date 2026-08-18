@@ -15,6 +15,10 @@ type pendingOrder struct {
 	req strategy.OrderRequest
 }
 
+// stopQtyEpsilon absorbs float rounding when a reduce fill's qty doesn't
+// exactly zero out the remaining position.
+const stopQtyEpsilon = 1e-9
+
 // stopRecord tracks an active stop-loss for a single open position.
 // Phase 2 simplification: one stop per symbol; opening another position
 // with a stop on the same symbol overwrites the old one.
@@ -149,8 +153,20 @@ func (b *SimBroker) Process(bar exchange.Kline) []strategy.Fill {
 					}
 				}
 			} else {
-				// Closing fill — clear any active stop for this symbol.
-				delete(b.activeStops, fill.Symbol)
+				// Closing fill — only clear the active stop if it fully
+				// closed the remaining position. A partial reduce (e.g.
+				// macross's AsymmetricExit ReduceFrac) must leave the
+				// remainder's stop in place, resized to what's actually
+				// still open — mirrors internal/live/broker.go's
+				// closesEntirePosition fix (2026-08-17 production finding:
+				// deleting the stop on every reduce left the remainder with
+				// zero protection for the rest of that leg's life).
+				remaining := b.portfolio.OpenQty(fill.Symbol, fill.PositionSide)
+				if sr, ok := b.activeStops[fill.Symbol]; ok && remaining > stopQtyEpsilon {
+					sr.qty = remaining
+				} else {
+					delete(b.activeStops, fill.Symbol)
+				}
 			}
 
 			b.log.Debug("fill",
