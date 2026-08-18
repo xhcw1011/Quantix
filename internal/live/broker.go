@@ -375,25 +375,58 @@ func (b *Broker) applyMarketFill(ordID string, req strategy.OrderRequest, posSid
 		Fee:          fill.Fee,
 		Timestamp:    time.Now(),
 	}
-	b.omsInst.Fill(ordID, stratFill) //nolint:errcheck
+	// fillErr != nil means this call LOST a race against another path
+	// applying the same fill first (2026-08-17/18 finding: the WS
+	// user-data-stream handler in engine_run.go and this broker's own
+	// pollMarketOrderFill both call into applyMarketFill/Fill for the same
+	// exchange fill; the OMS's own duplicate/over-fill rejection is what
+	// decides the winner). When we lose, preFillQty above was read AFTER the
+	// winner already reduced the position, so it looks smaller than it
+	// really was pre-fill — closesEntirePosition would then misjudge a
+	// genuine partial reduce as a full close and cancel a stop-loss that's
+	// still protecting the (already-updated-by-the-winner) remaining
+	// position. Skip all fill-driven side effects when we didn't actually
+	// apply anything.
+	fillErr := b.omsInst.Fill(ordID, stratFill)
+	if fillErr != nil {
+		b.log.Debug("applyMarketFill: Fill rejected (lost race to another path), skipping protective-order side effects",
+			zap.String("order_id", ordID), zap.Error(fillErr))
+		return
+	}
 
 	if b.isOpeningFill(req) && (req.StopLoss > 0 || req.TakeProfit > 0) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		b.placeProtectiveOrders(ctx, req, "", fill.FilledQty)
 	}
-	// Only cancel protective orders on a FULL close — a partial reduce (e.g.
-	// macross's AsymmetricExit confirmed-loss reduce) must leave the
-	// remaining position's stop-loss/take-profit in place (2026-08-17
-	// finding: cancelling here on every reduce left the remainder with zero
-	// exchange-side protection until the position eventually closed some
-	// other way). Hedge-mode protective orders are position-side-scoped on
-	// the exchange, so leaving one in place after a partial reduce is safe —
-	// it can never close more than what's actually still open.
-	if b.isClosingFill(req) && closesEntirePosition(preFillQty, fill.FilledQty) {
+	b.maybeCancelProtectiveOrdersOnClose(req.Symbol, posSide, req.Side, preFillQty, fill.FilledQty)
+}
+
+// maybeCancelProtectiveOrdersOnClose cancels a position's protective orders
+// if, and only if, the given fill fully closes it — a partial reduce (e.g.
+// macross's AsymmetricExit confirmed-loss reduce) must leave the remaining
+// position's stop-loss/take-profit in place (2026-08-17 finding: cancelling
+// on every reduce left the remainder with zero exchange-side protection
+// until the position eventually closed some other way). Hedge-mode
+// protective orders are position-side-scoped on the exchange, so leaving one
+// in place after a partial reduce is safe — it can never close more than
+// what's actually still open.
+//
+// Shared by applyMarketFill (REST-driven fills) and engine_run.go's WS
+// user-data-stream handler (which only has an *oms.Order, not a
+// strategy.OrderRequest, and never went through applyMarketFill at all —
+// this used to leave that path with zero protective-order handling; see the
+// 2026-08-17/18 incident). Callers MUST snapshot preFillQty (via
+// currentPositionQty) BEFORE applying the fill that produced filledQty, and
+// MUST NOT call this if their own Fill() call lost a duplicate/over-fill
+// race — otherwise preFillQty reflects a position already reduced by
+// whichever path won, making a genuine partial reduce look like a full close.
+func (b *Broker) maybeCancelProtectiveOrdersOnClose(symbol, posSide string, side strategy.Side, preFillQty, filledQty float64) {
+	req := strategy.OrderRequest{Symbol: symbol, Side: side, PositionSide: strategy.PositionSide(posSide)}
+	if b.isClosingFill(req) && closesEntirePosition(preFillQty, filledQty) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		b.cancelProtectiveOrders(ctx, req.Symbol, posSide)
+		b.cancelProtectiveOrders(ctx, symbol, posSide)
 	}
 }
 

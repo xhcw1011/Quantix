@@ -324,6 +324,10 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			if ord.Status == oms.StatusPending {
 				e.omsInst.Accept(ord.ID) //nolint:errcheck
 			}
+			// Captured before e.omsInst.Fill below, same reasoning as
+			// applyMarketFill's preFillQty: must reflect the position as it
+			// was BEFORE this fill, not after.
+			preFillQty := e.broker.currentPositionQty(ord.Symbol, string(ord.PositionSide))
 			// Apply fill
 			stratFill := strategy.Fill{
 				ID: ord.ID + "-ws", Symbol: ord.Symbol,
@@ -332,7 +336,9 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				Fee: fill.Fee, Timestamp: time.Now(),
 			}
 			if err := e.omsInst.Fill(ord.ID, stratFill); err != nil {
-				// May already be filled by REST polling — that's OK
+				// May already be filled by REST polling — that's OK. We lost
+				// the race, so must NOT touch protective orders here (see
+				// maybeCancelProtectiveOrdersOnClose's doc comment).
 				e.log.Debug("user data stream: fill already applied",
 					zap.String("oms_id", ord.ID), zap.Error(err))
 				return
@@ -341,6 +347,14 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				zap.String("oms_id", ord.ID),
 				zap.Float64("qty", fill.FilledQty),
 				zap.Float64("price", fill.AvgPrice))
+			// This path (unlike the broker's own placeMarketOrder/applyMarketFill)
+			// never placed the order itself, so it has no strategy.OrderRequest to
+			// read StopLoss/TakeProfit from — opening-side protective placement is
+			// intentionally left to the path that DID place the order. Only the
+			// closing side is handled here, since it needs nothing beyond what
+			// oms.Order already has (2026-08-17/18 incident: this WS path won the
+			// fill race with zero protective-order handling at all).
+			e.broker.maybeCancelProtectiveOrdersOnClose(ord.Symbol, string(ord.PositionSide), ord.Side, preFillQty, fill.FilledQty)
 		}, onAccountUpdate, onPositionUpdate)
 		e.log.Info("user data stream: started (fills + account + positions)")
 	}
