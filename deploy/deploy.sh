@@ -184,7 +184,7 @@ risk:
 monitor:
   prometheus_port: 9301
   enabled: true
-  margin_warn_threshold: 0.20
+  margin_warn_threshold: 0.10
 
 live:
   enabled: true

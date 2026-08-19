@@ -13,8 +13,10 @@ import (
 
 const (
 	// defaultMarginWarnThreshold triggers a Telegram warning when any position's
-	// maintenance margin ratio falls below this level (20%).
-	defaultMarginWarnThreshold = 0.20
+	// maintenance margin ratio falls below this level (10%).
+	// Previously 20%, which fired on routine drawdowns well before liquidation
+	// was actually a concern (e.g. 16.7% on a 3x position with a hard 3% stop-loss).
+	defaultMarginWarnThreshold = 0.10
 
 	// defaultMarginCriticalThreshold triggers an urgent alert when a position's
 	// maintenance margin ratio falls below this level (12%).

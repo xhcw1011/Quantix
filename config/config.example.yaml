@@ -73,7 +73,7 @@ monitor:
   prometheus_port: 9090
   enabled: true
   # Margin monitoring thresholds (futures/swap only)
-  margin_warn_threshold: 0.20      # Warn when margin ratio drops below 20%
+  margin_warn_threshold: 0.10      # Warn when margin ratio drops below 10%
   margin_critical_threshold: 0.12  # Critical alert below 12%
   margin_check_interval: 60s       # How often to poll margin status
 
