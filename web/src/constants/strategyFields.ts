@@ -62,7 +62,7 @@ export const STRATEGY_FIELDS: Record<string, FieldDef[]> = {
     { key: 'EnableShort', label: '双向交易(做多做空)', type: 'boolean', default: true, help: '关闭 = 只做多(单向持仓模式);开启后死叉会开空、金叉会开多(需要交易所账户是对冲模式,否则下单会被拒)。' },
     { key: 'StopLossPct', label: '止损', type: 'number', default: 3, unit: '%', pctOf1: true, min: 0, help: '0 = 不设' },
     { key: 'TakeProfitPct', label: '止盈', type: 'number', default: 0, unit: '%', pctOf1: true, min: 0, help: '0 = 不设' },
-    { key: 'EntryOrderType', label: '开仓方式', type: 'select', default: 'market',
+    { key: 'EntryOrderType', label: '开仓方式', type: 'select', default: 'limit',
       options: [{ value: 'market', label: '市价(立即成交)' }, { value: 'limit', label: '限价(省手续费,可能等不到)' }] },
     { key: 'EntryLimitOffsetPct', label: '限价偏移', type: 'number', default: 0.05, unit: '%', step: 0.01, pctOf1: true, min: 0,
       help: '挂单价比最新价更有利的偏移幅度(多单挂低、空单挂高),偏移越大越容易吃到 maker 费率,但也越难成交;只在开仓方式选限价时生效' },
