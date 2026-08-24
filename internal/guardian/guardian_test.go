@@ -2,6 +2,7 @@ package guardian
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Quantix/quantix/internal/exchange"
 	"github.com/Quantix/quantix/internal/strategy"
@@ -16,10 +17,20 @@ func (p *gPortfolio) Position(string) (float64, float64, bool) {
 }
 func (p *gPortfolio) Equity(map[string]float64) float64 { return 0 }
 
-type gBroker struct{ orders []strategy.OrderRequest }
+type gBroker struct {
+	orders []strategy.OrderRequest
+	// rejectOrders simulates a synchronous exchange rejection (e.g.
+	// insufficient margin): PlaceOrder still records the attempt but returns
+	// "" like the real broker does when placeLimitOrderAsync/placeMarketOrder
+	// reject before ever getting an exchange ID.
+	rejectOrders bool
+}
 
 func (b *gBroker) PlaceOrder(req strategy.OrderRequest) string {
 	b.orders = append(b.orders, req)
+	if b.rejectOrders {
+		return ""
+	}
 	return "oid"
 }
 func (b *gBroker) CancelOrder(string) error { return nil }
@@ -137,5 +148,93 @@ func TestGuardian_StatusExposesState(t *testing.T) {
 	}
 	if tv, ok := st["trail_active"].(bool); !ok || !tv {
 		t.Fatalf("status trail_active should be true after activation")
+	}
+}
+
+// TestGuardian_RejectedCloseDoesNotStickPhaseClosing is the regression test
+// for a 2026-08-21 audit finding: placeClose (unlike the already-fixed
+// placeEntry) discarded ctx.PlaceOrder's return value. It cancels the
+// resting stop BEFORE submitting the close, so a rejected close left the
+// position genuinely naked -- no stop, no retry, phase stuck forever at
+// Watching with nothing further ever re-checking it (found by audit before
+// it bit anyone live).
+func TestGuardian_RejectedCloseDoesNotStickPhaseClosing(t *testing.T) {
+	cfg := trailCfg()
+	cfg.TPMode = TPR
+	cfg.TPValue = 3 // tp = 100 + 3*5 = 115
+	g, b, ctx := newLongGuardian(cfg)
+	b.rejectOrders = true
+
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 116, Low: 99, Close: 114}) // TP hit -> placeClose -> rejected
+
+	if g.phase == PhaseClosing || g.phase == PhaseClosed {
+		t.Fatalf("a rejected close must not stick phase at Closing/Closed, got %s", g.phase)
+	}
+	if len(b.orders) != 1 {
+		t.Fatalf("expected exactly 1 rejected close attempt, got %d", len(b.orders))
+	}
+	if g.closeBackoff.retryAfter.IsZero() {
+		t.Fatal("expected a cooldown to be set after rejection")
+	}
+
+	// Immediately retrying (still within cooldown) must not resubmit --
+	// otherwise every tick would hammer the exchange with the same doomed
+	// close.
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 116, Low: 99, Close: 114})
+	if len(b.orders) != 1 {
+		t.Fatalf("expected no retry within the cooldown, got %d attempts", len(b.orders))
+	}
+
+	// Once the cooldown elapses and the exchange accepts, the retry succeeds.
+	g.closeBackoff.retryAfter = time.Now().Add(-time.Second)
+	b.rejectOrders = false
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 116, Low: 99, Close: 114})
+	if g.phase != PhaseClosing {
+		t.Fatalf("expected phase Closing after a successful retry, got %s", g.phase)
+	}
+	if len(b.orders) != 2 {
+		t.Fatalf("expected a second attempt after the cooldown, got %d", len(b.orders))
+	}
+}
+
+// TestGuardian_RejectedPartialTPResetsAndRetries is the regression test for
+// the sibling audit finding: maybePartialTP set partialDone=true before
+// knowing whether the exchange would accept the order, with no reset and
+// (unlike placeEntry) no user notification on rejection -- the user would
+// believe they'd banked partial profit that was never actually banked.
+func TestGuardian_RejectedPartialTPResetsAndRetries(t *testing.T) {
+	cfg := trailCfg() // R = 5 (5% of 100)
+	cfg.PartialTPAtR = 2
+	cfg.PartialTPFraction = 0.5
+	g, b, ctx := newLongGuardian(cfg)
+	b.rejectOrders = true
+
+	g.OnTick(ctx, 110) // pnlR 2.0 >= 2: attempts partial close, rejected
+
+	if g.partialDone {
+		t.Fatal("a rejected partial TP must reset partialDone, not leave it stuck true")
+	}
+	if len(b.orders) != 1 {
+		t.Fatalf("expected exactly 1 rejected attempt, got %d", len(b.orders))
+	}
+	if g.partialTPBackoff.retryAfter.IsZero() {
+		t.Fatal("expected a cooldown to be set after rejection")
+	}
+
+	// Immediately retrying (still within cooldown) must not resubmit.
+	g.OnTick(ctx, 110)
+	if len(b.orders) != 1 {
+		t.Fatalf("expected no retry within the cooldown, got %d attempts", len(b.orders))
+	}
+
+	// Once the cooldown elapses and the exchange accepts, the retry succeeds.
+	g.partialTPBackoff.retryAfter = time.Now().Add(-time.Second)
+	b.rejectOrders = false
+	g.OnTick(ctx, 110)
+	if !g.partialDone {
+		t.Fatal("a successful retry must set partialDone")
+	}
+	if len(b.orders) != 2 {
+		t.Fatalf("expected a second attempt after the cooldown, got %d", len(b.orders))
 	}
 }

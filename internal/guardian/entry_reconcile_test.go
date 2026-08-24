@@ -2,6 +2,7 @@ package guardian
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Quantix/quantix/internal/exchange"
 	"github.com/Quantix/quantix/internal/position"
@@ -344,5 +345,93 @@ func TestGuardian_EntryPlacesWhenFlat(t *testing.T) {
 				t.Fatalf("expected OpenShort entry, got %+v", b.orders[0])
 			}
 		})
+	}
+}
+
+// TestGuardian_LateEntryFillAfterSyncerAdoptDoesNotRetire is the regression
+// test for the 2026-08-21 incident: the position syncer can discover the
+// just-opened position (and arm protection + a resting stop from it) on a
+// bar/tick BEFORE the entry order's own fill notification is dispatched to
+// OnFill. That late "guardian_entry" fill must not be mistaken for the
+// resting stop filling — 3 of 4 same-day guardian retirements on a
+// real-money account were exactly this, silently dropping protection on a
+// position that was never actually closed.
+func TestGuardian_LateEntryFillAfterSyncerAdoptDoesNotRetire(t *testing.T) {
+	g := NewEntryGuardian("ETHUSDT", SideLong, 1, entryCfg(), 14, zap.NewNop())
+	g.SetRestingStop(true)
+	b := &gBroker{}
+	ctx := strategy.NewContext(&gPortfolio{}, b, zap.NewNop())
+
+	// Bar 1: flat, no syncer position yet -> places the entry order.
+	g.OnBar(ctx, exchange.Kline{Open: 2000, High: 2005, Low: 1995, Close: 2000})
+	if g.Prot() != nil {
+		t.Fatal("must not arm until adopted or filled")
+	}
+
+	// Bar 2: the syncer now reports the position the entry order just opened
+	// on the exchange -- before that order's own fill event has arrived. The
+	// guardian adopts from the syncer and arms a resting stop.
+	longPos := &position.StrategyPosition{}
+	longPos.Symbol, longPos.Side, longPos.Qty, longPos.EntryPrice = "ETHUSDT", "LONG", 1, 2000
+	ctx.Extra["position_syncer"] = fakeLiveSource{long: longPos}
+	g.OnBar(ctx, exchange.Kline{Open: 2000, High: 2005, Low: 1995, Close: 2000})
+	if g.Prot() == nil {
+		t.Fatal("expected protection armed from the syncer-adopted position")
+	}
+	if g.phase != PhaseWatching {
+		t.Fatalf("expected Watching after adopt+arm, got %s", g.phase)
+	}
+
+	// The entry order's own fill notification now arrives late.
+	g.OnFill(ctx, strategy.Fill{Reason: "guardian_entry", Qty: 1, Price: 2000})
+
+	if g.phase != PhaseWatching {
+		t.Fatalf("late entry fill must not retire the guardian, got phase %s", g.phase)
+	}
+	if g.Retired() {
+		t.Fatal("guardian must still be protecting the (never closed) position")
+	}
+}
+
+// TestGuardian_RejectedEntryResetsOneShotGuard is the regression test for the
+// 2026-08-21 incident (hit twice same day on a real-money account): placeEntry
+// marked entryPlaced=true (and persisted it) BEFORE knowing whether the
+// exchange would actually accept the order. When the order was rejected
+// (e.g. "Margin is insufficient"), nothing ever reset the flag -- every
+// future restart, even after the user fixed the underlying problem and
+// changed params, silently no-opped forever with only a log line to show
+// for it. PlaceOrder returns "" on a synchronous rejection (only fill
+// confirmation is async), so that's the signal to reset.
+func TestGuardian_RejectedEntryResetsOneShotGuard(t *testing.T) {
+	g := NewEntryGuardian("ETHUSDT", SideLong, 1, entryCfg(), 14, zap.NewNop())
+	b := &gBroker{rejectOrders: true}
+	ctx := strategy.NewContext(&gPortfolio{}, b, zap.NewNop())
+
+	g.OnBar(ctx, exchange.Kline{Open: 2000, High: 2005, Low: 1995, Close: 2000})
+	if g.entryPlaced {
+		t.Fatal("a rejected entry must reset entryPlaced, not leave it stuck true")
+	}
+	if len(b.orders) != 1 {
+		t.Fatalf("expected exactly 1 rejected attempt, got %d", len(b.orders))
+	}
+
+	// Immediately retrying (still within the cooldown) must NOT resubmit --
+	// otherwise every tick would hammer the exchange with the same doomed
+	// order until the underlying problem (e.g. margin) is fixed.
+	g.OnBar(ctx, exchange.Kline{Open: 2000, High: 2005, Low: 1995, Close: 2000})
+	if len(b.orders) != 1 {
+		t.Fatalf("expected no retry within the cooldown, got %d attempts", len(b.orders))
+	}
+
+	// Once the cooldown has elapsed, a fresh attempt is allowed -- and this
+	// time the exchange accepts it (e.g. the user topped up margin).
+	g.entryBackoff.retryAfter = time.Now().Add(-time.Second)
+	b.rejectOrders = false
+	g.OnBar(ctx, exchange.Kline{Open: 2000, High: 2005, Low: 1995, Close: 2000})
+	if len(b.orders) != 2 {
+		t.Fatalf("expected a retry after the cooldown elapsed, got %d attempts", len(b.orders))
+	}
+	if !g.entryPlaced {
+		t.Fatal("a successful retry must set entryPlaced again")
 	}
 }
