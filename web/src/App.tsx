@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from
 import { useAuthStore } from './store/authStore'
 import Layout from './components/Layout'
 import { ConfirmProvider } from './components/ConfirmDialog'
+import Toasts from './components/Toasts'
 
 const Login = lazy(() => import('./pages/Login'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -129,6 +130,7 @@ export default function App() {
     <ErrorBoundary>
       <ConfirmProvider>
         <BrowserRouter>
+          <Toasts />
           <AuthLogoutListener />
           <ViewportManager />
           <Suspense fallback={<PageFallback />}>

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { closeEnginePosition } from '../api/trading'
 import { fmtPrice, fmtQty, fmtSignedUsd, sideCn } from '../lib/positionFormat'
 import { useConfirm } from '../hooks/useConfirm'
+import { toast } from '../store/toastStore'
 
 export interface PositionView {
   symbol: string
@@ -37,11 +38,11 @@ export default function PositionRows({ engineId, mode, lastPrice, positions, onC
     setClosingKey(key)
     try {
       const r = await closeEnginePosition(engineId, side)
-      alert(`已平仓:${r.data.qty} ${r.data.symbol} @ ${r.data.fill_price}`)
+      toast.success(`已平仓:${r.data.qty} ${r.data.symbol} @ ${r.data.fill_price}`)
       onClosed()
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (e: any) {
-      alert(`平仓失败:${e.response?.data?.error || e.message}`)
+      toast.error(`平仓失败:${e.response?.data?.error || e.message}`)
     } finally {
       setClosingKey(null)
     }
@@ -100,7 +101,7 @@ export default function PositionRows({ engineId, mode, lastPrice, positions, onC
                       <button
                         disabled={isClosing || mode !== 'live'}
                         onClick={(e) => { e.stopPropagation(); handleClose(p.symbol, side, p.qty) }}
-                        className="px-2 py-0.5 bg-red-900/40 hover:bg-red-900/60 disabled:opacity-40 disabled:cursor-not-allowed text-red-200 border border-red-800/40 rounded transition-colors"
+                        className="px-2 py-0.5 bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded transition-colors"
                         title={mode !== 'live' ? '仅实时引擎支持一键平仓' : `以"只减仓"市价单平掉${sideCn(side)}方向`}
                       >
                         {closeButtonLabel(side, isClosing)}
@@ -145,7 +146,7 @@ export default function PositionRows({ engineId, mode, lastPrice, positions, onC
                 <button
                   disabled={isClosing || mode !== 'live'}
                   onClick={() => handleClose(p.symbol, side, p.qty)}
-                  className="mt-2.5 w-full py-1.5 bg-red-900/40 hover:bg-red-900/60 disabled:opacity-40 disabled:cursor-not-allowed text-red-200 border border-red-800/40 rounded transition-colors"
+                  className="mt-2.5 w-full py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded transition-colors"
                 >
                   {closeButtonLabel(side, isClosing)}
                 </button>
