@@ -177,6 +177,45 @@ type Config struct {
 	StopOut1Frac       float64
 	StopOut2TriggerPct float64
 	StopOut2Frac       float64
+
+	// HTFInterval enables an optional higher-timeframe trend gate on cross
+	// REVERSALS only (entries from flat are never gated — "5m进场没问题").
+	// When a reverse cross would close+flip an open leg, the flip now also
+	// requires a slower fast/slow SMA pair on this interval (e.g. "1h") to
+	// agree with the new direction; if it doesn't, the reverse cross is
+	// ignored outright and the leg keeps riding untouched. Rationale
+	// (2026-08-20 finding): a same-timeframe cross on a fast pair (10/30 on
+	// 5m) regularly fires on a whipsaw inside a real higher-timeframe trend
+	// — this only lets a genuine HTF trend change flip a position that's
+	// still aligned with the bigger picture. The hard StopLossPct backstop
+	// and every other exit mechanism (AsymmetricExit/ScaleOut/BreakEven/
+	// StopOut) are unaffected — this only gates the cross_reversal close.
+	// Requires the engine's Intervals list to also include HTFInterval so
+	// the WS subscribes to it (see api.EngineManager's params.Intervals
+	// merge) — otherwise htfCloses never fills and the gate silently
+	// fails open (see htfDir), which is safe but inert.
+	// Empty disables the gate entirely (default — zero behavior change).
+	// 2026-08-21 backtest: on BTCUSDT 5m, gating reversals with a 1h 20/60
+	// pair roughly doubled profit factor over both a 7-week and a 7-month
+	// window vs reversing on every cross (not a narrow-window fluke) — but
+	// it reduces whipsaw damage, it does not manufacture a positive edge on
+	// its own; still net negative both windows in isolation from the rest
+	// of the exit stack. See docs/research/ (if written up) or ask instead
+	// of assuming this alone fixes the underlying edge question.
+	HTFInterval string
+	// HTFFastPeriod/HTFSlowPeriod: the HTF SMA pair. Default to 20/60 (the
+	// backtested combination above) when HTFInterval is set and these are
+	// left at 0.
+	HTFFastPeriod int
+	HTFSlowPeriod int
+	// HTFMinSpreadPct requires the HTF fast/slow spread to clear this
+	// fraction (of the slow value) before the gate treats it as a decisive
+	// opinion; a narrower spread reads as neutral (0 — fails open, letting
+	// AsymmetricExit's profitability check decide on its own). <= 0 means
+	// any nonzero spread counts (the original behavior, unchanged). Models
+	// "big cycle vs small cycle": only let the HTF override AsymmetricExit
+	// when the bigger picture is actually trending, not just tilted.
+	HTFMinSpreadPct float64
 }
 
 // MACross is a dual-SMA crossover strategy with optional short-selling support.
@@ -252,6 +291,11 @@ type MACross struct {
 	// restart recovery for pending limit entries (optional; nil in backtest/paper).
 	store        StateStore
 	restoreTried bool // guards the one-shot restart cleanup below (once per process)
+
+	// htfCloses buffers Config.HTFInterval's closes for the optional
+	// higher-timeframe reversal gate (see Config.HTFInterval). Unused
+	// (stays nil) when the gate is disabled.
+	htfCloses []float64
 }
 
 // positionReporter reports whether a live position exists on a side, and its
@@ -315,6 +359,13 @@ func (m *MACross) Name() string {
 // OnBar implements strategy.Strategy.
 func (m *MACross) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	if bar.Symbol != m.cfg.Symbol {
+		return
+	}
+	// Higher-timeframe bars (Config.HTFInterval) only feed the reversal gate's
+	// SMA buffer — they never touch position/warmup/pending-entry state, which
+	// all belong to the primary interval. Must come before restoreState etc.
+	if m.cfg.HTFInterval != "" && bar.Interval == m.cfg.HTFInterval {
+		m.htfCloses = append(m.htfCloses, bar.Close)
 		return
 	}
 	m.restoreState(ctx)
@@ -568,6 +619,68 @@ func (m *MACross) onBarSimple(ctx *strategy.Context, bar exchange.Kline, fast, s
 	}
 }
 
+// htfDir returns the higher-timeframe trend direction implied by
+// Config.HTFInterval's fast/slow SMA pair: +1 bullish, -1 bearish, 0 if the
+// gate is disabled, not enough HTF bars have arrived yet, the pair is
+// exactly flat, or (when Config.HTFMinSpreadPct > 0) the spread between
+// them hasn't cleared that minimum — a narrow HTF spread means the bigger
+// picture itself is directionless/chopping, not that it has "decided"
+// against the reversal, so it reads the same as no opinion. 0 is
+// deliberately "no opinion" rather than "bearish" — see htfAgrees, which
+// fails open on it (2026-08-21: this is what lets AsymmetricExit's own
+// profitability-based hold-through keep doing its job during genuinely
+// range-bound HTF conditions, while the HTF gate only takes over the
+// reversal decision once the bigger picture is decisively trending).
+func (m *MACross) htfDir() int {
+	if m.cfg.HTFInterval == "" {
+		return 0
+	}
+	fastN := m.cfg.HTFFastPeriod
+	if fastN <= 0 {
+		fastN = 20
+	}
+	slowN := m.cfg.HTFSlowPeriod
+	if slowN <= 0 {
+		slowN = 60
+	}
+	if len(m.htfCloses) < slowN {
+		return 0
+	}
+	f := indicator.Last(indicator.SMA(m.htfCloses, fastN))
+	s := indicator.Last(indicator.SMA(m.htfCloses, slowN))
+	if m.cfg.HTFMinSpreadPct > 0 && s != 0 {
+		spread := (f - s) / s
+		if spread < 0 {
+			spread = -spread
+		}
+		if spread < m.cfg.HTFMinSpreadPct {
+			return 0
+		}
+	}
+	switch {
+	case f > s:
+		return 1
+	case f < s:
+		return -1
+	default:
+		return 0
+	}
+}
+
+// htfAgrees reports whether the higher-timeframe gate allows a reversal in
+// direction dir (+1 golden/long, -1 death/short). The gate only actively
+// BLOCKS a reversal when it has a confident opposite HTF reading — disabled,
+// insufficient data, and a flat/neutral HTF all fail open (true), matching
+// "don't gate anything the plain cross logic wouldn't already do" when the
+// gate has nothing useful to say.
+func (m *MACross) htfAgrees(dir int) bool {
+	if m.cfg.HTFInterval == "" {
+		return true
+	}
+	h := m.htfDir()
+	return h == 0 || h == dir
+}
+
 // onBarHedge handles the hedge mode (simultaneous LONG/SHORT for futures/swap).
 func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, slow []float64) {
 	// !bar.Warmup matters: a restart's warmup replay walks through historical
@@ -625,7 +738,7 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 			zap.Float64("slow", indicator.Last(slow)),
 			zap.Float64("close", bar.Close),
 		)
-		if m.hasShort && (!m.cfg.AsymmetricExit || m.profitableEnoughToClose(bar.Close)) {
+		if m.hasShort && (!m.cfg.AsymmetricExit || m.profitableEnoughToClose(bar.Close)) && m.htfAgrees(1) {
 			req := strategy.CloseShort(bar.Symbol, 0)
 			req.Reason = "cross_reversal"
 			ctx.PlaceOrder(req)
@@ -644,7 +757,7 @@ func (m *MACross) onBarHedge(ctx *strategy.Context, bar exchange.Kline, fast, sl
 			zap.Float64("slow", indicator.Last(slow)),
 			zap.Float64("close", bar.Close),
 		)
-		if m.hasLong && (!m.cfg.AsymmetricExit || m.profitableEnoughToClose(bar.Close)) {
+		if m.hasLong && (!m.cfg.AsymmetricExit || m.profitableEnoughToClose(bar.Close)) && m.htfAgrees(-1) {
 			req := strategy.CloseLong(bar.Symbol, 0)
 			req.Reason = "cross_reversal"
 			ctx.PlaceOrder(req)
@@ -1006,6 +1119,18 @@ func init() {
 		}
 		if v, ok := params["StopOut2Frac"]; ok {
 			cfg.StopOut2Frac = toFloat(v)
+		}
+		if v, ok := params["HTFInterval"].(string); ok {
+			cfg.HTFInterval = v
+		} // default "" == disabled, unchanged behaviour
+		if v, ok := params["HTFFastPeriod"]; ok {
+			cfg.HTFFastPeriod = toInt(v)
+		}
+		if v, ok := params["HTFSlowPeriod"]; ok {
+			cfg.HTFSlowPeriod = toInt(v)
+		}
+		if v, ok := params["HTFMinSpreadPct"]; ok {
+			cfg.HTFMinSpreadPct = toFloat(v)
 		}
 		if cfg.FastPeriod == 0 {
 			cfg.FastPeriod = 10
