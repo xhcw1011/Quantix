@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { closeEnginePosition } from '../api/trading'
 import { fmtPrice, fmtQty, fmtSignedUsd, sideCn } from '../lib/positionFormat'
+import { useConfirm } from '../hooks/useConfirm'
 
 export interface PositionView {
   symbol: string
@@ -21,14 +22,16 @@ interface PositionRowsProps {
 
 export default function PositionRows({ engineId, mode, lastPrice, positions, onClosed }: PositionRowsProps) {
   const [closingKey, setClosingKey] = useState<string | null>(null)
+  const confirm = useConfirm()
 
   if (positions.length === 0) return null
 
   const handleClose = async (symbol: string, side: 'LONG' | 'SHORT', qty: number) => {
-    const ok = window.confirm(
-      `确定平掉 ${symbol} 的${sideCn(side)}仓位(${fmtQty(qty)})吗?\n\n` +
-      `这会在交易所下一个"只减仓"的市价单立即平掉该方向,策略引擎会继续运行。`
-    )
+    const ok = await confirm({
+      title: `平掉 ${symbol} 的${sideCn(side)}仓位？`,
+      message: `数量 ${fmtQty(qty)}。这会在交易所下一个"只减仓"的市价单立即平掉该方向，策略引擎会继续运行。`,
+      confirmLabel: '平仓',
+    })
     if (!ok) return
     const key = `${engineId}-${side}`
     setClosingKey(key)

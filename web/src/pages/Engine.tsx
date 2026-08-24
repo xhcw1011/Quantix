@@ -13,6 +13,7 @@ import { type PositionView } from '../components/PositionRows'
 import StoppedEnginesList from '../components/StoppedEnginesList'
 import RunningEnginesList from '../components/RunningEnginesList'
 import { INPUT_CLASS } from '../lib/inputStyles'
+import { useConfirm } from '../hooks/useConfirm'
 
 interface Preset {
   name: string
@@ -72,6 +73,7 @@ const initialForm = {
 
 export default function Engine() {
   const navigate = useNavigate()
+  const confirm = useConfirm()
   const [engines, setEngines] = useState<EngineInfo[]>([])
   const [creds, setCreds] = useState<Credential[]>([])
   const [strategies, setStrategies] = useState<string[]>(['macross', 'grid', 'meanreversion', 'mlstrat'])
@@ -104,6 +106,9 @@ export default function Engine() {
   })
   // 自动守仓参数按 U 还是按 % 输入(默认按 U — U 本位用户想直接看会亏赚多少 U)。
   const [guardianUMode, setGuardianUMode] = useState<boolean>(true)
+  // 止盈单独支持按绝对价格设置(后端 TPMode="price" 早就支持,只是之前没接到 UI 上)。
+  // 只影响 TPValue 这一个字段,跟其它字段的 U/% 切换是独立的。
+  const [guardianTPPriceMode, setGuardianTPPriceMode] = useState<boolean>(false)
   // 守护"账户已有持仓"(没开顺便帮我开仓)时,用于估算盈亏的持仓数量;仅前端估算,不发后端。
   const [guardianAdoptQty, setGuardianAdoptQty] = useState<number>(0)
   // 开仓"数量"按哪种单位填(默认名义 U:开多大的仓,与杠杆无关)。canonical 仍是币数量。
@@ -278,11 +283,16 @@ export default function Engine() {
         }
       }
       // Dynamic strategy fields — highest priority, override preset + textarea.
+      const tpIsPrice = form.strategy_id === 'guardian' && guardianTPPriceMode
       for (const f of fieldsForStrategy(form.strategy_id)) {
         let v: any = stratParams[f.key]
         if (v === '' || v === undefined) continue
-        if (f.type === 'number') { v = Number(v); if (f.pctOf1) v = v / 100 }
+        const isTPPrice = tpIsPrice && f.key === 'TPValue'
+        if (f.type === 'number') { v = Number(v); if (f.pctOf1 && !isTPPrice) v = v / 100 }
         params[f.key] = v
+      }
+      if (tpIsPrice && params.TPValue > 0) {
+        params.TPMode = 'price'
       }
       // 自动守仓 — 顺便帮我开仓: place + protect. Otherwise adopt the existing position.
       if (form.strategy_id === 'guardian' && guardianEntry.enabled) {
@@ -315,10 +325,14 @@ export default function Engine() {
 
   const handleStop = useCallback(async (engineId: string) => {
     const hasPosition = (positionsByEngineRef.current[engineId]?.positions.length ?? 0) > 0
-    const warning = hasPosition
-      ? `确定停止「${engineId}」?这个引擎当前还有持仓,停止后不会再有策略帮你管理止损/止盈,仓位会保持原样挂在交易所上。会取消所有未成交挂单。`
-      : `确定停止「${engineId}」?会取消所有未成交挂单。`
-    if (!confirm(warning)) return
+    const ok = await confirm({
+      title: `停止「${engineId}」？`,
+      message: hasPosition
+        ? '⚠️ 停止会撤销该引擎的全部挂单，并按市价平掉它当前的持仓。此操作会真实成交、不可撤销。'
+        : '会取消所有未成交挂单。',
+      confirmLabel: '停止',
+    })
+    if (!ok) return
     setStoppingId(engineId)
     try {
       await stopEngineById(engineId)
@@ -328,7 +342,7 @@ export default function Engine() {
     } finally {
       setStoppingId(null)
     }
-  }, [loadEngines])
+  }, [loadEngines, confirm])
 
   const handleNavigate = useCallback((engineId: string) => navigate(`/engine/${engineId}`), [navigate])
 
@@ -750,6 +764,32 @@ export default function Engine() {
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {fields.map((f) => {
+                      if (f.key === 'TPValue' && guardianTPPriceMode) {
+                        const side = guardianEntry.enabled ? guardianEntry.side : null
+                        const dirHint = side === 'long' ? '(做多,止盈价要比开仓价高)' : side === 'short' ? '(做空,止盈价要比开仓价低)' : ''
+                        return (
+                          <div key={f.key}>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-xs text-slate-400">{f.label} (价格)</label>
+                              <button
+                                type="button"
+                                onClick={() => setGuardianTPPriceMode(false)}
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300"
+                              >切回按 %</button>
+                            </div>
+                            <NumberInput
+                              value={stratParams[f.key] === '' || stratParams[f.key] == null ? '' : Number(stratParams[f.key])}
+                              min={0}
+                              onChange={(v) => setStratParams((p) => ({ ...p, [f.key]: v }))}
+                              className={INPUT_CLASS}
+                              placeholder={symbolPriceNum ? `例如 ${symbolPriceNum}` : '目标平仓价'}
+                            />
+                            <p className="text-[10px] text-slate-500 mt-0.5">
+                              价格到这个数就全平落袋{dirHint ? ' ' + dirHint : ''}
+                            </p>
+                          </div>
+                        )
+                      }
                       const raw = stratParams[f.key]
                       const pct = Number(raw === '' || raw == null ? f.default : raw) || 0
                       const useU = guardianUMode && canEstimateU
@@ -759,9 +799,18 @@ export default function Engine() {
                       const displayVal = raw === '' ? '' : (useU ? round2(u ?? 0) : pct)
                       return (
                         <div key={f.key}>
-                          <label className="block text-xs text-slate-400 mb-1">
-                            {f.label}{useU ? ' (U)' : ' (%)'}
-                          </label>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-xs text-slate-400">
+                              {f.label}{useU ? ' (U)' : ' (%)'}
+                            </label>
+                            {f.key === 'TPValue' && (
+                              <button
+                                type="button"
+                                onClick={() => setGuardianTPPriceMode(true)}
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300"
+                              >改按价格</button>
+                            )}
+                          </div>
                           <NumberInput
                             value={displayVal}
                             min={0}

@@ -2,6 +2,7 @@ import React, { useEffect, Suspense, lazy } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import { useAuthStore } from './store/authStore'
 import Layout from './components/Layout'
+import { ConfirmProvider } from './components/ConfirmDialog'
 
 const Login = lazy(() => import('./pages/Login'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -126,38 +127,40 @@ function ViewportManager() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <BrowserRouter>
-        <AuthLogoutListener />
-        <ViewportManager />
-        <Suspense fallback={<PageFallback />}>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route
-              path="/*"
-              element={
-                <ProtectedRoute>
-                  <Layout>
-                    <ErrorBoundary>
-                      <Suspense fallback={<PageFallback />}>
-                        <Routes>
-                          <Route path="/" element={<Dashboard />} />
-                          <Route path="/fills" element={<Fills />} />
-                          <Route path="/orders" element={<Orders />} />
-                          <Route path="/credentials" element={<Credentials />} />
-                          <Route path="/engine" element={<Engine />} />
-                          <Route path="/engine/:engineId" element={<EngineDetail />} />
-                          <Route path="/admin" element={<AdminRoute><Admin /></AdminRoute>} />
-                          <Route path="/settings" element={<Settings />} />
-                        </Routes>
-                      </Suspense>
-                    </ErrorBoundary>
-                  </Layout>
-                </ProtectedRoute>
-              }
-            />
-          </Routes>
-        </Suspense>
-      </BrowserRouter>
+      <ConfirmProvider>
+        <BrowserRouter>
+          <AuthLogoutListener />
+          <ViewportManager />
+          <Suspense fallback={<PageFallback />}>
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route
+                path="/*"
+                element={
+                  <ProtectedRoute>
+                    <Layout>
+                      <ErrorBoundary>
+                        <Suspense fallback={<PageFallback />}>
+                          <Routes>
+                            <Route path="/" element={<Dashboard />} />
+                            <Route path="/fills" element={<Fills />} />
+                            <Route path="/orders" element={<Orders />} />
+                            <Route path="/credentials" element={<Credentials />} />
+                            <Route path="/engine" element={<Engine />} />
+                            <Route path="/engine/:engineId" element={<EngineDetail />} />
+                            <Route path="/admin" element={<AdminRoute><Admin /></AdminRoute>} />
+                            <Route path="/settings" element={<Settings />} />
+                          </Routes>
+                        </Suspense>
+                      </ErrorBoundary>
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+            </Routes>
+          </Suspense>
+        </BrowserRouter>
+      </ConfirmProvider>
     </ErrorBoundary>
   )
 }

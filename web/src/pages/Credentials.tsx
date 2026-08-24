@@ -3,6 +3,7 @@ import {
   listCredentials, createCredential, deleteCredential, testCredential
 } from '../api/trading'
 import { INPUT_CLASS } from '../lib/inputStyles'
+import { useConfirm } from '../hooks/useConfirm'
 
 interface Credential {
   id: number
@@ -49,6 +50,7 @@ interface HealthInfo {
 type AccountType = 'live' | 'sim'
 
 export default function Credentials() {
+  const confirm = useConfirm()
   const [creds, setCreds] = useState<Credential[]>([])
   const [form, setForm] = useState(initialForm)
   const [accountType, setAccountType] = useState<AccountType>('live')
@@ -109,7 +111,8 @@ export default function Credentials() {
   }
 
   const handleDelete = async (id: number) => {
-    if (!confirm('确定要删除这个账户吗?')) return
+    const ok = await confirm({ title: '删除这个账户？', message: '删除后需要重新添加 API Key 才能恢复。', confirmLabel: '删除' })
+    if (!ok) return
     await deleteCredential(id)
     load()
   }
