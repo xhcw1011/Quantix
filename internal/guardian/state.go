@@ -10,6 +10,8 @@ type GuardianState struct {
 	Activated        bool    `json:"activated"`
 	StopOrderID      string  `json:"stop_order_id"`
 	RestingStopPrice float64 `json:"resting_stop_price"`
+	TPOrderID        string  `json:"tp_order_id"`
+	RestingTPPrice   float64 `json:"resting_tp_price"`
 	// EntryPlaced records that this guardian's one-shot "place the entry for me"
 	// instruction (PlaceEntry/wantEntry) has already fired at least once. Without
 	// this surviving a restart, a wantEntry guardian re-reads its stored config on

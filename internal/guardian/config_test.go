@@ -18,7 +18,7 @@ func TestParseConfig_Defaults(t *testing.T) {
 	if gc.Prot.StopMode != StopPct || gc.Prot.StopValue != 0.03 {
 		t.Fatalf("default stop should be plain 3%%, got %+v", gc.Prot)
 	}
-	if !gc.Prot.TrailEnabled || gc.Prot.ActivateR != 1 || gc.Prot.TrailMode != TrailR {
+	if !gc.Prot.TrailEnabled || gc.Prot.ActivateR != 0.3 || gc.Prot.TrailMode != TrailR || gc.Prot.TrailValue != 0.5 {
 		t.Fatalf("default trail wrong: %+v", gc.Prot)
 	}
 	if gc.Prot.TPMode != TPNone {

@@ -13,9 +13,9 @@ func TestParseProtection_TrailActivate(t *testing.T) {
 	if p.TrailEnabled {
 		t.Fatalf("want trailing off at 0, got enabled")
 	}
-	// absent → default on (1R).
+	// absent → default on (0.3R).
 	p = parseProtection(map[string]any{"StopValue": 0.05})
-	if !p.TrailEnabled || p.ActivateR != 1 {
-		t.Fatalf("want default trailing on at 1R, got enabled=%v activateR=%v", p.TrailEnabled, p.ActivateR)
+	if !p.TrailEnabled || p.ActivateR != 0.3 {
+		t.Fatalf("want default trailing on at 0.3R, got enabled=%v activateR=%v", p.TrailEnabled, p.ActivateR)
 	}
 }

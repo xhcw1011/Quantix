@@ -5,11 +5,34 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Quantix/quantix/internal/exchange"
 	"github.com/Quantix/quantix/internal/position"
 	"github.com/Quantix/quantix/internal/strategy"
 	"go.uber.org/zap"
+)
+
+// Retry pacing for rejected orders (see rejectBackoff in backoff.go). Entry
+// and partial-TP rejections aren't naked-position emergencies, so they back
+// off slower and cap higher; a rejected close leaves the position exposed
+// right now, so it retries sooner and caps lower. All three notify once
+// immediately and at most every notifyEvery thereafter while the rejection
+// persists — never every single retry (2026-08-24 incident: a persistent
+// leverage-cap rejection retried every 30s for 10 hours, one Telegram
+// message each time, before backoff existed).
+const (
+	entryRetryBase   = 30 * time.Second
+	entryRetryMax    = 10 * time.Minute
+	entryNotifyEvery = 10 * time.Minute
+
+	closeRetryBase   = 5 * time.Second
+	closeRetryMax    = 5 * time.Minute
+	closeNotifyEvery = 5 * time.Minute
+
+	partialTPRetryBase   = 30 * time.Second
+	partialTPRetryMax    = 10 * time.Minute
+	partialTPNotifyEvery = 10 * time.Minute
 )
 
 // fmtPrice formats a price as a plain number with thousands separators (never
@@ -114,6 +137,18 @@ type Guardian struct {
 	stopOrderID      string
 	restingStopPrice float64 // stop price currently resting on the exchange
 
+	// resting-take-profit (opt-in; live). When on and a take-profit is
+	// configured, it is an exchange-native reduce-only LIMIT order at the TP
+	// price placed as soon as the position is armed — it fills exactly there
+	// (maker, no slippage) instead of a market close fired after a tick
+	// crosses the target. If placement fails, restingTPMode stays false and
+	// the tick-based market close (checkExitBar/OnTick) is used as a fallback.
+	wantRestingTP  bool
+	restingTPMode  bool
+	tpTried        bool
+	tpOrderID      string
+	restingTPPrice float64 // TP price currently resting on the exchange
+
 	// restart recovery (optional). restoreLoaded/restoredState guard the ONE
 	// store.Load() call (across both OnBar/OnTick call sites and however many
 	// bars arming takes); trailApplied guards the post-arm overlay, which may
@@ -133,6 +168,11 @@ type Guardian struct {
 	entryType   string  // "market" (default) or "limit"
 	entryPrice  float64 // limit price when entryType == "limit"
 	entryPlaced bool
+	// {entry,close,partialTP}Backoff pace retries of a rejected order (see
+	// rejectBackoff in backoff.go) — growing wait, throttled notification.
+	entryBackoff     rejectBackoff
+	closeBackoff     rejectBackoff
+	partialTPBackoff rejectBackoff
 }
 
 // NewGuardian builds a Guardian for an already-armed Protection (ModeExplicit,
@@ -186,6 +226,7 @@ func (g *Guardian) UpdateParams(ctx *strategy.Context, params map[string]any) er
 	}
 	g.prot.UpdateConfig(newCfg, g.atr.Value())
 	g.forceResyncRestingStop(ctx) // exchange stop must match the new level (either direction)
+	g.forceResyncRestingTP(ctx)   // exchange TP must match the new target (new price, or on/off)
 	tp := "不设"
 	if g.prot.TPPrice() > 0 {
 		tp = fmtPrice(g.prot.TPPrice())
@@ -207,6 +248,25 @@ func (g *Guardian) forceResyncRestingStop(ctx *strategy.Context) {
 	_ = ctx.CancelOrder(g.stopOrderID)
 	g.stopOrderID = ""
 	g.placeRestingStop(ctx)
+}
+
+// forceResyncRestingTP re-places the resting take-profit limit at the current
+// TP price after a live parameter edit, which may change the target price,
+// turn take-profit on, or turn it off entirely. No-op when resting-TP was
+// never enabled for this guardian (backtest/paper, or wantRestingTP off).
+func (g *Guardian) forceResyncRestingTP(ctx *strategy.Context) {
+	if !g.wantRestingTP || g.prot == nil {
+		return
+	}
+	if g.tpOrderID != "" {
+		_ = ctx.CancelOrder(g.tpOrderID)
+		g.tpOrderID = ""
+		g.restingTPMode = false
+	}
+	if g.prot.TPPrice() > 0 {
+		g.tpTried = true // mark handled so ensureRestingTP doesn't also place it
+		g.placeRestingTP(ctx)
+	}
 }
 
 // SetLimitEntry switches arm-with-entry to a resting LIMIT order at price (0 or
@@ -260,12 +320,15 @@ func (g *Guardian) livePosition(ctx *strategy.Context) *position.StrategyPositio
 func (g *Guardian) enterOrAdopt(ctx *strategy.Context, atr float64, isWarmup bool) bool {
 	pos := g.livePosition(ctx)
 	if pos == nil {
-		if isWarmup || g.entryPlaced {
+		if isWarmup || g.entryPlaced || !g.entryBackoff.ready() {
 			// isWarmup: don't open during warmup replay — the order is suppressed.
 			// entryPlaced: the one-shot entry already fired in a prior call/run —
 			// don't place a second one. (If it already filled, the branch above
 			// would have caught it via the live position; if it's still pending,
 			// wait rather than duplicate it.)
+			// entryBackoff: a prior attempt was just rejected (placeEntry resets
+			// entryPlaced so it isn't stuck forever) — back off before retrying
+			// instead of re-submitting on every tick.
 			return false
 		}
 		g.placeEntry(ctx) // first run, live bar: no existing position → open it
@@ -319,7 +382,32 @@ func (g *Guardian) placeEntry(ctx *strategy.Context) {
 		kind = fmt.Sprintf("限价%s", fmtPrice(g.entryPrice))
 	}
 	req.Reason = "guardian_entry"
-	ctx.PlaceOrder(req)
+	id := ctx.PlaceOrder(req)
+	if id == "" {
+		// PlaceOrder submits synchronously up through the exchange call (only
+		// FILL confirmation is async), so an empty ID means the order was
+		// rejected right here — by the exchange (e.g. insufficient margin) or
+		// by our own risk gate (e.g. leverage cap) — and nothing is live on
+		// the exchange. The one-shot guard above must not stick in that case:
+		// entryPlaced=true with no order and no position left every future
+		// restart/retry (even with corrected params) silently no-op forever,
+		// with only a log line to show for it (confirmed live twice in one
+		// day, 2026-08-21). Backing off — rather than a flat cooldown —
+		// matters because some rejection reasons never resolve on their own
+		// (a leverage cap doesn't get less exceeded by waiting): a flat 30s
+		// retry hammered the exchange and paged Telegram every 30s for 10
+		// hours straight (2026-08-24) before this existed.
+		g.entryPlaced = false
+		g.clearState()
+		notify := g.entryBackoff.record(entryRetryBase, entryRetryMax, entryNotifyEvery)
+		g.log.Warn("guardian：开仓单被拒绝，已重置一次性开仓标记，可以重新尝试",
+			zap.String("symbol", g.symbol), zap.Int("reject_count", g.entryBackoff.count))
+		if notify {
+			g.notifyAction("entry_failed", "开仓单被拒绝(交易所或风控,比如保证金/杠杆超限),已重置,调整好参数后可以重新开始。会自动重试,持续失败只会间隔性提醒")
+		}
+		return
+	}
+	g.entryBackoff.reset()
 	g.notifyAction("entry", fmt.Sprintf("已按你的指令%s开%s单 %.6g,成交后自动挂上保护", kind, dir, g.entryQty))
 }
 
@@ -371,6 +459,13 @@ func (g *Guardian) SetDispatcher(d Dispatcher) { g.dispatch = d }
 // stays off in backtest/paper, where the tick-based close is used.
 func (g *Guardian) SetRestingStop(on bool) { g.wantRestingStop = on }
 
+// SetRestingTP enables placing an exchange-native resting reduce-only LIMIT
+// order at the take-profit price as soon as the position is armed, so it
+// fills exactly there instead of via a tick-triggered market close. The live
+// engine turns this on; it stays off in backtest/paper. No-op when no
+// take-profit is configured (TPMode/TPValue unset).
+func (g *Guardian) SetRestingTP(on bool) { g.wantRestingTP = on }
+
 // SetStateStore wires persistence so the trailed stop survives a restart. key is
 // the engine id; the live engine supplies a DB-backed store.
 func (g *Guardian) SetStateStore(store StateStore, key string) {
@@ -415,6 +510,13 @@ func (g *Guardian) restoreState() {
 			g.restingMode = true
 			g.restingTried = true
 		}
+		g.tpOrderID = st.TPOrderID
+		g.restingTPPrice = st.RestingTPPrice
+		if st.TPOrderID != "" {
+			// The resting take-profit still lives on the exchange; don't duplicate it.
+			g.restingTPMode = true
+			g.tpTried = true
+		}
 		g.log.Info("guardian：重启后已恢复跟踪止损状态",
 			zap.String("symbol", g.symbol), zap.Float64("stop", st.Stop))
 	}
@@ -433,6 +535,8 @@ func (g *Guardian) saveState() {
 		Activated:        g.prot.Activated(),
 		StopOrderID:      g.stopOrderID,
 		RestingStopPrice: g.restingStopPrice,
+		TPOrderID:        g.tpOrderID,
+		RestingTPPrice:   g.restingTPPrice,
 		EntryPlaced:      g.entryPlaced,
 		PartialDone:      g.partialDone,
 		Closing:          g.phase == PhaseClosing,
@@ -477,6 +581,9 @@ func (g *Guardian) maybePartialTP(ctx *strategy.Context, price float64) {
 	if g.partialDone || g.prot == nil || g.inactive() || !g.prot.PartialTPReady(price) {
 		return
 	}
+	if !g.partialTPBackoff.ready() {
+		return
+	}
 	g.partialDone = true
 	g.saveState() // persist immediately so a restart before the next trail-save doesn't forget
 	qty := g.prot.PartialTPQty()
@@ -487,7 +594,25 @@ func (g *Guardian) maybePartialTP(ctx *strategy.Context, price float64) {
 		req = strategy.CloseShort(g.symbol, qty)
 	}
 	req.Reason = "guardian_partial_tp"
-	ctx.PlaceOrder(req)
+	id := ctx.PlaceOrder(req)
+	if id == "" {
+		// Rejected — unlike placeClose, the stop-loss is untouched here, so
+		// this isn't a naked-position emergency, just a silently missed
+		// profit-bank if left alone (2026-08-21 audit finding: partialDone
+		// was set true before the result was known, with no reset AND no
+		// notification on failure — the user would believe they'd banked
+		// profit they never actually banked).
+		g.partialDone = false
+		g.saveState()
+		notify := g.partialTPBackoff.record(partialTPRetryBase, partialTPRetryMax, partialTPNotifyEvery)
+		g.log.Warn("guardian：分批止盈单被拒绝，已重置，将在冷却后重试",
+			zap.String("symbol", g.symbol), zap.Int("reject_count", g.partialTPBackoff.count))
+		if notify {
+			g.notifyAction("partial_tp_failed", "分批止盈单被拒绝,还没有落袋,会自动重试(持续失败只会间隔性提醒)")
+		}
+		return
+	}
+	g.partialTPBackoff.reset()
 	g.notifyAction("partial_tp", fmt.Sprintf("已到分批止盈点,先平掉 %.6g(约一半)落袋,剩下继续让止损守着跑", qty))
 }
 
@@ -577,6 +702,54 @@ func (g *Guardian) stopReq() strategy.OrderRequest {
 	return req
 }
 
+// ensureRestingTP places the resting take-profit limit once, the first time
+// the position is armed. No-op when no take-profit is configured — checked
+// every call (not latched) so a TP added later via UpdateParams still gets
+// picked up promptly through forceResyncRestingTP instead.
+func (g *Guardian) ensureRestingTP(ctx *strategy.Context) {
+	if !g.wantRestingTP || g.tpTried || g.prot == nil || g.inactive() || g.prot.TPPrice() <= 0 {
+		return
+	}
+	g.tpTried = true
+	g.placeRestingTP(ctx)
+	if g.restingTPMode {
+		g.notifyAction("tp_placed", fmt.Sprintf("已挂交易所止盈单 @ %s,到价自动成交(限价,省滑点)", fmtPrice(g.prot.TPPrice())))
+	}
+}
+
+// placeRestingTP submits a reduce-only LIMIT at the take-profit price. On
+// success the exchange owns the fill; on failure restingTPMode stays false
+// and the tick-based TP check (OnTick/checkExitBar) takes over.
+func (g *Guardian) placeRestingTP(ctx *strategy.Context) {
+	id := ctx.PlaceOrder(g.tpReq())
+	if id == "" {
+		g.restingTPMode = false
+		return
+	}
+	g.tpOrderID = id
+	g.restingTPPrice = g.prot.TPPrice()
+	g.restingTPMode = true
+	g.saveState()
+	g.log.Info("guardian：已挂出交易所止盈单",
+		zap.String("symbol", g.symbol), zap.Float64("tp", g.prot.TPPrice()),
+		zap.String("order", id))
+}
+
+// tpReq builds the reduce-only LIMIT order for the current take-profit price.
+func (g *Guardian) tpReq() strategy.OrderRequest {
+	var req strategy.OrderRequest
+	if g.prot.Side == SideLong {
+		req = strategy.OrderRequest{Symbol: g.symbol, Side: strategy.SideSell, PositionSide: strategy.PositionSideLong}
+	} else {
+		req = strategy.OrderRequest{Symbol: g.symbol, Side: strategy.SideBuy, PositionSide: strategy.PositionSideShort}
+	}
+	req.Type = strategy.OrderLimit
+	req.Qty = g.prot.Qty
+	req.Price = g.prot.TPPrice()
+	req.Reason = "guardian_resting_tp"
+	return req
+}
+
 // Name identifies the strategy type.
 func (g *Guardian) Name() string { return "guardian" }
 
@@ -655,6 +828,7 @@ func (g *Guardian) OnBar(ctx *strategy.Context, bar exchange.Kline) {
 	}
 	g.notifyArmSummary()
 	g.ensureRestingStop(ctx)
+	g.ensureRestingTP(ctx)
 	g.barsHeld++
 	g.evalAlerts(bar.Close)
 	g.maybePartialTP(ctx, bar.Close)
@@ -712,10 +886,13 @@ func (g *Guardian) OnTick(ctx *strategy.Context, price float64) {
 	}
 	g.notifyArmSummary()
 	g.ensureRestingStop(ctx)
+	g.ensureRestingTP(ctx)
 	g.lastPrice = price
 	g.evalAlerts(price)
 	g.maybePartialTP(ctx, price)
-	if g.prot.TPHit(price) {
+	// In resting-TP mode the exchange owns the take-profit fill; the bot only
+	// needs to react once it's filled (via OnFill), not race it on ticks.
+	if !g.restingTPMode && g.prot.TPHit(price) {
 		g.placeClose(ctx, "take_profit")
 		return
 	}
@@ -772,6 +949,11 @@ func (g *Guardian) resyncPosition(ctx *strategy.Context) bool {
 			g.stopOrderID = ""
 			g.placeRestingStop(ctx)
 		}
+		if g.restingTPMode && g.tpOrderID != "" {
+			_ = ctx.CancelOrder(g.tpOrderID)
+			g.tpOrderID = ""
+			g.placeRestingTP(ctx)
+		}
 		g.log.Info("guardian：仓位数量有变化，止损数量已同步调整",
 			zap.String("symbol", g.symbol), zap.Float64("qty", absQty))
 		g.notifyAction("resized", fmt.Sprintf("检测到仓位变动,止损数量已调整为 %.6g", absQty))
@@ -788,6 +970,10 @@ func (g *Guardian) retire(ctx *strategy.Context) {
 	if g.stopOrderID != "" {
 		_ = ctx.CancelOrder(g.stopOrderID)
 		g.stopOrderID = ""
+	}
+	if g.tpOrderID != "" {
+		_ = ctx.CancelOrder(g.tpOrderID)
+		g.tpOrderID = ""
 	}
 	g.phase = PhaseClosed
 	g.clearState()
@@ -841,9 +1027,10 @@ func (g *Guardian) evalAlerts(price float64) {
 	}
 }
 
-// OnFill marks the guardian closed once its protective order (resting stop or a
-// tick-based close) has filled, and arms protection from an entry fill.
-func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
+// OnFill marks the guardian closed once its protective order (resting stop,
+// resting take-profit, or a tick-based close) has filled, and arms protection
+// from an entry fill.
+func (g *Guardian) OnFill(ctx *strategy.Context, fill strategy.Fill) {
 	// A partial take-profit fill shrinks the position but does NOT end the guardian;
 	// resyncPosition re-sizes the stop from the account qty on the next bar.
 	if fill.Reason == "guardian_partial_tp" {
@@ -858,18 +1045,65 @@ func (g *Guardian) OnFill(_ *strategy.Context, fill strategy.Fill) {
 			zap.Float64("qty", fill.Qty), zap.Float64("stop", g.prot.Stop))
 		return
 	}
-	if g.phase != PhaseClosed && (g.phase == PhaseClosing || g.stopOrderID != "") {
-		g.phase = PhaseClosed
-		g.stopOrderID = ""
-		// Without this, EVERY normal close-completion leaves the persisted
-		// Closing:true parked forever — poisoning the next, unrelated guardian
-		// that ever reuses this engine_id (deterministic, no session nonce).
-		g.clearState()
-		g.log.Info("guardian：保护性平仓单已成交",
-			zap.String("symbol", g.symbol),
-			zap.Float64("price", fill.Price))
-		g.notifyAction("closed", fmt.Sprintf("已按保护单平仓 @ %s,守护结束", fmtPrice(fill.Price)))
+	// Gating on stopOrderID != "" alone (the old check) misfires when
+	// enterOrAdopt arms protection (setting stopOrderID) via the position
+	// syncer BEFORE the entry order's own fill notification arrives: that
+	// late "guardian_entry" fill would then hit this branch and get
+	// mistaken for the protective stop filling, retiring the guardian on a
+	// position that was never closed (2026-08-21 incident — 3 of 4 same-day
+	// retirements on a real-money account were this race, not real closes).
+	// Explicitly excluding the two fill reasons that are never a close is
+	// enough to close that race without requiring every close path to be
+	// enumerated positively.
+	notAClose := fill.Reason == "guardian_entry" || fill.Reason == "guardian_partial_tp"
+	if g.phase == PhaseClosed || notAClose {
+		return
 	}
+	if g.phase != PhaseClosing && g.stopOrderID == "" && g.tpOrderID == "" {
+		return // not a close-related fill
+	}
+	// Stop and take-profit can both be resting on the exchange at once (an
+	// OCO pair): whichever fills, cancel the sibling so it doesn't orphan
+	// now the position is gone. The Reason (set on stopReq/tpReq, propagated
+	// onto the live Fill from its OrderRequest) says precisely which one
+	// this fill is, so we cancel only the untouched sibling. If Reason isn't
+	// available (some fill paths, e.g. restart recovery, don't carry it —
+	// and a tick-triggered market close via placeClose already cancelled
+	// both before submitting) fall back to cancelling both defensively:
+	// re-cancelling the one that already filled is a harmless no-op, but
+	// skipping a genuine sibling would leave it orphaned on the exchange.
+	switch fill.Reason {
+	case "guardian_resting_stop":
+		g.stopOrderID = ""
+		if g.tpOrderID != "" {
+			_ = ctx.CancelOrder(g.tpOrderID)
+			g.tpOrderID = ""
+		}
+	case "guardian_resting_tp":
+		g.tpOrderID = ""
+		if g.stopOrderID != "" {
+			_ = ctx.CancelOrder(g.stopOrderID)
+			g.stopOrderID = ""
+		}
+	default:
+		if g.stopOrderID != "" {
+			_ = ctx.CancelOrder(g.stopOrderID)
+			g.stopOrderID = ""
+		}
+		if g.tpOrderID != "" {
+			_ = ctx.CancelOrder(g.tpOrderID)
+			g.tpOrderID = ""
+		}
+	}
+	g.phase = PhaseClosed
+	// Without this, EVERY normal close-completion leaves the persisted
+	// Closing:true parked forever — poisoning the next, unrelated guardian
+	// that ever reuses this engine_id (deterministic, no session nonce).
+	g.clearState()
+	g.log.Info("guardian：保护性平仓单已成交",
+		zap.String("symbol", g.symbol),
+		zap.Float64("price", fill.Price))
+	g.notifyAction("closed", fmt.Sprintf("已按保护单平仓 @ %s,守护结束", fmtPrice(fill.Price)))
 }
 
 // Status exposes live state for the operator dashboard.
@@ -935,7 +1169,7 @@ func (g *Guardian) stopReason() string {
 
 func (g *Guardian) checkExitBar(ctx *strategy.Context, bar exchange.Kline) bool {
 	if g.prot.Side == SideLong {
-		if g.prot.TPHit(bar.High) {
+		if !g.restingTPMode && g.prot.TPHit(bar.High) {
 			g.placeClose(ctx, "take_profit")
 			return true
 		}
@@ -944,7 +1178,7 @@ func (g *Guardian) checkExitBar(ctx *strategy.Context, bar exchange.Kline) bool 
 			return true
 		}
 	} else {
-		if g.prot.TPHit(bar.Low) {
+		if !g.restingTPMode && g.prot.TPHit(bar.Low) {
 			g.placeClose(ctx, "take_profit")
 			return true
 		}
@@ -960,10 +1194,18 @@ func (g *Guardian) placeClose(ctx *strategy.Context, reason string) {
 	if g.phase == PhaseClosing || g.phase == PhaseClosed {
 		return
 	}
-	// Cancel any resting stop first so it doesn't orphan on the exchange.
+	if !g.closeBackoff.ready() {
+		return
+	}
+	// Cancel any resting protective orders first so they don't orphan on the
+	// exchange once this market close fills.
 	if g.stopOrderID != "" {
 		_ = ctx.CancelOrder(g.stopOrderID)
 		g.stopOrderID = ""
+	}
+	if g.tpOrderID != "" {
+		_ = ctx.CancelOrder(g.tpOrderID)
+		g.tpOrderID = ""
 	}
 	var req strategy.OrderRequest
 	if g.prot.Side == SideLong {
@@ -972,7 +1214,36 @@ func (g *Guardian) placeClose(ctx *strategy.Context, reason string) {
 		req = strategy.CloseShort(g.symbol, g.prot.Qty)
 	}
 	req.Reason = "guardian_" + reason
-	ctx.PlaceOrder(req)
+	verb := "止损"
+	if reason == "take_profit" {
+		verb = "止盈"
+	}
+	id := ctx.PlaceOrder(req)
+	if id == "" {
+		// Rejected — same shape as placeEntry's fix (PlaceOrder submits
+		// synchronously up through the exchange call, so an empty ID means
+		// the rejection is known right here). We already cancelled the
+		// resting stop above, so the position is genuinely naked at this
+		// instant: try to restore protection immediately instead of leaving
+		// phase stuck at Watching with no stop and no retry (2026-08-21
+		// audit finding — same failure class as the entry-rejection bug,
+		// found before it bit anyone live). Cooldown keeps a persistent
+		// rejection (rate limit, margin) from resubmitting every tick.
+		notify := g.closeBackoff.record(closeRetryBase, closeRetryMax, closeNotifyEvery)
+		if g.wantRestingStop {
+			g.placeRestingStop(ctx) // best-effort re-arm; tick fallback covers failure
+		}
+		if g.wantRestingTP && g.prot.TPPrice() > 0 {
+			g.placeRestingTP(ctx) // best-effort re-arm; tick fallback covers failure
+		}
+		g.log.Error("guardian：平仓单被拒绝，已尝试恢复保护",
+			zap.String("symbol", g.symbol), zap.String("reason", reason), zap.Int("reject_count", g.closeBackoff.count))
+		if notify {
+			g.notifyAction("close_failed", fmt.Sprintf("⚠️ %s单被拒绝,已尝试恢复保护,请立即检查仓位是否安全!会自动重试,持续失败只会间隔性提醒", verb))
+		}
+		return
+	}
+	g.closeBackoff.reset()
 	g.phase = PhaseClosing
 	// Persist Closing immediately — without this, a restart before the next
 	// trail-save would forget we're mid-close and re-arm from scratch as if
@@ -980,10 +1251,6 @@ func (g *Guardian) placeClose(ctx *strategy.Context, reason string) {
 	// closing a second, pre-existing gap: a restart used to be able to restore
 	// a stale stopOrderID pointing at an order we'd just cancelled above).
 	g.saveState()
-	verb := "止损"
-	if reason == "take_profit" {
-		verb = "止盈"
-	}
 	g.notifyAction("closing", fmt.Sprintf("已触发%s,正在平仓(约 %s)", verb, fmtPrice(g.lastPrice)))
 	g.log.Info("guardian：保护性平仓单已提交",
 		zap.String("symbol", g.symbol),

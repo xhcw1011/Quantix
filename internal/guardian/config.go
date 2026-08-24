@@ -127,12 +127,20 @@ func parseProtection(p map[string]any) ProtectionConfig {
 	// Plain-percentage defaults (intuitive for non-technical users); ATR mode
 	// stays available to API callers via StopMode="atr".
 	prot := ProtectionConfig{
-		StopMode:     parseStopMode(strOr(p, "StopMode", "pct")),
-		StopValue:    floatOr(p, "StopValue", 0.03),
+		StopMode:  parseStopMode(strOr(p, "StopMode", "pct")),
+		StopValue: floatOr(p, "StopValue", 0.03),
+		// Trailing starts early and follows tight (0.3R / 0.5R). A late/wide
+		// default (previously 1R / 1R) let a profitable position give most of
+		// its gain back to an ordinary pullback before the stop ever moved —
+		// the trade would go from "up nicely" to "closed at a loss" without
+		// trailing doing anything in between (2026-08-24: observed repeatedly
+		// on live positions). Locking in earlier costs some upside on trades
+		// that keep running, but stops a normal pullback from erasing profit
+		// that already existed.
 		TrailEnabled: boolOr(p, "TrailEnabled", true),
-		ActivateR:    floatOr(p, "ActivateR", 1),
+		ActivateR:    floatOr(p, "ActivateR", 0.3),
 		TrailMode:    parseTrailMode(strOr(p, "TrailMode", "r")),
-		TrailValue:   floatOr(p, "TrailValue", 1),
+		TrailValue:   floatOr(p, "TrailValue", 0.5),
 	}
 	// Take-profit: the UI sends only a value; a positive value means percent-of-
 	// entry unless an explicit mode is given, and 0 (or missing) means "no target".
@@ -153,7 +161,7 @@ func parseProtection(p map[string]any) ProtectionConfig {
 	}
 	// Trailing start: the UI sends TrailActivatePct (profit % at which the stop
 	// begins auto-advancing). 0 = fixed stop (no trailing); absent = keep the
-	// default (trailing on at 1R). Trail distance stays at the default (1R).
+	// default (trailing on at 0.3R). Trail distance stays at the default (0.5R).
 	if taPct := floatOr(p, "TrailActivatePct", -1); taPct >= 0 {
 		if taPct == 0 {
 			prot.TrailEnabled = false

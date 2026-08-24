@@ -504,6 +504,7 @@ func (m *EngineManager) Start(userID int, req StartRequest) (string, error) {
 		g.SetDispatcher(guardian.NewNotifyDispatcher(notifier))
 		if req.Mode == "live" {
 			g.SetRestingStop(true)
+			g.SetRestingTP(true)
 			g.SetStateStore(&guardianStateStore{store: m.store, userID: userID}, engineID)
 		}
 	}
@@ -902,20 +903,31 @@ func (m *EngineManager) stopRetiredEngine(userID int, engineID string) {
 }
 
 // Stop gracefully stops the engine identified by engineID for the given user.
+// A user-initiated stop also FLATTENS: it cancels every resting order and closes
+// any open position so nothing is left dangling on the exchange. (Deploy/reboot
+// shutdown goes through StopAllUsers, which deliberately does NOT flatten so
+// protective orders and positions survive the auto-restart.) This is also the
+// only way to clear a naked position left behind by a tripped circuit breaker,
+// since risk.Manager rejects every order the halted engine tries to place again
+// (see internal/live/engine_run.go onBar — 2026-08-21 finding).
 func (m *EngineManager) Stop(userID int, engineID string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	userEngines, ok := m.engines[userID]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("no engines for user %d", userID)
 	}
 	re, ok := userEngines[engineID]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("engine %q not found", engineID)
 	}
 	re.cancel()
 	delete(userEngines, engineID)
+	m.mu.Unlock() // release before the slow flatten/deactivate REST+DB calls
+
+	// Stop the strategy first (re.cancel above), then wipe the exchange state.
+	m.flattenEngine(re)
 
 	// Synchronously deactivate session to prevent ghost auto-restarts on next boot.
 	if m.store != nil {
@@ -930,6 +942,45 @@ func (m *EngineManager) Stop(userID int, engineID string) error {
 		sCancel()
 	}
 	return nil
+}
+
+// flattenEngine cancels resting orders and closes open positions for a live
+// engine being stopped by the user. No-op for paper engines (nothing on a real
+// exchange to clean up). Best-effort: errors are logged, not returned, so a
+// flatten failure never blocks the stop from completing.
+func (m *EngineManager) flattenEngine(re *runningEngine) {
+	if re == nil || re.engine == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := re.engine.Flatten(ctx, re.symbol); err != nil {
+		m.log.Warn("stop: flatten had errors (some orders/positions may remain)",
+			zap.Int("user_id", re.userID), zap.String("engine_id", re.engineID),
+			zap.String("symbol", re.symbol), zap.Error(err))
+		return
+	}
+	m.log.Info("stop: engine flattened (resting orders cancelled, positions closed)",
+		zap.Int("user_id", re.userID), zap.String("engine_id", re.engineID),
+		zap.String("symbol", re.symbol))
+
+	// A guardian's persisted state (entryPlaced, stopOrderID, closing, …) only
+	// makes sense relative to orders/positions that Flatten just wiped out —
+	// leaving it behind after a successful flatten stuck entryPlaced=true
+	// forever with nothing left on the exchange to fill it, silently no-oping
+	// every future restart (2026-08-21 incident: Flatten cancelling a still-
+	// resting entry order is a real, now-common way to hit exactly the class
+	// of staleness the strategy's own OnFill/reject paths already guard
+	// against — Stop needs the same guarantee). No-op (0 rows) for any
+	// engine_id that was never a guardian. Best-effort: a failure here just
+	// means the next attempt needs the same manual DB fix as before, not a
+	// stuck exchange order.
+	if m.store != nil {
+		if err := m.store.DeleteGuardianState(context.Background(), re.userID, re.engineID); err != nil {
+			m.log.Warn("stop: clearing guardian state failed (may cause stale entryPlaced on next start)",
+				zap.Int("user_id", re.userID), zap.String("engine_id", re.engineID), zap.Error(err))
+		}
+	}
 }
 
 // ClosePosition closes a single side of the engine's open position via the
@@ -959,20 +1010,28 @@ func (m *EngineManager) ClosePosition(ctx context.Context, userID int, engineID,
 }
 
 // StopAll stops all engines for the given user (used by legacy endpoint).
+// Like Stop, a user-initiated StopAll flattens each engine (cancel resting orders
+// + close positions). Engines are detached under the lock, then flattened outside
+// it so the slow exchange calls don't block other manager operations.
 func (m *EngineManager) StopAll(userID int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	stopped := make([]*runningEngine, 0, len(m.engines[userID]))
 	for id, re := range m.engines[userID] {
 		re.cancel()
 		delete(m.engines[userID], id)
+		stopped = append(stopped, re)
+	}
+	m.mu.Unlock()
+
+	for _, re := range stopped {
+		m.flattenEngine(re)
 		// Synchronously deactivate session to prevent ghost auto-restarts.
 		if m.store != nil {
 			sCtx, sCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := m.store.DeactivateEngineSession(sCtx, userID, id); err != nil {
+			if err := m.store.DeactivateEngineSession(sCtx, userID, re.engineID); err != nil {
 				m.log.Error("deactivate engine session failed — session may auto-restart on next boot",
 					zap.Int("user_id", userID),
-					zap.String("engine_id", id),
+					zap.String("engine_id", re.engineID),
 					zap.Error(err),
 				)
 			}

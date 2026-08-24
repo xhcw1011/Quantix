@@ -16,11 +16,15 @@ type relBroker struct {
 	canceled      []string
 	seq           int
 	noRestingStop bool // simulate an environment where STOP_MARKET can't rest (returns "")
+	noRestingTP   bool // simulate an environment where the resting take-profit LIMIT can't rest (returns "")
 }
 
 func (b *relBroker) PlaceOrder(req strategy.OrderRequest) string {
 	b.placed = append(b.placed, req)
 	if req.Type == strategy.OrderStopMarket && b.noRestingStop {
+		return ""
+	}
+	if req.Type == strategy.OrderLimit && req.Reason == "guardian_resting_tp" && b.noRestingTP {
 		return ""
 	}
 	b.seq++
@@ -234,6 +238,194 @@ func TestGuardian_ArmWithEntry(t *testing.T) {
 	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
 	if len(b.byReason("guardian_entry")) != 1 {
 		t.Fatal("entry must be placed only once")
+	}
+}
+
+// tpCfg mirrors trailCfg() (stop = 95) but also configures a take-profit at
+// 3R = 115, for resting-take-profit tests.
+func tpCfg() ProtectionConfig {
+	cfg := trailCfg()
+	cfg.TPMode = TPR
+	cfg.TPValue = 3
+	return cfg
+}
+
+func newRestingLongWithTP() (*Guardian, *relBroker, *strategy.Context) {
+	g := NewGuardian("ETHUSDT", NewProtection(SideLong, 100, 1, tpCfg(), 0), 14, zap.NewNop())
+	g.SetRestingStop(true)
+	g.SetRestingTP(true)
+	b := &relBroker{}
+	ctx := strategy.NewContext(&gPortfolio{qty: 1, avg: 100}, b, zap.NewNop())
+	return g, b, ctx
+}
+
+func TestGuardian_PlacesRestingTPOnArm(t *testing.T) {
+	g, b, ctx := newRestingLongWithTP() // tp = 115
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
+
+	to := b.byType(strategy.OrderLimit)
+	if len(to) != 1 {
+		t.Fatalf("want exactly 1 resting take-profit, got %d", len(to))
+	}
+	if to[0].Price != 115 || to[0].Side != strategy.SideSell || to[0].Reason != "guardian_resting_tp" {
+		t.Fatalf("resting take-profit wrong: %+v", to[0])
+	}
+	if !g.restingTPMode {
+		t.Fatal("should be in resting-TP mode after a successful placement")
+	}
+}
+
+func TestGuardian_RestingTPMode_NoTickCloseUntilFill(t *testing.T) {
+	g, b, ctx := newRestingLongWithTP()
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // arm + rest stop@95 + TP@115
+	g.OnTick(ctx, 116)                                                      // above TP, but the exchange owns the fill
+
+	if n := len(b.byType(strategy.OrderMarket)); n != 0 {
+		t.Fatalf("resting-TP mode must not place a market close, got %d", n)
+	}
+	g.OnFill(ctx, strategy.Fill{Symbol: "ETHUSDT", Qty: 1, Price: 115, Reason: "guardian_resting_tp"})
+	if g.phase != PhaseClosed {
+		t.Fatalf("OnFill of the resting take-profit should mark phase Closed, got %s", g.phase)
+	}
+}
+
+func TestGuardian_FallsBackToTickCloseWhenRestingTPUnsupported(t *testing.T) {
+	g := NewGuardian("ETHUSDT", NewProtection(SideLong, 100, 1, tpCfg(), 0), 14, zap.NewNop())
+	g.SetRestingTP(true)
+	b := &relBroker{noRestingTP: true}
+	ctx := strategy.NewContext(&gPortfolio{qty: 1, avg: 100}, b, zap.NewNop())
+
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // arm; resting TP returns "" → fallback
+	if g.restingTPMode {
+		t.Fatal("should have fallen back to tick mode when resting take-profit unsupported")
+	}
+	g.OnTick(ctx, 116) // TP hit -> fallback market close
+	if n := len(b.byType(strategy.OrderMarket)); n != 1 {
+		t.Fatalf("fallback should place exactly 1 market close, got %d", n)
+	}
+}
+
+func TestGuardian_OnFill_RestingTPCancelsSiblingStop(t *testing.T) {
+	g, b, ctx := newRestingLongWithTP()
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // rest stop@95 + TP@115
+	stopID := g.stopOrderID
+	if stopID == "" {
+		t.Fatal("expected a resting stop order id")
+	}
+
+	g.OnFill(ctx, strategy.Fill{Symbol: "ETHUSDT", Qty: 1, Price: 115, Reason: "guardian_resting_tp"})
+	if g.phase != PhaseClosed {
+		t.Fatalf("resting take-profit fill should mark phase Closed, got %s", g.phase)
+	}
+	if g.stopOrderID != "" {
+		t.Fatal("sibling resting stop tracker must be cleared")
+	}
+	found := false
+	for _, id := range b.canceled {
+		if id == stopID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sibling resting stop %q must be cancelled, canceled=%v", stopID, b.canceled)
+	}
+}
+
+func TestGuardian_OnFill_RestingStopCancelsSiblingTP(t *testing.T) {
+	g, b, ctx := newRestingLongWithTP()
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // rest stop@95 + TP@115
+	tpID := g.tpOrderID
+	if tpID == "" {
+		t.Fatal("expected a resting take-profit order id")
+	}
+
+	g.OnFill(ctx, strategy.Fill{Symbol: "ETHUSDT", Qty: 1, Price: 95, Reason: "guardian_resting_stop"})
+	if g.phase != PhaseClosed {
+		t.Fatalf("resting stop fill should mark phase Closed, got %s", g.phase)
+	}
+	if g.tpOrderID != "" {
+		t.Fatal("sibling resting take-profit tracker must be cleared")
+	}
+	found := false
+	for _, id := range b.canceled {
+		if id == tpID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sibling resting take-profit %q must be cancelled, canceled=%v", tpID, b.canceled)
+	}
+}
+
+func TestGuardian_OnFill_UntaggedFillCancelsBothRestingOrders(t *testing.T) {
+	// Some fill paths (e.g. restart recovery) don't carry a Reason. Without
+	// it we can't tell which leg filled, so both must be cancelled — the one
+	// that actually filled is a harmless no-op cancel, but skipping the
+	// genuine sibling would orphan it on the exchange.
+	g, b, ctx := newRestingLongWithTP()
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
+	stopID, tpID := g.stopOrderID, g.tpOrderID
+
+	g.OnFill(ctx, strategy.Fill{Symbol: "ETHUSDT", Qty: 1, Price: 115})
+	if g.phase != PhaseClosed {
+		t.Fatalf("untagged fill while a resting order is live should still mark phase Closed, got %s", g.phase)
+	}
+	canceled := map[string]bool{}
+	for _, id := range b.canceled {
+		canceled[id] = true
+	}
+	if !canceled[stopID] || !canceled[tpID] {
+		t.Fatalf("both resting orders must be cancelled defensively, canceled=%v", b.canceled)
+	}
+}
+
+func TestGuardian_ResizesRestingTPWhenPositionChanges(t *testing.T) {
+	g, _, _ := newRestingLongWithTP()
+	pf := &gPortfolio{qty: 1, avg: 100}
+	b := &relBroker{}
+	ctx := strategy.NewContext(pf, b, zap.NewNop())
+
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // resting TP qty 1
+	pf.qty = 2                                                              // user added to the position
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100}) // detect resize
+
+	to := b.byType(strategy.OrderLimit)
+	if to[len(to)-1].Qty != 2 {
+		t.Fatalf("resting take-profit must resize to qty 2, got %v", to[len(to)-1].Qty)
+	}
+}
+
+func TestGuardian_ForceResyncRestingTP_OnParamUpdate(t *testing.T) {
+	g, b, ctx := newRestingLongWithTP() // tp = 115
+	g.OnBar(ctx, exchange.Kline{Open: 100, High: 101, Low: 99, Close: 100})
+	firstTP := g.tpOrderID
+	if firstTP == "" {
+		t.Fatal("expected an initial resting take-profit")
+	}
+
+	if err := g.UpdateParams(ctx, map[string]any{
+		"StopValue": 0.05, "TPMode": "r", "TPValue": 5.0, // tp -> 100 + 5*5 = 125
+	}); err != nil {
+		t.Fatalf("UpdateParams: %v", err)
+	}
+	if g.prot.TPPrice() != 125 {
+		t.Fatalf("TP price should update to 125, got %v", g.prot.TPPrice())
+	}
+	to := b.byType(strategy.OrderLimit)
+	last := to[len(to)-1]
+	if last.Price != 125 {
+		t.Fatalf("resting take-profit should move to 125, got %v", last.Price)
+	}
+	if len(b.canceled) < 1 {
+		t.Fatal("old resting take-profit must be cancelled when replaced")
+	}
+
+	// Turning take-profit off must cancel the resting order and not replace it.
+	if err := g.UpdateParams(ctx, map[string]any{"StopValue": 0.05, "TPValue": 0.0}); err != nil {
+		t.Fatalf("UpdateParams: %v", err)
+	}
+	if g.tpOrderID != "" || g.restingTPMode {
+		t.Fatal("disabling take-profit must cancel the resting order and not replace it")
 	}
 }
 
