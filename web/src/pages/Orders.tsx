@@ -35,11 +35,24 @@ const inputCls = FILTER_INPUT_CLASS
 // 守护仓 = 守护你手动开的仓位;否则是机器人自动交易
 const isGuardian = (strategyId: string) => (strategyId || '').includes('guardian')
 
-// 一条记录只会是开仓或平仓之一(不会同时是两者),未成交时两者都显示 '—'。
+// 一条记录只会是开仓或平仓之一(不会同时是两者)。
 const entryExitPrice = (o: Order): { entry: string; exit: string } => {
-  if (o.avg_fill_price <= 0) return { entry: '—', exit: '—' }
-  const priceStr = o.avg_fill_price.toFixed(2)
-  return isClosingSide(o.side, o.position_side) ? { entry: '—', exit: priceStr } : { entry: priceStr, exit: '—' }
+  const closing = isClosingSide(o.side, o.position_side)
+  if (o.avg_fill_price > 0) {
+    // 部分成交时把"成交了多少"跟价格放在一起显示,不用再去对另一列的数字。
+    const partial = o.filled_quantity > 0 && o.filled_quantity < o.quantity
+    const label = partial
+      ? `${o.avg_fill_price.toFixed(2)} (${o.filled_quantity.toFixed(4)}/${o.quantity.toFixed(4)})`
+      : o.avg_fill_price.toFixed(2)
+    return closing ? { entry: '—', exit: label } : { entry: label, exit: '—' }
+  }
+  // 还没有任何成交:限价单本身挂着一个价,标"挂单价"以跟成交均价区分,不再显示成 '—'
+  // (止损市价单没有独立的价格字段,已经在"止损价"那一列单独显示,这里天然回退成 '—')。
+  if (o.price > 0) {
+    const label = `${o.price.toFixed(2)}(挂单价)`
+    return closing ? { entry: '—', exit: label } : { entry: label, exit: '—' }
+  }
+  return { entry: '—', exit: '—' }
 }
 
 // 订单类型的中文(未知类型原样显示)
