@@ -70,31 +70,13 @@ func (e *Engine) printStatus() {
 		)
 	}
 
-	// Push to WS dashboard via OnStatus callback (set by EngineManager when wsHub
-	// is wired). Includes engine-level metrics + any strategy-reported state.
-	if e.cfg.OnStatus != nil && e.cfg.UserID > 0 {
-		payload := map[string]any{
-			"engine_id":        e.cfg.StrategyID,
-			"uptime_sec":       int64(elapsed.Seconds()),
-			"wallet_balance":   e.broker.WalletBalance(),
-			"cash":             cash,
-			"equity":           equity,
-			"total_return_pct": totalReturn,
-			"realized_pnl":     rpnl,
-			"open_positions":   openPos,
-			"risk_halted":      e.risk.Halted(),
-		}
-		if e.org != nil {
-			payload["org_mode"] = e.org.Mode().String()
-			payload["org_decisions"] = e.org.Stats()
-		}
-		if sr, ok := e.strategy.(strategy.StatusReporter); ok {
-			for k, v := range sr.Status() {
-				payload["strat_"+k] = v
-			}
-		}
-		e.cfg.OnStatus(e.cfg.UserID, payload)
-	}
+	// WS push moved to pushLiveStatus (called on its own, faster ticker — see
+	// engine_run.go) so UI panels reading strategy state (e.g. guardian's
+	// "自动守仓" card: stop price, trail status) don't wait a full
+	// StatusInterval (default 1 minute) to refresh. Still called here too so
+	// the slow tick doesn't go a full interval without a push if the fast
+	// ticker's push were ever delayed.
+	e.pushLiveStatus()
 
 	// Stale bar detection: warn if no kline data for > 2× bar interval.
 	// For 5m bars, threshold = 10min; for 1m bars, threshold = max(2min, 2×1min).
@@ -129,6 +111,63 @@ func (e *Engine) printStatus() {
 			))
 		}
 	}
+}
+
+// pushLiveStatus sends the current engine + strategy status over WS via the
+// OnStatus callback (set by EngineManager when wsHub is wired). Split out of
+// printStatus so it can run on a much faster ticker than the log-writing,
+// DB-writing parts of the status cycle (2026-08-24 finding: guardian's "自动守
+// 仓" UI card — stop price, trail status — only refreshed once a minute, the
+// same cadence as the DB equity-snapshot write and the console log, even
+// though this push itself does no I/O of its own and is cheap to run far
+// more often).
+func (e *Engine) pushLiveStatus() {
+	if e.cfg.OnStatus == nil || e.cfg.UserID <= 0 {
+		return
+	}
+	e.fillMu.Lock()
+	rpnl := e.realizedPnL
+	e.fillMu.Unlock()
+	cash := e.broker.Cash()
+	equity := e.broker.Equity()
+	var totalReturn float64
+	if e.cfg.InitialCapital > 0 {
+		totalReturn = (equity/e.cfg.InitialCapital - 1) * 100
+	}
+	openPos := len(e.positions.All())
+	if e.posSyncer != nil {
+		if e.posSyncer.HasPosition("LONG") {
+			openPos = max(openPos, 1)
+		}
+		if e.posSyncer.HasPosition("SHORT") {
+			openPos = max(openPos, 1)
+		}
+		if e.posSyncer.HasPosition("LONG") && e.posSyncer.HasPosition("SHORT") {
+			openPos = max(openPos, 2)
+		}
+	}
+	elapsed := time.Since(e.startTime).Truncate(time.Second)
+	payload := map[string]any{
+		"engine_id":        e.cfg.StrategyID,
+		"uptime_sec":       int64(elapsed.Seconds()),
+		"wallet_balance":   e.broker.WalletBalance(),
+		"cash":             cash,
+		"equity":           equity,
+		"total_return_pct": totalReturn,
+		"realized_pnl":     rpnl,
+		"open_positions":   openPos,
+		"risk_halted":      e.risk.Halted(),
+	}
+	if e.org != nil {
+		payload["org_mode"] = e.org.Mode().String()
+		payload["org_decisions"] = e.org.Stats()
+	}
+	if sr, ok := e.strategy.(strategy.StatusReporter); ok {
+		for k, v := range sr.Status() {
+			payload["strat_"+k] = v
+		}
+	}
+	e.cfg.OnStatus(e.cfg.UserID, payload)
 }
 
 func (e *Engine) publishStatus() {

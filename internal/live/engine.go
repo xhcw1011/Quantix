@@ -397,6 +397,75 @@ func (e *Engine) ClosePosition(ctx context.Context, symbol, side string) (qty, f
 	return closeQty, fill.AvgPrice, nil
 }
 
+// Flatten cancels every resting order for `symbol` and market-closes any open
+// position on both sides. Used on a user-initiated stop, and by the circuit
+// breaker when it trips (see engine_run.go onBar: risk.Manager.Check rejects
+// every order forever once halted — including a replacement stop for whatever
+// remains open after AsymmetricExit's reduce cancels the old one — so without
+// an immediate flatten a halted position stays naked on the exchange for as
+// long as the engine keeps running, with no way for the strategy to ever
+// protect it again (2026-08-21 finding)).
+//
+// Order matters: cancel resting orders FIRST, so a protective stop can't fill
+// while we market-close below (which would double-close or flip the position).
+// Best-effort — it logs and continues past partial failures and returns the first
+// error seen, so one failing leg doesn't strand the rest.
+func (e *Engine) Flatten(ctx context.Context, symbol string) error {
+	var firstErr error
+	note := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	// 1) Wipe all resting orders (stops, TPs, unfilled limits) before closing.
+	if c, ok := e.broker.orderClient.(exchange.OpenOrdersCanceller); ok {
+		if err := c.CancelAllOpenOrders(ctx, symbol); err != nil {
+			e.log.Warn("flatten: cancel all resting orders failed",
+				zap.String("symbol", symbol), zap.Error(err))
+			note(err)
+		} else {
+			e.log.Info("flatten: cancelled all resting orders", zap.String("symbol", symbol))
+		}
+	}
+
+	// 2) Close every side that is actually open. Query once to decide which sides
+	//    to close (avoids ClosePosition's "no open X position" noise on a flat side).
+	pq, ok := e.broker.orderClient.(exchange.PositionQuerier)
+	if !ok {
+		return firstErr // spot/paper: no position query — orders were cancelled above
+	}
+	positions, err := pq.GetPositions(ctx)
+	if err != nil {
+		e.log.Warn("flatten: query positions failed", zap.String("symbol", symbol), zap.Error(err))
+		note(err)
+		return firstErr
+	}
+	openSides := map[string]bool{}
+	for _, p := range positions {
+		if p.Symbol != symbol || p.Amt == 0 {
+			continue
+		}
+		side := p.PositionSide
+		if side == "" || side == "BOTH" { // one-way/net: derive from the sign
+			if p.Amt > 0 {
+				side = "LONG"
+			} else {
+				side = "SHORT"
+			}
+		}
+		openSides[side] = true
+	}
+	for side := range openSides {
+		if _, _, err := e.ClosePosition(ctx, symbol, side); err != nil {
+			e.log.Warn("flatten: close position failed",
+				zap.String("symbol", symbol), zap.String("side", side), zap.Error(err))
+			note(err)
+		}
+	}
+	return firstErr
+}
+
 // ─── livePortfolioView ────────────────────────────────────────────────────────
 
 type livePortfolioView struct {

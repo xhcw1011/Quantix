@@ -141,6 +141,15 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 	statusTicker := time.NewTicker(statusInterval)
 	defer statusTicker.Stop()
 
+	// Separate, much faster ticker for the WS status push only (pushLiveStatus
+	// does no DB/log I/O — see engine_status.go). statusTicker stays slow so the
+	// console log and DB equity-snapshot write don't get 10x noisier; without
+	// this split, UI panels reading strategy state (guardian's stop price,
+	// trail status) waited a full StatusInterval — up to a minute — to refresh
+	// (2026-08-24 finding).
+	liveStatusTicker := time.NewTicker(5 * time.Second)
+	defer liveStatusTicker.Stop()
+
 	dailyTicker := time.NewTicker(24 * time.Hour)
 	defer dailyTicker.Stop()
 
@@ -333,7 +342,7 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 				ID: ord.ID + "-ws", Symbol: ord.Symbol,
 				Side: ord.Side, PositionSide: ord.PositionSide,
 				Qty: fill.FilledQty, Price: fill.AvgPrice,
-				Fee: fill.Fee, Timestamp: time.Now(),
+				Fee: fill.Fee, Reason: ord.Reason, Timestamp: time.Now(),
 			}
 			if err := e.omsInst.Fill(ord.ID, stratFill); err != nil {
 				// May already be filled by REST polling — that's OK. We lost
@@ -463,6 +472,9 @@ func (e *Engine) Run(ctx context.Context, klineCh <-chan exchange.Kline) error {
 			// Stale bar watchdog moved to independent goroutine (lines 282-298).
 			// Independent goroutine can detect freezes even when this select loop is blocked.
 
+		case <-liveStatusTicker.C:
+			e.pushLiveStatus()
+
 		case <-dailyTicker.C:
 			e.sendDailySummary()
 		}
@@ -574,6 +586,44 @@ func (e *Engine) onBar(bar exchange.Kline) {
 				drawdown = (1 - equity/e.cfg.InitialCapital) * 100
 			}
 			e.notifier.RiskAlert(e.cfg.StrategyID, err.Error(), equity, drawdown)
+		}
+		// The circuit breaker halts forever from here (risk.Manager never
+		// auto-resets): Check() will reject every order this engine ever
+		// tries to place again, including a replacement stop for whatever
+		// remains open after a reduce cancels the old one. Left alone that
+		// strands the position naked on the exchange for as long as the
+		// engine keeps running, with the strategy permanently unable to
+		// protect it (2026-08-21 finding — confirmed live: 22+ hours with a
+		// leveraged position and zero resting stop order after a trip).
+		// Flatten immediately so a halt always means "flat", never "exposed
+		// and unmanaged". UpdateEquity only returns this error once (the
+		// trip itself), so this runs exactly once per engine lifetime.
+		flattenCtx, flattenCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ferr := e.Flatten(flattenCtx, bar.Symbol)
+		flattenCancel()
+		if ferr != nil {
+			e.log.Error("风控：熔断后自动平仓失败，仓位可能仍未受保护",
+				zap.String("symbol", bar.Symbol), zap.Error(ferr))
+			if e.notifier != nil {
+				e.notifier.SystemAlert("CRITICAL", fmt.Sprintf(
+					"⚠️ 熔断触发后自动平仓失败(%s)，仓位可能仍在裸奔，请立即手动检查！", bar.Symbol))
+			}
+		} else {
+			e.log.Warn("风控：熔断已触发，已自动平仓", zap.String("symbol", bar.Symbol))
+			// Mirrors EngineManager.flattenEngine's cleanup for a user-initiated
+			// Stop (internal/api/manager.go): a successful flatten invalidates
+			// any guardian-specific persisted state (entryPlaced, stopOrderID,
+			// closing, …) pointing at orders/positions that no longer exist.
+			// The circuit-breaker path bypasses flattenEngine entirely (it calls
+			// Engine.Flatten directly), so without this the same staleness that
+			// prompted flattenEngine's cleanup was left unfixed here (2026-08-21
+			// audit finding). No-op for non-guardian engines.
+			if e.cfg.Store != nil {
+				if err := e.cfg.Store.DeleteGuardianState(context.Background(), e.cfg.UserID, e.cfg.StrategyID); err != nil {
+					e.log.Warn("风控：熔断后清理 guardian 状态失败",
+						zap.String("symbol", bar.Symbol), zap.Error(err))
+				}
+			}
 		}
 		return
 	}

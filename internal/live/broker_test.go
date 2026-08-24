@@ -54,6 +54,10 @@ type mockOrderClient struct {
 
 	positions    []exchange.PositionInfo
 	positionsErr error
+
+	cancelAllCalls  int
+	cancelAllSymbol string
+	cancelAllErr    error
 }
 
 // GetPositions implements exchange.PositionQuerier (used by Engine.ClosePosition).
@@ -61,6 +65,15 @@ func (m *mockOrderClient) GetPositions(_ context.Context) ([]exchange.PositionIn
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.positions, m.positionsErr
+}
+
+// CancelAllOpenOrders implements exchange.OpenOrdersCanceller (used by Engine.Flatten).
+func (m *mockOrderClient) CancelAllOpenOrders(_ context.Context, symbol string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cancelAllCalls++
+	m.cancelAllSymbol = symbol
+	return m.cancelAllErr
 }
 
 type mockStatusClient struct {
