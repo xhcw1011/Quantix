@@ -243,8 +243,16 @@ func (n *Notifier) sendCritical(text string) {
 
 func (n *Notifier) sendWithRetry(text string, retry bool) {
 	if n.bot != nil {
-		msg := tgbotapi.NewMessage(n.chatID, text)
-		msg.ParseMode = tgbotapi.ModeMarkdown
+		// Plain text, deliberately no ParseMode: every message here embeds
+		// dynamic content (symbols, strategy/engine IDs, free-text messages)
+		// that isn't escaped for Telegram's Markdown entity parser. A stray
+		// "[SYMBOL]" or similar was enough to make Telegram reject the whole
+		// message with "can't parse entities" — silently dropping alerts
+		// (2026-08-21 incident: every guardian "protection dropped"
+		// notification failed to send this way on a real-money account).
+		// Losing bold/italic styling is a fair trade for alerts that reliably
+		// arrive.
+		msg := tgbotapi.NewMessage(n.chatID, stripMarkdownMarkers(text))
 		if _, err := n.bot.Send(msg); err != nil {
 			n.log.Warn("Telegram send failed", zap.Error(err))
 			if retry {
@@ -269,13 +277,22 @@ func (n *Notifier) sendWithRetry(text string, retry bool) {
 	}
 }
 
-// splitSubjectBody strips markdown markers and splits into subject (first line) + body.
-func splitSubjectBody(text string) (subject, body string) {
+// stripMarkdownMarkers removes the decorative Markdown markers our templates
+// use (*bold*, `code`, _italic_) so they don't show up as literal characters
+// once rendered somewhere that doesn't parse Markdown — Telegram plain-text
+// sends (see sendWithRetry: dynamic content can't safely go through Telegram's
+// Markdown entity parser) and email alike.
+func stripMarkdownMarkers(text string) string {
 	plain := text
 	for _, ch := range []string{"*", "`", "_"} {
 		plain = strings.ReplaceAll(plain, ch, "")
 	}
-	plain = strings.TrimSpace(plain)
+	return plain
+}
+
+// splitSubjectBody strips markdown markers and splits into subject (first line) + body.
+func splitSubjectBody(text string) (subject, body string) {
+	plain := strings.TrimSpace(stripMarkdownMarkers(text))
 	if idx := strings.IndexByte(plain, '\n'); idx >= 0 {
 		return strings.TrimSpace(plain[:idx]), plain
 	}

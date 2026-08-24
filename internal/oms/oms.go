@@ -123,6 +123,7 @@ func (o *OMS) Submit(req strategy.OrderRequest, strategyID string) (*Order, erro
 		Qty:           req.Qty,
 		Price:         req.Price,
 		StopPrice:     req.StopPrice,
+		Reason:        req.Reason,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}

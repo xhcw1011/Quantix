@@ -57,7 +57,16 @@ type Order struct {
 	RejectReason string
 	// Role distinguishes auto-placed protective orders from regular entry orders.
 	// "" = normal entry order; "stop_loss" | "take_profit" = auto-placed by broker.
-	Role      string
+	Role string
+	// Reason carries the originating strategy.OrderRequest.Reason (e.g.
+	// "guardian_entry", "guardian_resting_stop") through to the live Fill
+	// event dispatched to strategy.OnFill. Without this, a strategy has no
+	// reliable way to tell which of its own orders a given fill belongs to
+	// (2026-08-21 finding: guardian's own late-entry-fill vs
+	// protective-close-fill disambiguation silently never worked in live
+	// trading because this never threaded through — only in the unit tests
+	// that construct Fill literals by hand).
+	Reason    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

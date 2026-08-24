@@ -59,6 +59,7 @@ func (b *Broker) pollOrderUntilFilled(ctx context.Context, sc exchange.OrderStat
 						Qty:          incrementalQty,
 						Price:        fill.AvgPrice,
 						Fee:          fill.Fee,
+						Reason:       req.Reason,
 						Timestamp:    time.Now(),
 					}
 					if fillErr := b.omsInst.Fill(ordID, stratFill); fillErr != nil {

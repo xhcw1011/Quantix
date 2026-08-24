@@ -83,6 +83,25 @@ func TestOMS_SubmitAndAccept(t *testing.T) {
 	assert.Equal(t, StatusOpen, got.Status)
 }
 
+// TestOMS_Submit_PropagatesReason is the regression test for the 2026-08-21
+// finding: OrderRequest.Reason (e.g. "guardian_entry") was dropped at
+// Submit() and never threaded through to the live Fill event dispatched to
+// strategy.OnFill, so a strategy could never actually tell which of its own
+// orders a fill belonged to in production -- only in unit tests that
+// construct Fill literals by hand with Reason set manually.
+func TestOMS_Submit_PropagatesReason(t *testing.T) {
+	o := newTestOMS()
+	req := buyReq("BTCUSDT")
+	req.Reason = "guardian_entry"
+	ord, err := o.Submit(req, "test")
+	require.NoError(t, err)
+	assert.Equal(t, "guardian_entry", ord.Reason)
+
+	got := o.Get(ord.ID)
+	require.NotNil(t, got)
+	assert.Equal(t, "guardian_entry", got.Reason)
+}
+
 func TestOMS_Fill_FullFill(t *testing.T) {
 	o := newTestOMS()
 	ord, _ := o.Submit(buyReq("BTCUSDT"), "test")

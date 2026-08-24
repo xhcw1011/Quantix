@@ -373,6 +373,7 @@ func (b *Broker) applyMarketFill(ordID string, req strategy.OrderRequest, posSid
 		Qty:          fill.FilledQty,
 		Price:        fill.AvgPrice,
 		Fee:          fill.Fee,
+		Reason:       req.Reason,
 		Timestamp:    time.Now(),
 	}
 	// fillErr != nil means this call LOST a race against another path
