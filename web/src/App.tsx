@@ -30,6 +30,17 @@ interface ErrorBoundaryState {
   error: Error | null
 }
 
+// Vite content-hashes each lazy chunk's filename; a deploy changes those
+// hashes and deletes the old files. A tab that was already open (or loaded
+// index.html from cache) before the deploy still tries to fetch the old,
+// now-404 chunk on its next route navigation — showing this boundary's
+// generic error instead of just picking up the new build. One automatic
+// reload fetches the current index.html (and its now-valid chunk hashes)
+// instead of leaving the user stuck; guarded to once per tab session so a
+// genuinely persistent failure (offline, real server outage) doesn't loop.
+const CHUNK_ERROR_RE = /dynamically imported module|Failed to fetch|Loading chunk|error loading dynamically/i
+const CHUNK_RELOAD_KEY = 'chunk-reload-attempted'
+
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
   ErrorBoundaryState
@@ -38,6 +49,13 @@ class ErrorBoundary extends React.Component<
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return { hasError: true, error }
+  }
+
+  componentDidCatch(error: Error) {
+    if (CHUNK_ERROR_RE.test(error?.message ?? '') && !sessionStorage.getItem(CHUNK_RELOAD_KEY)) {
+      sessionStorage.setItem(CHUNK_RELOAD_KEY, '1')
+      window.location.reload()
+    }
   }
 
   render() {
@@ -126,6 +144,10 @@ function ViewportManager() {
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  // A successful mount means this load's chunks are all valid — clear the
+  // guard so a chunk failure from a LATER deploy (later in this same tab
+  // session) can still trigger its own one-time auto-reload.
+  useEffect(() => { sessionStorage.removeItem(CHUNK_RELOAD_KEY) }, [])
   return (
     <ErrorBoundary>
       <ConfirmProvider>
