@@ -141,6 +141,11 @@ func parseProtection(p map[string]any) ProtectionConfig {
 		ActivateR:    floatOr(p, "ActivateR", 0.3),
 		TrailMode:    parseTrailMode(strOr(p, "TrailMode", "r")),
 		TrailValue:   floatOr(p, "TrailValue", 0.5),
+		// Default on at 70%: the fixed-distance trail alone (above) can give
+		// back nearly all of a large peak profit when R is itself large (see
+		// PeakProfitLockFrac doc). PeakLockPct (UI, percent) overrides below;
+		// API callers may pass PeakProfitLockFrac directly as a fraction.
+		PeakProfitLockFrac: floatOr(p, "PeakProfitLockFrac", 0.7),
 	}
 	// Take-profit: the UI sends only a value; a positive value means percent-of-
 	// entry unless an explicit mode is given, and 0 (or missing) means "no target".
@@ -169,6 +174,14 @@ func parseProtection(p map[string]any) ProtectionConfig {
 			prot.TrailEnabled = true
 			prot.ActivateR = taPct / prot.StopValue
 		}
+	}
+	// Peak-profit lock: UI sends PeakLockPct (fraction, e.g. 0.7 = keep at
+	// least 70% of the best P&L reached, converted from the displayed percent
+	// by the same pctOf1 UI convention as the fields above) — already a
+	// fraction of PeakR, so unlike TrailActivatePct/BreakEvenPct/PartialTPPct
+	// it needs no StopValue conversion. Absent = keep the default (70%).
+	if plPct := floatOr(p, "PeakLockPct", -1); plPct >= 0 {
+		prot.PeakProfitLockFrac = plPct
 	}
 	// Partial take-profit: UI sends PartialTPPct (profit % to bank a fraction);
 	// convert to R for the percentage stop. Fraction defaults to half.

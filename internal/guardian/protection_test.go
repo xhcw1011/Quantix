@@ -119,6 +119,74 @@ func TestProtection_BreakEvenShort(t *testing.T) {
 	}
 }
 
+// TestProtection_PeakProfitLockFrac_Long reproduces the 2026-08-24 real-money
+// shape: a modest peak (0.61R, matching the observed ~$11.7 peak on a $2400 R)
+// where a fixed 0.5R trail distance would consume most of that peak (leaving
+// only ~0.11R, ~18%) before triggering. PeakProfitLockFrac=0.7 should instead
+// lock in 70% of whatever peak was reached and trigger sooner, on the way
+// down, rather than waiting for the wider fixed-distance trail.
+func TestProtection_PeakProfitLockFrac_Long(t *testing.T) {
+	cfg := ProtectionConfig{
+		StopMode: StopPct, StopValue: 0.03, // R = 3 on entry 100
+		TrailEnabled: true, ActivateR: 0.3, TrailMode: TrailR, TrailValue: 0.5,
+		PeakProfitLockFrac: 0.7,
+	}
+	p := NewProtection(SideLong, 100, 1, cfg, 0) // stop=97, R=3
+
+	p.UpdateStop(101.83, 0) // pnlR 0.61 (peak) — lock candidate (101.281) beats trail candidate (100.33)
+	if !approx(p.Stop, 101.281) {
+		t.Fatalf("peak-lock should govern at the peak: stop=%v want 101.281", p.Stop)
+	}
+
+	p.UpdateStop(100.5, 0) // price pulls back; PeakR unchanged, stop must not move
+	if !approx(p.Stop, 101.281) {
+		t.Fatalf("stop must hold at the peak-lock level through a pullback: stop=%v want 101.281", p.Stop)
+	}
+	if !p.StopHit(100.5) {
+		t.Fatalf("100.5 <= peak-lock stop 101.281 should be a hit — this is the giveback the fix closes")
+	}
+	// Without the lock, the plain 0.5R trail would only have reached 100.33
+	// (0.11R of the 0.61R peak, ~18%) and would NOT have triggered yet at 100.5.
+}
+
+func TestProtection_PeakProfitLockFrac_Short(t *testing.T) {
+	cfg := ProtectionConfig{
+		StopMode: StopPct, StopValue: 0.03, // R = 3 on entry 100
+		TrailEnabled: true, ActivateR: 0.3, TrailMode: TrailR, TrailValue: 0.5,
+		PeakProfitLockFrac: 0.7,
+	}
+	p := NewProtection(SideShort, 100, 1, cfg, 0) // stop=103, R=3
+
+	p.UpdateStop(98.17, 0) // pnlR 0.61 (peak) — mirrors the long case
+	if !approx(p.Stop, 98.719) {
+		t.Fatalf("peak-lock should govern at the peak: stop=%v want 98.719", p.Stop)
+	}
+	p.UpdateStop(99.5, 0) // pulls back against the short; stop must hold
+	if !approx(p.Stop, 98.719) {
+		t.Fatalf("stop must hold through a pullback: stop=%v want 98.719", p.Stop)
+	}
+	if !p.StopHit(99.5) {
+		t.Fatalf("99.5 >= peak-lock stop 98.719 should be a hit")
+	}
+}
+
+// TestProtection_PeakProfitLockFrac_DisabledMatchesOldBehaviour confirms the
+// zero-value (unset in a literal ProtectionConfig, as every pre-existing test
+// in this file constructs it) leaves the plain distance-based trail as the
+// sole mechanism — no behaviour change for callers that don't opt in.
+func TestProtection_PeakProfitLockFrac_DisabledMatchesOldBehaviour(t *testing.T) {
+	cfg := ProtectionConfig{
+		StopMode: StopPct, StopValue: 0.03,
+		TrailEnabled: true, ActivateR: 0.3, TrailMode: TrailR, TrailValue: 0.5,
+		// PeakProfitLockFrac left at zero value.
+	}
+	p := NewProtection(SideLong, 100, 1, cfg, 0)
+	p.UpdateStop(101.83, 0) // pnlR 0.61 — with the lock off, plain trail governs
+	if !approx(p.Stop, 100.33) {
+		t.Fatalf("stop=%v want 100.33 (plain 0.5R trail, lock disabled)", p.Stop)
+	}
+}
+
 func TestProtection_TakeProfit(t *testing.T) {
 	// R-multiple TP, long: entry 100, R 5, TP 3R -> 115
 	p := NewProtection(SideLong, 100, 1, ProtectionConfig{

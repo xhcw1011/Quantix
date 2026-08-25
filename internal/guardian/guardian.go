@@ -1137,6 +1137,7 @@ func (g *Guardian) Status() map[string]any {
 			"StopValue":        g.cfg.StopValue * 100,
 			"BreakEvenPct":     g.cfg.BreakEvenAtR * g.cfg.StopValue * 100,
 			"TrailActivatePct": trailPct,
+			"PeakLockPct":      g.cfg.PeakProfitLockFrac * 100,
 			"PartialTPPct":     g.cfg.PartialTPAtR * g.cfg.StopValue * 100,
 			"TPValue":          tpPct,
 		},

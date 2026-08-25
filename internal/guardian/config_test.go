@@ -21,6 +21,9 @@ func TestParseConfig_Defaults(t *testing.T) {
 	if !gc.Prot.TrailEnabled || gc.Prot.ActivateR != 0.3 || gc.Prot.TrailMode != TrailR || gc.Prot.TrailValue != 0.5 {
 		t.Fatalf("default trail wrong: %+v", gc.Prot)
 	}
+	if gc.Prot.PeakProfitLockFrac != 0.7 {
+		t.Fatalf("default peak-profit lock should be 70%%, got %v", gc.Prot.PeakProfitLockFrac)
+	}
 	if gc.Prot.TPMode != TPNone {
 		t.Fatalf("default TP should be off, got %v", gc.Prot.TPMode)
 	}

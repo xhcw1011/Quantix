@@ -45,6 +45,20 @@ type ProtectionConfig struct {
 	TrailMode    TrailMode
 	TrailValue   float64
 
+	// PeakProfitLockFrac, once trailing has activated, additionally never lets
+	// the stop sit worse than locking in this fraction of the best P&L (in R)
+	// seen so far — independent of, and composed with, the TrailValue distance
+	// above (whichever of the two implies the tighter stop wins). The R/ATR
+	// trail sits a FIXED distance behind the peak; when the initial risk R is
+	// itself large (e.g. a wide %-stop on a high-priced asset), that fixed
+	// distance can equal most of the profit made, so a reversal near the peak
+	// gives back nearly everything even with trailing "on" (2026-08-24
+	// finding: a short peaked at ~$11.7 unrealised profit and closed at
+	// $1.82 — the ~$9.6 giveback was almost exactly the 0.5R trail distance).
+	// This ratchets a floor that scales with the profit actually achieved
+	// instead of with R. 0 = disabled (trail distance alone governs).
+	PeakProfitLockFrac float64
+
 	BreakEvenAtR float64 // once P&L >= this many R, move the stop to entry (0 = off)
 
 	PartialTPAtR      float64 // once P&L >= this many R, close PartialTPFraction of the position (0 = off)
@@ -175,6 +189,22 @@ func (p *Protection) UpdateStop(price, atr float64) {
 	} else {
 		if cand := price + trailDist; cand < p.Stop {
 			p.Stop = cand
+		}
+	}
+
+	// Peak-profit-percentage floor (see PeakProfitLockFrac doc): compared
+	// against the stop as it stands after the distance-based trail above, so
+	// whichever mechanism implies the tighter stop is the one that sticks.
+	if p.cfg.PeakProfitLockFrac > 0 {
+		lockR := p.PeakR * p.cfg.PeakProfitLockFrac
+		if p.Side == SideLong {
+			if cand := p.Entry + lockR*p.R; cand > p.Stop {
+				p.Stop = cand
+			}
+		} else {
+			if cand := p.Entry - lockR*p.R; cand < p.Stop {
+				p.Stop = cand
+			}
 		}
 	}
 }

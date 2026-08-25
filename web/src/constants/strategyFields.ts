@@ -87,6 +87,7 @@ export const STRATEGY_FIELDS: Record<string, FieldDef[]> = {
     { key: 'StopValue', label: '亏多少就自动平仓', type: 'number', default: 3, unit: '%', step: 0.5, pctOf1: true, min: 0.5, help: '亏到这个幅度就帮你平掉,保住本金。赚了之后它会自动把这条线往上抬,锁住利润。' },
     { key: 'BreakEvenPct', label: '赚多少就保本', type: 'number', default: 0, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '0 = 不设。赚到这个幅度后,止损自动移到成本价,这单就不会亏了。' },
     { key: 'TrailActivatePct', label: '赚多少就开始自动上移止损', type: 'number', default: 1, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '赚到这个幅度,止损就开始跟着价格自动往上抬、锁住利润(只进不退)。0 = 不自动上移,止损固定。' },
+    { key: 'PeakLockPct', label: '至少锁住历史最高浮盈的比例', type: 'number', default: 70, unit: '%', step: 5, pctOf1: true, min: 0, max: 100, help: '浮盈创新高后,就算价格回落,也保证止损线不会让你倒回去(至少留住峰值浮盈的这个比例)。0 = 不设,只看上面"自动上移止损"的固定跟踪距离。' },
     { key: 'PartialTPPct', label: '赚多少就先落袋一半', type: 'number', default: 0, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '0 = 不设。赚到这个幅度先平掉一半锁利,剩下一半继续让止损守着跑。' },
     { key: 'TPValue', label: '赚多少就全平落袋', type: 'number', default: 0, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '0 = 不设,让利润继续跑(靠自动上移的止损收尾)' },
   ],
