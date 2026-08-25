@@ -563,7 +563,7 @@ export default function Engine() {
               {fields.length > 0 && !isGuardianForm && (
                 <div className="bg-slate-900/40 border border-slate-700 rounded-lg p-3 space-y-3">
                   <span className="text-xs font-semibold text-slate-300">参数设置</span>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
                     {fields.map((f) => (
                       <div key={f.key}>
                         {f.type === 'boolean' ? (
@@ -869,7 +869,7 @@ export default function Engine() {
                   {showRisk ? '▾' : '▸'} Advanced Risk Settings
                 </button>
                 {showRisk && (
-                  <div className="grid grid-cols-3 gap-3 mt-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-2">
                     <div>
                       <label className="block text-xs text-slate-400 mb-1">Max Position %</label>
                       <NumberInput min={0.01} max={1}
