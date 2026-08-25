@@ -83,6 +83,16 @@ export const STRATEGY_FIELDS: Record<string, FieldDef[]> = {
     { key: 'TrailGivebackFrac', label: '回吐比例', type: 'number', default: 3, unit: '%', pctOf1: true, min: 1, max: 99,
       help: '从浮盈峰值回撤这么多比例就平仓离场' },
   ],
+  breakout: [
+    { key: 'EntryPeriod', label: '入场确认周期', type: 'number', default: 20, unit: '根K线', min: 2,
+      help: '价格创这么多根K线的新高就开多、创新低就开空(需下面开启双向)。2026-08-25回测:BTCUSDT 15分钟周期,这个值在5-60之间都是正收益。' },
+    { key: 'ExitPeriod', label: '离场通道周期', type: 'number', default: 96, unit: '根K线', min: 2,
+      help: '价格跌破这么多根K线的新低就平多、突破新高就平空。要明显比入场确认周期长,才不会一有正常回调就被震出场——这个"耐心"本身就是策略的关键,回测验证过改成灵敏跟踪反而大幅变差。' },
+    { key: 'EnableShort', label: '双向交易(做多做空)', type: 'boolean', default: true,
+      help: '关闭=只做多。开启后创新低会开空(需要交易所账户是对冲模式,否则下单会被拒);回测里空头贡献了不小一部分收益(比如暴跌行情)。' },
+    { key: 'StopLossPct', label: '硬止损(保险丝)', type: 'number', default: 5, unit: '%', step: 0.5, pctOf1: true, min: 0,
+      help: '离场通道之外的最后一道安全网,防止暴跌/插针来不及等到通道离场。回测本身不含这个止损,是上线前额外加的真钱保护,不建议设成0。' },
+  ],
   guardian: [
     { key: 'StopValue', label: '亏多少就自动平仓', type: 'number', default: 3, unit: '%', step: 0.5, pctOf1: true, min: 0.5, help: '亏到这个幅度就帮你平掉,保住本金。赚了之后它会自动把这条线往上抬,锁住利润。' },
     { key: 'BreakEvenPct', label: '赚多少就保本', type: 'number', default: 0, unit: '%', step: 0.5, pctOf1: true, min: 0, help: '0 = 不设。赚到这个幅度后,止损自动移到成本价,这单就不会亏了。' },

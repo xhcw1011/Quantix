@@ -45,6 +45,7 @@ import (
 	_ "github.com/Quantix/quantix/internal/guardian"
 	_ "github.com/Quantix/quantix/internal/strategy/aistrat"
 	_ "github.com/Quantix/quantix/internal/strategy/aistrat_v4"
+	_ "github.com/Quantix/quantix/internal/strategy/breakout"
 	_ "github.com/Quantix/quantix/internal/strategy/composite"
 	_ "github.com/Quantix/quantix/internal/strategy/dca"
 	_ "github.com/Quantix/quantix/internal/strategy/dipdca"

@@ -28,6 +28,7 @@ export const STRATEGIES: StrategyMeta[] = [
   { id: 'ai', name: '智能网格', desc: '震荡里低买高卖 + 趋势腿(合约)', market: 'futures', advanced: true },
   { id: 'macross', name: '趋势跟随', desc: '均线交叉,追涨杀跌(合约)', market: 'futures', advanced: true },
   { id: 'grid', name: '合约网格', desc: '经典网格,合约低买高卖', market: 'futures', advanced: true },
+  { id: 'breakout', name: '突破跟随', desc: '短周期确认突破/跌破开仓,长周期通道离场,不轻易反手(合约)', market: 'futures', advanced: true, defaultInterval: '15m' },
 ]
 
 export function strategyMeta(id: string): StrategyMeta | undefined {
